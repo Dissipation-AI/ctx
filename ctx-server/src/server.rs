@@ -142,6 +142,8 @@ pub struct Server {
     dirty: std::collections::BTreeSet<u64>,
     last_frame: Instant,
     server_exe: PathBuf,
+    /// Requests for tabs still starting, replayed at their first prompt.
+    starting: Vec<(usize, Envelope, Instant)>,
 }
 
 /// Run the server until it's told to stop. Returns an error message if it can't start.
@@ -238,6 +240,7 @@ impl Server {
             dirty: Default::default(),
             last_frame: Instant::now(),
             server_exe: exe,
+            starting: Vec::new(),
         };
         server.recover();
         Ok(server)
@@ -258,6 +261,11 @@ impl Server {
                 let _ = log.flush();
             }
             let _ = self.index.set_closed(t.number, at, "interrupted");
+            for c in self.index.commands(t.number).unwrap_or_default() {
+                if c.finished_ms.is_none() {
+                    let _ = self.index.finish_command(t.number, c.number, None, at.max(c.started_ms));
+                }
+            }
             interrupted.push((t.number, at));
         }
         // Windows as they were.
@@ -390,7 +398,27 @@ impl Server {
         }
     }
 
+    /// Replay held requests whose tab is ready (or all of them after 10 seconds).
+    fn replay_starting(&mut self, timed_out_only: bool) {
+        let held = std::mem::take(&mut self.starting);
+        for (key, env, at) in held {
+            let target = self.request_tab(key, &env.request);
+            let ready = target.and_then(|t| self.tabs.get(&t)).is_none_or(|t| t.at_prompt || !t.integration_expected);
+            let expired = at.elapsed() >= Duration::from_secs(10);
+            if (ready && !timed_out_only) || expired {
+                if self.clients.contains_key(&key) {
+                    self.on_request(key, env);
+                }
+            } else {
+                self.starting.push((key, env, at));
+            }
+        }
+    }
+
     fn timers(&mut self) {
+        if !self.starting.is_empty() {
+            self.replay_starting(true);
+        }
         let now = Instant::now();
         let ms = now_ms();
         // Waiters: time limits and quiet periods.
@@ -750,6 +778,25 @@ impl Server {
 
     fn on_request(&mut self, key: usize, env: Envelope) {
         let target = self.request_tab(key, &env.request);
+        // A tab whose shell hasn't shown its first prompt yet: hold the request until it has.
+        if let Some(t) = target
+            && let Some(tab) = self.tabs.get(&t)
+            && tab.integration_expected
+            && !tab.at_prompt
+            && tab.running.is_empty()
+            && tab.last_finished.is_none()
+            && now_ms() - tab.created_ms < 10_000
+            && !matches!(
+                env.request,
+                Request::ListCommands { .. }
+                    | Request::Read { .. }
+                    | Request::Records { .. }
+                    | Request::CloseTab { .. }
+            )
+        {
+            self.starting.push((key, env, Instant::now()));
+            return;
+        }
         self.log_request(key, &env, target);
         if let Some(c) = self.clients.get_mut(&key) {
             c.waiting = true;
@@ -2675,6 +2722,9 @@ impl Server {
         self.dirty.insert(n);
         self.enforce_memory(n);
         self.check_waiters(n, &fx);
+        if fx.prompt {
+            self.replay_starting(false);
+        }
         self.flush_tab(n);
     }
 

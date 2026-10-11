@@ -466,6 +466,8 @@ impl Tab {
             finished_ms: None,
             exit_status: None,
         });
+        // On disk at once: if the server dies, a reopened tab can still offer this command.
+        let _ = self.log.flush();
         self.at_prompt = false;
         self.typing = false;
         fx.started.push(number);
