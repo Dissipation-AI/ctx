@@ -136,6 +136,73 @@ A tab is its name in quotes, `tab <number>`, or `this tab`. A window is `window 
     out
 }
 
+/// The zsh completion function (`shell/_ctx`): verbs first, then the verb's nouns and phrase
+/// words, and tab names (in quotes) where a tab goes.
+pub fn zsh_completion() -> String {
+    let mut words = String::new();
+    let mut tab_slots = String::new();
+    for v in VERBS.iter().filter(|v| !v.hidden) {
+        let mut w: Vec<String> = Vec::new();
+        if let Object::Noun(nouns) = v.object {
+            w.extend(nouns.iter().map(|n| n.split(' ').next().unwrap_or(n).to_string()));
+        }
+        if v.object == Object::ReadSelector {
+            w.extend(["everything", "last", "command"].map(String::from));
+        }
+        let mut slots: Vec<&str> = Vec::new();
+        for slot in v.order {
+            if let Slot::Phrase(p) = slot {
+                w.push(p.words[0].to_string());
+                if matches!(p.kind, Kind::Tab | Kind::TabOrAllTabs | Kind::Condition) {
+                    slots.push(p.words[p.words.len() - 1]);
+                }
+            }
+        }
+        if matches!(v.object, Object::Kind(Kind::Tab) | Object::Kind(Kind::TabOrWindow) | Object::ReadSelector) {
+            slots.push(v.name);
+        }
+        w.sort();
+        w.dedup();
+        words.push_str(&format!("    {} '{}'\n", v.name, w.join(" ")));
+        tab_slots.push_str(&format!("    {} '{}'\n", v.name, slots.join(" ")));
+    }
+    let verbs: Vec<&str> = VERBS.iter().filter(|v| !v.hidden).map(|v| v.name).collect();
+    format!(
+        r#"#compdef ctx
+# zsh completion for ctx. Generated from ctx-cli/src/grammar.rs; don't edit by hand.
+
+_ctx() {{
+  local -a verbs
+  verbs=({verbs})
+  if (( CURRENT == 2 )); then
+    compadd -- $verbs
+    return
+  fi
+  local verb=${{words[2]}} prev=${{words[CURRENT-1]}}
+  local -A phrase_words tab_after
+  phrase_words=(
+{words}  )
+  tab_after=(
+{tab_slots}  )
+  if [[ " ${{tab_after[$verb]}} " == *" $prev "* ]]; then
+    local -a tabs
+    tabs=("${{(@f)$(command ctx completion-words tabs 2>/dev/null)}}")
+    local t
+    for t in $tabs; do
+      [[ -n $t ]] && compadd -Q -- ""$t""
+    done
+    compadd -- tab
+    return
+  fi
+  compadd -- ${{=phrase_words[$verb]}}
+}}
+
+compdef _ctx ctx 2>/dev/null
+"#,
+        verbs = verbs.join(" ")
+    )
+}
+
 /// A compact grammar for assist (kept under ~800 tokens so small models cope): each verb's
 /// sentence shape and one example.
 pub fn assist_summary() -> String {
@@ -186,6 +253,15 @@ mod tests {
     fn instructions_stay_short() {
         // ~4 characters per token: under ~400 tokens.
         assert!(agent_instructions().len() < 1700, "{}", agent_instructions().len());
+    }
+
+    #[test]
+    fn zsh_completion_is_current() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../shell/_ctx");
+        if std::fs::read_to_string(path).unwrap_or_default() != zsh_completion() {
+            std::fs::write(path, zsh_completion()).unwrap();
+            panic!("shell/_ctx was out of date and has been regenerated; commit it");
+        }
     }
 
     #[test]

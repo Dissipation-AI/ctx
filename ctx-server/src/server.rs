@@ -24,6 +24,7 @@ const SIGNALS: usize = 1;
 const TAB_KEY_BASE: usize = 1 << 40;
 const ZSHENV: &str = include_str!("../../shell/zsh/.zshenv");
 const CTX_ZSH: &str = include_str!("../../shell/ctx.zsh");
+const ZSH_COMPLETION: &str = include_str!("../../shell/_ctx");
 const REMOTE_BOOTSTRAP: &str = include_str!("../../shell/remote/bootstrap.sh");
 const REMOTE_BASH: &str = include_str!("../../shell/remote/ctx.bash");
 
@@ -244,6 +245,7 @@ impl Server {
         std::fs::write(zdotdir.join(".zshenv"), ZSHENV).map_err(|e| e.to_string())?;
         let integration = paths.runtime.join("ctx.zsh");
         std::fs::write(&integration, CTX_ZSH).map_err(|e| e.to_string())?;
+        std::fs::write(paths.runtime.join("_ctx"), ZSH_COMPLETION).map_err(|e| e.to_string())?;
 
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ctx"));
         let launch_path = exe.parent().map(|d| d.join("ctx-launch")).unwrap_or_else(|| PathBuf::from("ctx-launch"));
@@ -1616,6 +1618,7 @@ impl Server {
             }
             set(&mut env, "ZDOTDIR", self.zdotdir.display().to_string());
             set(&mut env, "CTX_INTEGRATION", self.integration.display().to_string());
+            set(&mut env, "CTX_COMPLETION", self.paths.runtime.join("_ctx").display().to_string());
         }
         env
     }

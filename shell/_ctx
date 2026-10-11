@@ -1,0 +1,80 @@
+#compdef ctx
+# zsh completion for ctx. Generated from ctx-cli/src/grammar.rs; don't edit by hand.
+
+_ctx() {
+  local -a verbs
+  verbs=(list read find ask status open close rename move clear reopen forget run type press wait show attach install remove mcp make rebuild restart help)
+  if (( CURRENT == 2 )); then
+    compadd -- $verbs
+    return
+  fi
+  local verb=${words[2]} prev=${words[CURRENT-1]}
+  local -A phrase_words tab_after
+  phrase_words=(
+    list 'activity as by closed commands in launchers since tabs up'
+    read 'as command everything in last up with'
+    find 'as at by in since up'
+    ask 'about as at by since within'
+    status 'as'
+    open 'as at in named tab window'
+    close 'as without'
+    rename 'as to'
+    move 'as position to'
+    clear 'as'
+    reopen 'as'
+    forget 'as without'
+    run 'as in up with within without'
+    type 'as into then'
+    press 'as in'
+    wait 'as until within'
+    show 'as'
+    attach 'to'
+    install 'as at for instructions'
+    remove 'as at for instructions launcher'
+    mcp ''
+    make 'allowing as at for launcher named signed'
+    rebuild 'as launcher'
+    restart 'as server without'
+    help ''
+  )
+  tab_after=(
+    list 'in'
+    read 'in read'
+    find 'in'
+    ask 'about'
+    status ''
+    open ''
+    close 'close'
+    rename 'rename'
+    move 'move'
+    clear 'clear'
+    reopen 'reopen'
+    forget 'forget'
+    run 'in'
+    type 'into'
+    press 'in'
+    wait 'until'
+    show 'show'
+    attach 'to'
+    install ''
+    remove ''
+    mcp ''
+    make ''
+    rebuild ''
+    restart ''
+    help ''
+  )
+  if [[ " ${tab_after[$verb]} " == *" $prev "* ]]; then
+    local -a tabs
+    tabs=("${(@f)$(command ctx completion-words tabs 2>/dev/null)}")
+    local t
+    for t in $tabs; do
+      [[ -n $t ]] && compadd -Q -- ""$t""
+    done
+    compadd -- tab
+    return
+  fi
+  compadd -- ${=phrase_words[$verb]}
+}
+
+compdef _ctx ctx 2>/dev/null

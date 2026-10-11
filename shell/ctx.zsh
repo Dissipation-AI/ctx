@@ -153,7 +153,11 @@ _ctx_deferred_init() {
     if [[ -n "$CTX_PREFILL" ]]; then
         builtin print -z -- "$CTX_PREFILL"
     fi
-    builtin unset CTX_PREFILL CTX_INTEGRATION
+    # Completion for ctx sentences (tab names complete in quotes), when completion is on.
+    if [[ -n "$CTX_COMPLETION" && -r "$CTX_COMPLETION" ]] && (( $+functions[compdef] )); then
+        builtin source "$CTX_COMPLETION"
+    fi
+    builtin unset CTX_PREFILL CTX_INTEGRATION CTX_COMPLETION
     _ctx_osc "6973;hello;1"
 }
 

@@ -61,6 +61,10 @@ pub fn run(args: &[String], caller: Caller) -> Out {
     if caller == Caller::Cli && args.len() == 2 && args[0] == "launcher-check" {
         return launchers::check(&args[1]);
     }
+    // Used by the zsh completion; not a sentence.
+    if caller == Caller::Cli && args.len() == 2 && args[0] == "completion-words" && args[1] == "tabs" {
+        return completion_tabs();
+    }
     match parse::parse(args, &context()) {
         Ok(s) => execute(s, caller),
         Err(e) => not_parsed(args, e),
@@ -133,6 +137,21 @@ fn not_parsed(args: &[String], e: parse::ParseError) -> Out {
     }
     out.ctx_error = true;
     out.code(1)
+}
+
+fn completion_tabs() -> Out {
+    let mut out = Out::default();
+    if let Ok(mut c) = Connection::open_quiet()
+        && let Ok(Response::Ok(Output::Tabs(list))) =
+            c.request(&Envelope { sentence: "ctx list tabs".into(), request: Request::ListTabs })
+    {
+        for t in list.windows.iter().flat_map(|w| w.tabs.iter()) {
+            if let Some(n) = &t.name {
+                out.line(n);
+            }
+        }
+    }
+    out
 }
 
 fn open_tab_names() -> Vec<String> {
