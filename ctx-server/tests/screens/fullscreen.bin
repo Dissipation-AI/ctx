@@ -1,0 +1,15 @@
+[?1049h[?25l[?1000h[?1006h[H[2J[1;1H[7m PID  NAME            CPU%  MEM   [0m[2;1H 101  server          [31m 12.5[0m  10M[3;1H 202  worker          [32m  3.1[0m  20M[4;1H 303  indexer         [32m  0.4[0m  30M[5;1H 404  日本語ツール    [32m  7.7[0m  40M[3;24H[33m 9.9[0m[10;20r[20;1H
+log 1
+log 2
+log 3
+log 4
+log 5
+log 6
+log 7
+log 8
+log 9
+log 10
+log 11
+log 12
+log 13
+log 14[r[22;1H[1mF1[0mHelp  [1mF10[0mQuit

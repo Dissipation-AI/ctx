@@ -248,7 +248,8 @@ impl Server {
         std::fs::write(&integration, CTX_ZSH).map_err(|e| e.to_string())?;
         std::fs::write(paths.runtime.join("_ctx"), ZSH_COMPLETION).map_err(|e| e.to_string())?;
         // bash tabs: the login files, then the same marks as the remote bash integration.
-        std::fs::write(paths.runtime.join("ctx.bashrc"), format!("{LOCAL_BASHRC}\n{REMOTE_BASH}")).map_err(|e| e.to_string())?;
+        std::fs::write(paths.runtime.join("ctx.bashrc"), format!("{LOCAL_BASHRC}\n{REMOTE_BASH}"))
+            .map_err(|e| e.to_string())?;
 
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ctx"));
         let launch_path = exe.parent().map(|d| d.join("ctx-launch")).unwrap_or_else(|| PathBuf::from("ctx-launch"));

@@ -1,0 +1,9 @@
+>>> import sys
+>>> print(6*7)
+42
+>>> for i in range(3): print("row", i)
+...
+row 0
+row 1
+row 2
+>>>

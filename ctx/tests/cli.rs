@@ -201,3 +201,86 @@ fn launchers_are_built_and_refuse_agents_arguments() {
     assert_eq!(s.ctx(&["run", "in", "L", "echoer"]).code, 0);
     s.ctx(&["remove", "launcher", "echoer"]).ok();
 }
+
+/// A user-level sshd on a free port with throwaway keys; `None` if it can't run here.
+fn local_sshd(dir: &std::path::Path) -> Option<(std::process::Child, std::path::PathBuf)> {
+    use std::process::{Command, Stdio};
+    if !std::path::Path::new("/usr/sbin/sshd").exists() {
+        return None;
+    }
+    let d = dir.join("sshd");
+    std::fs::create_dir_all(&d).ok()?;
+    for key in ["host_key", "user_key"] {
+        let ok = Command::new("ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+            .arg(d.join(key))
+            .status()
+            .ok()?
+            .success();
+        if !ok {
+            return None;
+        }
+    }
+    std::fs::copy(d.join("user_key.pub"), d.join("authorized_keys")).ok()?;
+    let port = 20000 + (std::process::id() % 20000) as u16;
+    let cfg = format!(
+        "Port {port}\nListenAddress 127.0.0.1\nHostKey {d}/host_key\nAuthorizedKeysFile {d}/authorized_keys\nPidFile {d}/sshd.pid\nStrictModes no\nUsePAM no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\n",
+        d = d.display()
+    );
+    std::fs::write(d.join("sshd_config"), cfg).ok()?;
+    let client = format!(
+        "Host testhost\n  HostName 127.0.0.1\n  Port {port}\n  IdentityFile {d}/user_key\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n  LogLevel ERROR\n",
+        d = d.display()
+    );
+    std::fs::write(d.join("ssh_config"), client).ok()?;
+    let child = Command::new("/usr/sbin/sshd")
+        .args(["-D", "-e", "-f"])
+        .arg(d.join("sshd_config"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    std::thread::sleep(std::time::Duration::from_millis(800));
+    let probe = Command::new("ssh")
+        .arg("-F")
+        .arg(d.join("ssh_config"))
+        .args(["testhost", "true"])
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    if !probe.status.success() {
+        let mut c = child;
+        let _ = c.kill();
+        return None;
+    }
+    Some((child, d.join("ssh_config")))
+}
+
+#[test]
+fn ssh_sessions_are_recorded_with_remote_marks() {
+    let s = Server::start("ssh");
+    let Some((mut sshd, cfg)) = local_sshd(&s.dir) else {
+        eprintln!("skipping: no usable sshd here");
+        return;
+    };
+    s.ctx(&["open", "tab", "named", "Remote", "at", "/tmp"]).ok();
+    s.ctx(&["run", "in", "Remote", &format!("ssh -F {} testhost", cfg.display()), "without", "waiting"]).ok();
+    // Wait for the remote prompt, then run commands there as if local.
+    s.ctx(&["wait", "until", "Remote", "is", "quiet", "for", "2", "seconds", "within", "20", "seconds"]).ok();
+    let o = s.ctx(&["run", "in", "Remote", "cd /usr && echo remote-$CTX_REMOTE && pwd"]);
+    assert_eq!(o.stdout, "remote-1\n/usr\n", "{}", o.stderr);
+    s.ctx(&["run", "in", "Remote", "exit", "within", "5", "seconds"]);
+    s.ctx(&["wait", "until", "Remote", "is", "idle", "within", "10", "seconds"]).ok();
+    let o = s.ctx(&["list", "commands", "in", "Remote", "as", "json"]).ok().stdout.clone();
+    let v: serde_json::Value = serde_json::from_str(&o).unwrap();
+    let remote =
+        v["commands"].as_array().unwrap().iter().find(|c| c["command"].as_str().unwrap().contains("remote-")).unwrap();
+    // Where it ran: the remote shell's own user, host and folder.
+    assert!(
+        remote["where"].as_str().unwrap().contains('@') && !remote["where"].as_str().unwrap().ends_with("/tmp"),
+        "{remote}"
+    );
+    let screen = s.ctx(&["read", "Remote"]).ok().stdout.clone();
+    assert!(screen.contains("[ssh to testhost started") && screen.contains("[ssh to testhost ended"), "{screen}");
+    let _ = sshd.kill();
+}

@@ -1,0 +1,4 @@
+✓ Building ████████████ 100%
+  step 12 of 12
+  press q to quit
+done
