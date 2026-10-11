@@ -509,3 +509,14 @@ pub fn default_sigpipe() {
     // SAFETY: setting a signal disposition at startup.
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
 }
+
+unsafe extern "C" {
+    fn malloc_zone_pressure_relief(zone: *mut libc::c_void, goal: libc::size_t) -> libc::size_t;
+}
+
+/// Hand memory the allocator holds but doesn't use back to the system (after a flood of output).
+/// Returns the bytes released.
+pub fn release_free_memory() -> usize {
+    // SAFETY: a null zone means all zones; goal 0 means as much as possible.
+    unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), 0) }
+}

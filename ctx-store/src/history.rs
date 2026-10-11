@@ -84,9 +84,8 @@ impl History {
                     _ => {}
                 }
                 let line = format!("{EVENT_MARK}{}", event.line(at_ms, self.tz));
-                match self.unfinished.and_then(|n| self.commands.iter_mut().rev().find(|c| c.number == n)) {
-                    Some(c) => c.output.push(line.clone()),
-                    None => {}
+                if let Some(c) = self.unfinished.and_then(|n| self.commands.iter_mut().rev().find(|c| c.number == n)) {
+                    c.output.push(line.clone());
                 }
                 self.transcript.push(line);
             }

@@ -168,10 +168,22 @@ pub struct Server {
     server_exe: PathBuf,
     /// Requests for tabs still starting, replayed at their first prompt.
     starting: Vec<(usize, Envelope, Instant)>,
+    /// When free memory was last handed back.
+    relieved_at: i64,
 }
 
 /// Run the server until it's told to stop. Returns an error message if it can't start.
 pub fn run() -> Result<(), String> {
+    // macOS's allocator keeps freed large blocks for reuse; after a flood of output that's tens of
+    // megabytes held for nothing. Space-efficient mode hands them back. It's read when the
+    // process starts, so set it and start again (once).
+    if std::env::var_os("MallocSpaceEfficient").is_none() {
+        // SAFETY of set_var: single-threaded at this point, before anything reads the environment.
+        unsafe { std::env::set_var("MallocSpaceEfficient", "1") };
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let err = exec_self(&exe);
+        return Err(format!("couldn't start the server: {err}"));
+    }
     let mut server = Server::start()?;
     server.event_loop();
     server.shutdown();
@@ -265,6 +277,7 @@ impl Server {
             last_frame: Instant::now(),
             server_exe: exe,
             starting: Vec::new(),
+            relieved_at: 0,
         };
         server.recover();
         Ok(server)
@@ -469,6 +482,18 @@ impl Server {
         for i in fire.into_iter().rev() {
             let w = self.waiters.remove(i);
             self.fire_waiter(w, ms);
+        }
+        // Idle tabs give memory back (bounded work per turn), and once everything has been quiet
+        // for a while after output, the allocator returns what it no longer uses.
+        for tab in self.tabs.values_mut() {
+            if ms - tab.last_output_ms >= 2_000 {
+                tab.term.compact();
+            }
+        }
+        let last_output = self.tabs.values().map(|t| t.last_output_ms).max().unwrap_or(0);
+        if last_output > self.relieved_at && ms - last_output >= 2_000 {
+            self.relieved_at = ms;
+            sys::release_free_memory();
         }
         // Flush records every 30 seconds while output keeps coming.
         for tab in self.tabs.values_mut() {
@@ -2044,7 +2069,10 @@ impl Server {
         self.flush_tab(n);
         done(format!(
             "Typed into tab {n}{}.",
-            if then_press.is_some() { format!(" and pressed {}", then_press.unwrap()) } else { String::new() }
+            match &then_press {
+                Some(k) => format!(" and pressed {k}"),
+                None => String::new(),
+            }
         ))
     }
 
@@ -2379,7 +2407,7 @@ impl Server {
                 && t.current().is_some_and(|r| r.number == c.number)
             {
                 if let Some(r) = t.current() {
-                    output.extend(r.saved_tail.iter().cloned());
+                    output.extend(r.saved_tail.lines());
                 }
                 output.extend(t.live_rows(true));
             }
@@ -2770,7 +2798,7 @@ impl Server {
     // -----------------------------------------------------------------------------------------
 
     fn on_tab_readable(&mut self, n: u64) {
-        let mut buf = vec![0u8; 65536];
+        let mut buf = vec![0u8; 16384];
         let mut ended = false;
         let mut total = 0usize;
         loop {
@@ -2783,8 +2811,8 @@ impl Server {
                 Ok(k) => {
                     total += k;
                     self.on_tab_output(n, &buf[..k]);
-                    // Be fair to other tabs: at most 256 KB per turn.
-                    if total >= 256 * 1024 {
+                    // Be fair to other tabs: at most 32 KB per turn.
+                    if total >= 32 * 1024 {
                         break;
                     }
                 }
@@ -3267,7 +3295,7 @@ pub fn thousands(n: u64) -> String {
     let s = n.to_string();
     let mut out = String::new();
     for (i, c) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i) % 3 == 0 {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);

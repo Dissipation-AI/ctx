@@ -203,13 +203,13 @@ fn peel(verb: &'static Verb, tokens: &[Token], ctx: &Context) -> Result<Parts, P
     let mut phrases: BTreeMap<P, (Value, String)> = BTreeMap::new();
     let mut leftover: Vec<Token> = Vec::new();
     let mut i = 0;
-    'outer: while i < tokens.len() {
+    while i < tokens.len() {
         // Longest matching phrase first (`without asking` vs `without waiting`).
         let mut candidates: Vec<&Phrase> = phrases_of(verb)
             .filter(|p| p.words.iter().enumerate().all(|(k, w)| tokens.get(i + k).is_some_and(|t| t.is_word(w))))
             .collect();
         candidates.sort_by_key(|p| std::cmp::Reverse(p.words.len()));
-        for p in candidates {
+        if let Some(p) = candidates.first() {
             let start = i + p.words.len();
             let (value, used, shown) = parse_value(p.kind, &tokens[start..], ctx, p)?;
             let mut end = start + used;
@@ -223,7 +223,7 @@ fn peel(verb: &'static Verb, tokens: &[Token], ctx: &Context) -> Result<Parts, P
             }
             phrases.insert(p.id, (value, shown));
             i = end;
-            continue 'outer;
+            continue;
         }
         leftover.push(tokens[i].clone());
         i += 1;
@@ -456,8 +456,7 @@ fn parse_time(tokens: &[Token], ctx: &Context) -> Option<(i64, usize, String)> {
 fn parse_keys(tokens: &[Token]) -> Result<(Vec<String>, usize), ParseError> {
     let mut keys = Vec::new();
     let mut i = 0;
-    loop {
-        let Some(t) = tokens.get(i) else { break };
+    while let Some(t) = tokens.get(i) {
         if !grammar::is_key(&t.text) || t.text.contains(' ') {
             return Err(ParseError::new(format!(
                 "\"{}\" isn't a key ctx knows. Keys are named like enter, escape, up, ctrl-c, f5.",
@@ -1106,8 +1105,8 @@ pub fn edit_distance(a: &str, b: &str) -> usize {
     for (i, row) in d.iter_mut().enumerate() {
         row[0] = i;
     }
-    for j in 0..=b.len() {
-        d[0][j] = j;
+    for (j, cell) in d[0].iter_mut().enumerate() {
+        *cell = j;
     }
     for i in 1..=a.len() {
         for j in 1..=b.len() {

@@ -126,12 +126,11 @@ fn wait_for_restart(socket: &std::path::Path) {
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(5) {
         std::thread::sleep(Duration::from_millis(50));
-        if let Ok(mut s) = UnixStream::connect(socket) {
-            if write_message(&mut s, &hello(ClientKind::Cli)).is_ok()
-                && let Ok(Some(Welcome::Accepted { .. })) = read_message::<Welcome>(&mut s)
-            {
-                return;
-            }
+        if let Ok(mut s) = UnixStream::connect(socket)
+            && write_message(&mut s, &hello(ClientKind::Cli)).is_ok()
+            && let Ok(Some(Welcome::Accepted { .. })) = read_message::<Welcome>(&mut s)
+        {
+            return;
         }
     }
 }

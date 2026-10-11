@@ -218,7 +218,7 @@ impl TabLog {
             std::fs::create_dir_all(dir)?;
         }
         let valid = if path.exists() { read_records(path)?.1 } else { 0 };
-        let file = OpenOptions::new().create(true).read(true).write(true).mode(0o600).open(path)?;
+        let file = OpenOptions::new().create(true).truncate(false).read(true).write(true).mode(0o600).open(path)?;
         file.set_len(valid)?;
         let mut file = file;
         file.seek(SeekFrom::End(0))?;
@@ -342,7 +342,7 @@ mod tests {
             "[renamed \"auth\" → \"Claude - auth refactor\"]"
         );
         assert_eq!(
-            Event::Reopened { reason: Some("reboot".into()), last_active_ms: at - 3600_000 }.line(at, 0),
+            Event::Reopened { reason: Some("reboot".into()), last_active_ms: at - 3_600_000 }.line(at, 0),
             "[reopened 2026-10-10 17:52 after reboot · last active 2026-10-10 16:52]"
         );
         assert_eq!(

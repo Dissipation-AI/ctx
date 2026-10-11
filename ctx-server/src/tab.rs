@@ -12,6 +12,50 @@ use std::os::fd::{AsRawFd, OwnedFd};
 
 /// Lines of a running command kept in memory for `run`'s answer (head and tail each).
 pub const KEEP_LINES: usize = 5000;
+/// Bytes of the newest output kept in memory for `run`'s answer.
+pub const TAIL_BYTES: usize = 512 * 1024;
+
+/// The newest lines of a command's output, within a byte budget, stored compactly: one text
+/// buffer and the lines' lengths (a string per line would cost ~10× for short lines).
+#[derive(Debug, Default)]
+pub struct LineRing {
+    text: VecDeque<u8>,
+    lens: VecDeque<u32>,
+    /// Lines pushed out of the front to stay within the budget.
+    pub dropped: u64,
+}
+
+impl LineRing {
+    pub fn push(&mut self, line: &str, budget: usize) {
+        self.text.extend(line.as_bytes());
+        self.lens.push_back(line.len() as u32);
+        while self.text.len() + self.lens.len() * 4 > budget && self.lens.len() > 1 {
+            let n = self.lens.pop_front().unwrap_or(0) as usize;
+            self.text.drain(..n);
+            self.dropped += 1;
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.lens.is_empty()
+    }
+
+    pub fn lines(&self) -> Vec<String> {
+        let (a, b) = self.text.as_slices();
+        let bytes: Vec<u8> = a.iter().chain(b.iter()).copied().collect();
+        let mut out = Vec::with_capacity(self.lens.len());
+        let mut pos = 0;
+        for &n in &self.lens {
+            out.push(String::from_utf8_lossy(&bytes[pos..pos + n as usize]).into_owned());
+            pos += n as usize;
+        }
+        out
+    }
+
+    pub fn clear(&mut self) {
+        *self = LineRing::default();
+    }
+}
 
 /// A command between its start (OSC 133;C) and end (OSC 133;D) marks.
 #[derive(Debug)]
@@ -25,16 +69,16 @@ pub struct Running {
     pub start_pin: Option<Pin>,
     /// First lines of output (up to KEEP_LINES).
     pub head: Vec<String>,
-    /// Last lines of output (up to KEEP_LINES), when there are more than fit in `head`.
-    pub tail: VecDeque<String>,
+    /// Last lines of output (about KEEP_LINES), when there are more than fit in `head`.
+    pub tail: LineRing,
     pub total_lines: u64,
     /// Lines waiting to be written to the record.
     pub unflushed: Vec<String>,
+    pub unflushed_bytes: u64,
     /// Bytes of output saved so far (the head part of the per-command cap).
     pub saved_bytes: u64,
     /// Past the head cap: the newest output, kept within the tail half of the cap.
-    pub saved_tail: VecDeque<String>,
-    pub saved_tail_bytes: u64,
+    pub saved_tail: LineRing,
     pub dropped_lines: u64,
     pub full_screen: bool,
     pub final_screen: Option<Vec<String>>,
@@ -61,27 +105,22 @@ impl Running {
         if self.head.len() < KEEP_LINES {
             self.head.push(line.clone());
         } else {
-            self.tail.push_back(line.clone());
-            if self.tail.len() > KEEP_LINES {
-                self.tail.pop_front();
-            }
+            self.tail.push(&line, TAIL_BYTES);
         }
         if line.starts_with(EVENT_MARK) {
             return;
         }
+        // The first half of the per-command cap goes to the record as it comes; after that only
+        // the newest half is kept (and saved when the command ends).
         let half = cap_bytes / 2;
-        if self.saved_bytes + line.len() as u64 <= half && self.saved_tail.is_empty() {
-            self.saved_bytes += line.len() as u64 + 1;
+        let cost = line.len() as u64 + 1;
+        if self.saved_bytes + cost <= half && self.saved_tail.is_empty() {
+            self.saved_bytes += cost;
+            self.unflushed_bytes += cost;
             self.unflushed.push(line);
         } else {
-            self.saved_tail_bytes += line.len() as u64 + 1;
-            self.saved_tail.push_back(line);
-            while self.saved_tail_bytes > half
-                && let Some(old) = self.saved_tail.pop_front()
-            {
-                self.saved_tail_bytes -= old.len() as u64 + 1;
-                self.dropped_lines += 1;
-            }
+            self.saved_tail.push(&line, half as usize);
+            self.dropped_lines = self.saved_tail.dropped;
         }
     }
 
@@ -89,8 +128,9 @@ impl Running {
     /// not kept.
     pub fn kept_output(&self) -> (Vec<String>, bool) {
         let mut out = self.head.clone();
-        let gap = self.total_lines > (self.head.len() + self.tail.len()) as u64;
-        out.extend(self.tail.iter().cloned());
+        let tail = self.tail.lines();
+        let gap = self.total_lines > (self.head.len() + tail.len()) as u64;
+        out.extend(tail);
         (out, gap)
     }
 }
@@ -230,6 +270,10 @@ impl Tab {
             }
         }
         self.place_queued_events(cx);
+        // A flood of output goes to disk in large pieces instead of piling up in memory.
+        if self.running.iter().any(|r| r.unflushed_bytes > 256 * 1024) {
+            self.flush(cx.now_ms);
+        }
         fx
     }
 
@@ -495,12 +539,12 @@ impl Tab {
             folder: self.folder.clone(),
             start_pin: pin,
             head: Vec::new(),
-            tail: VecDeque::new(),
+            tail: LineRing::default(),
             total_lines: 0,
             unflushed: Vec::new(),
+            unflushed_bytes: 0,
             saved_bytes: 0,
-            saved_tail: VecDeque::new(),
-            saved_tail_bytes: 0,
+            saved_tail: LineRing::default(),
             dropped_lines: 0,
             full_screen: false,
             final_screen: None,
@@ -557,6 +601,7 @@ impl Tab {
         if let Some(p) = cmd.partial.take() {
             cmd.push_line(p, cap);
         }
+        let _ = &cmd;
         for l in rest {
             cmd.push_line(l, cap);
         }
@@ -564,13 +609,16 @@ impl Tab {
         while cmd.head.last().is_some_and(|l| ctx_store::ansi::strip(l).trim().is_empty()) && cmd.tail.is_empty() {
             cmd.head.pop();
             cmd.total_lines -= 1;
-            if cmd.saved_tail.is_empty() {
+            if cmd.saved_tail.is_empty()
+                && cmd.unflushed.last().is_some_and(|l| ctx_store::ansi::strip(l).trim().is_empty())
+            {
                 cmd.unflushed.pop();
             }
         }
         self.flush_command_output(&mut cmd, cx.now_ms);
         if !cmd.saved_tail.is_empty() {
-            let lines: Vec<String> = cmd.saved_tail.drain(..).collect();
+            let lines: Vec<String> = cmd.saved_tail.lines();
+            cmd.saved_tail.clear();
             self.log.push(&Record::Output { command: Some(cmd.number), at_ms: cx.now_ms, lines });
         }
         if let Some(screen) = &cmd.final_screen {
@@ -590,6 +638,10 @@ impl Tab {
         cmd.finished_ms = Some(cx.now_ms);
         cmd.exit_status = status;
         fx.finished.push((cmd.number, status));
+        // What's on disk needn't stay in memory: keep only the head and tail for `run`'s answer.
+        cmd.unflushed = Vec::new();
+        cmd.saved_tail = LineRing::default();
+        cmd.head.shrink_to_fit();
         self.finished.push_back(cmd);
         while self.finished.len() > 4 {
             self.finished.pop_front();
@@ -600,6 +652,7 @@ impl Tab {
         if !cmd.unflushed.is_empty() {
             let lines = std::mem::take(&mut cmd.unflushed);
             self.log.push(&Record::Output { command: Some(cmd.number), at_ms: now_ms, lines });
+            cmd.unflushed_bytes = 0;
         }
     }
 
@@ -686,10 +739,9 @@ impl Tab {
         match self.running.last() {
             Some(cmd) => {
                 let mut lines: Vec<String> = Vec::new();
-                let kept: Vec<&String> =
-                    if cmd.tail.is_empty() { cmd.head.iter().collect() } else { cmd.tail.iter().collect() };
+                let kept: Vec<String> = if cmd.tail.is_empty() { cmd.head.clone() } else { cmd.tail.lines() };
                 let skip = kept.len().saturating_sub(n);
-                lines.extend(kept.into_iter().skip(skip).map(|l| plain_line(l)));
+                lines.extend(kept.iter().skip(skip).map(|l| plain_line(l)));
                 lines.extend(self.live_rows(false));
                 lines
             }

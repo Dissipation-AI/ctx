@@ -86,6 +86,10 @@ pub trait Terminal: std::fmt::Debug {
     fn focus_reporting(&self) -> bool;
     /// Estimated bytes held.
     fn memory_estimate(&self) -> u64;
+    /// Give memory back while the tab is idle (bounded work). Returns true when more remains.
+    fn compact(&mut self) -> bool {
+        false
+    }
     fn ghostty(&self) -> Option<&ghostty_vt::Terminal> {
         None
     }
@@ -102,6 +106,8 @@ pub struct Ghostty {
     event_pins: Vec<TrackedGridRef>,
     encoder: Encoder,
     events: Vec<TermEvent>,
+    /// Compression activity when the terminal was last compacted.
+    compacted_at: Option<ghostty_vt::terminal::CompressionActivity>,
 }
 
 impl std::fmt::Debug for Ghostty {
@@ -134,6 +140,7 @@ impl Ghostty {
             event_pins: Vec::new(),
             encoder: Encoder::new().expect("key encoder"),
             events: Vec::new(),
+            compacted_at: None,
         }
     }
 
@@ -387,19 +394,36 @@ impl Terminal for Ghostty {
                 _ => 0,
             },
         };
+        // Plain rows come from one formatting call for the whole batch; only rows with styles or
+        // links are formatted one by one (as SGR text).
+        let plain: Vec<String> = if next < history {
+            let batch = self.format_rows(next, history - 1, false);
+            let lines: Vec<String> = batch.split('\n').map(|l| l.trim_end_matches('\r').to_string()).collect();
+            if lines.len() as u64 == history - next { lines } else { Vec::new() }
+        } else {
+            Vec::new()
+        };
         while next < history {
             let y = next;
-            let text = self.format_rows(y, y, true);
-            let wraps = self.row_wraps(y);
+            let row =
+                self.t.grid_ref(Point::Screen(PointCoordinate { x: 0, y: y as u32 })).ok().and_then(|g| g.row().ok());
+            let styled = row.is_none_or(|r| r.is_styled().unwrap_or(true) || r.has_hyperlink().unwrap_or(true));
+            let wraps = row.is_some_and(|r| r.is_wrapped().unwrap_or(false));
+            let text = match plain.get((y - (history - plain.len() as u64)) as usize) {
+                Some(p) if !styled && !plain.is_empty() => p.clone(),
+                _ => self.format_rows(y, y, true),
+            };
             let mut event = false;
-            self.event_pins.retain(|p| match p.point(PointSpace::Screen) {
-                Ok(Some(pp)) if pp.y as u64 == y => {
-                    event = true;
-                    false
-                }
-                Ok(Some(_)) => true,
-                _ => false,
-            });
+            if !self.event_pins.is_empty() {
+                self.event_pins.retain(|p| match p.point(PointSpace::Screen) {
+                    Ok(Some(pp)) if pp.y as u64 == y => {
+                        event = true;
+                        false
+                    }
+                    Ok(Some(_)) => true,
+                    _ => false,
+                });
+            }
             out.push(HarvestedRow { text, wraps, event, y });
             next += 1;
         }
@@ -596,6 +620,21 @@ impl Terminal for Ghostty {
         // Ghostty pages: measured ~1.2 KB per row at 120 columns (see Phase 0 notes).
         let (cols, _) = self.size();
         self.total_rows() * (cols as u64 * 10 + 64)
+    }
+
+    fn compact(&mut self) -> bool {
+        use ghostty_vt::terminal::{CompressionMode, CompressionResult};
+        let activity = self.t.compression_activity().ok();
+        if activity.is_some() && activity == self.compacted_at {
+            return false;
+        }
+        match self.t.compress(CompressionMode::Incremental) {
+            Ok(CompressionResult::Pending) => true,
+            _ => {
+                self.compacted_at = self.t.compression_activity().ok();
+                false
+            }
+        }
     }
 
     fn ghostty(&self) -> Option<&ghostty_vt::Terminal> {
