@@ -28,7 +28,7 @@ fn run_read_wait_and_exit_statuses() {
     assert_eq!(v["schema"], 1);
     assert_eq!(v["commands"][1]["output"][0], "Listening on 4000");
     assert_eq!(v["commands"][1]["exit_status"], 0);
-    assert_eq!(v["commands"][1]["ran_by"].as_str().unwrap().contains("pid"), true);
+    assert!(v["commands"][1]["ran_by"].as_str().unwrap().contains("pid"));
     // A time limit on run: the command keeps going, exit status 3.
     let o = s.ctx(&["run", "in", "Work", "sleep 2; echo late", "within", "1", "second"]);
     assert_eq!(o.code, 3, "{}", o.stderr);
