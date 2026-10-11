@@ -1,0 +1,3 @@
+/target
+# Local build settings (paths to Zig 0.16 and Ghostty's source); see README.
+/.cargo/config.toml

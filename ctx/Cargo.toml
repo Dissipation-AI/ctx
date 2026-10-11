@@ -1,0 +1,15 @@
+[package]
+name = "ctx"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ctx-cli.workspace = true
+ctx-mcp.workspace = true
+ctx-protocol.workspace = true
+ctx-server.workspace = true
+libc.workspace = true
+serde_json.workspace = true
