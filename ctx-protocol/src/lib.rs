@@ -617,6 +617,9 @@ pub struct TabMemory {
 pub struct Opened {
     pub tab: Option<u64>,
     pub window: u64,
+    /// Set when a new window was opened (with its name, if given).
+    pub new_window: bool,
+    pub window_name: Option<String>,
     pub name: Option<String>,
     pub folder: String,
     /// Environment variables that were not restored (`reopen`).

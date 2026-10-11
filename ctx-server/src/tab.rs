@@ -583,8 +583,13 @@ impl Tab {
         if prompt_top.is_none() && cx != 0 && self.integration {
             return;
         }
+        let mut prompt_top = prompt_top;
         for line in std::mem::take(&mut self.event_queue) {
-            self.term.insert_event_line(&line, prompt_top);
+            prompt_top = self.term.insert_event_line(&line, prompt_top);
+        }
+        // Row anchors don't follow content moved inside a scroll region: pin the prompt again.
+        if let Some(y) = prompt_top {
+            self.prompt_pin = self.term.pin_screen_row(y);
         }
     }
 
@@ -619,6 +624,24 @@ impl Tab {
         out.extend(emu.into_iter().skip(skip));
         let out = out.into_iter().map(|l| if styled { l } else { plain_line(&l) }).collect();
         (out, total)
+    }
+
+    /// Recent output as plain text: the running command's latest output lines, or (with no
+    /// command running) the last lines of the tab. Never the command line someone typed.
+    pub fn recent_output(&self, n: usize) -> Vec<String> {
+        match self.running.last() {
+            Some(cmd) => {
+                let mut lines: Vec<String> = Vec::new();
+                let kept: Vec<&String> =
+                    if cmd.tail.is_empty() { cmd.head.iter().collect() } else { cmd.tail.iter().collect() };
+                let skip = kept.len().saturating_sub(n);
+                lines.extend(kept.into_iter().skip(skip).map(|l| plain_line(l)));
+                lines.extend(self.live_rows(false));
+                lines
+            }
+            None if self.integration => Vec::new(),
+            None => self.last_lines(n, false).0,
+        }
     }
 
     /// The visible screen as text, trailing blank rows removed.
@@ -687,7 +710,7 @@ pub fn tilde(path: &str, home: Option<&str>) -> String {
 /// A stored line as plain text: styles removed, event marker removed.
 pub fn plain_line(l: &str) -> String {
     let l = l.strip_prefix(EVENT_MARK).unwrap_or(l);
-    ctx_store::ansi::strip(l)
+    ctx_store::ansi::strip(l).trim_end().to_string()
 }
 
 /// A stored line for display: event marker turned into dim styling when styled.
@@ -696,6 +719,6 @@ pub fn display_line(l: &str, styled: bool) -> String {
         Some(ev) if styled => format!("\x1b[2m{}\x1b[0m", ctx_store::ansi::strip(ev)),
         Some(ev) => ctx_store::ansi::strip(ev),
         None if styled => l.to_string(),
-        None => ctx_store::ansi::strip(l),
+        None => ctx_store::ansi::strip(l).trim_end().to_string(),
     }
 }

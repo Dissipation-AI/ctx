@@ -98,7 +98,11 @@ pub fn render(o: &Output, st: &Style) -> Printed {
                         s.push_str(&format!(", in ssh to {h}"));
                     }
                     if t.unread_lines > 0 {
-                        s.push_str(&format!(", {} unread {}", thousands(t.unread_lines), if t.unread_lines == 1 { "line" } else { "lines" }));
+                        s.push_str(&format!(
+                            ", {} unread {}",
+                            thousands(t.unread_lines),
+                            if t.unread_lines == 1 { "line" } else { "lines" }
+                        ));
                     }
                     if let Some(l) = &t.permissions_of {
                         s.push_str(&format!(", running with the permissions of {l}"));
@@ -254,14 +258,18 @@ pub fn render(o: &Output, st: &Style) -> Printed {
             p.line(format!("saved tabs on disk: {}", megabytes(s.saved_bytes)));
         }
         Output::Opened(o) => {
-            match o.tab {
-                Some(n) => p.line(format!(
-                    "Opened tab {n}{} in window {} at {}.",
-                    o.name.as_ref().map(|n| format!(" \"{n}\"")).unwrap_or_default(),
-                    o.window,
-                    st.folder(&o.folder)
-                )),
-                None => p.line(format!("Opened window {}.", o.window)),
+            let tab = match o.tab {
+                Some(n) => format!("tab {n}{}", o.name.as_ref().map(|n| format!(" \"{n}\"")).unwrap_or_default()),
+                None => "a tab".into(),
+            };
+            if o.new_window {
+                let w = match &o.window_name {
+                    Some(n) => format!("window {} \"{n}\"", o.window),
+                    None => format!("window {}", o.window),
+                };
+                p.line(format!("Opened {w} with {tab} at {}.", st.folder(&o.folder)));
+            } else {
+                p.line(format!("Opened {tab} in window {} at {}.", o.window, st.folder(&o.folder)));
             }
             if !o.not_restored.is_empty() {
                 p.line(format!("Not restored (dont_save_env): {}.", o.not_restored.join(", ")));

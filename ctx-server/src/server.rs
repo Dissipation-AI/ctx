@@ -56,10 +56,26 @@ struct Client {
 
 #[derive(Debug)]
 enum WaitKind {
-    Run { command: String, number: Option<u64>, max_lines: usize, colors: bool, wait: bool, sent_at: Instant },
+    Run {
+        command: String,
+        number: Option<u64>,
+        max_lines: usize,
+        colors: bool,
+        wait: bool,
+        sent_at: Instant,
+    },
     Idle,
-    Shows { text: String, seen: u64 },
-    Quiet { ms: u64 },
+    Shows {
+        text: String,
+        seen: u64,
+    },
+    Quiet {
+        ms: u64,
+    },
+    /// A new tab: answer once its shell shows its first prompt.
+    Ready {
+        opened: Opened,
+    },
 }
 
 #[derive(Debug)]
@@ -932,7 +948,7 @@ impl Server {
                 let window = self.default_window(key);
                 let by = self.clients.get(&key).map(|c| c.identity.ran_by()).unwrap_or_else(|| "you".into());
                 match self.reopen_tab(tab, window, None, &by) {
-                    Ok(o) => ok(Output::Opened(o)),
+                    Ok(o) => self.when_ready(key, o),
                     Err(e) => {
                         self.windows.retain(|w| !w.tabs.is_empty());
                         Handled::Reply(Response::Error(e))
@@ -1174,21 +1190,46 @@ impl Server {
         self.new_window(None)
     }
 
+    /// Answer `open` once the new shell is ready for commands (its first prompt), so a `run`
+    /// right after `open` never races the shell's startup.
+    fn when_ready(&mut self, key: usize, o: Opened) -> Handled {
+        let ready = o.tab.and_then(|t| self.tabs.get(&t)).is_none_or(|t| !t.integration_expected || t.integration);
+        if ready {
+            return ok(Output::Opened(o));
+        }
+        let tab = o.tab.unwrap_or(0);
+        self.waiters.push(Waiter {
+            client: key,
+            tab,
+            kind: WaitKind::Ready { opened: o },
+            deadline: Some(Instant::now() + Duration::from_secs(10)),
+            started: Instant::now(),
+        });
+        Handled::Deferred
+    }
+
     fn open_window(&mut self, key: usize, folder: Option<String>, name: Option<String>) -> Handled {
         let name = match name {
-            Some(n) => match self.validate_name(&n, None, false) {
-                Ok(n) => Some(n),
+            Some(n) => match self.validate_name(&n, None, true) {
+                Ok(n) => {
+                    if self.windows.iter().any(|w| w.name.as_deref().is_some_and(|x| x.eq_ignore_ascii_case(&n))) {
+                        return err(ErrorKind::NotAllowed, format!("A window is already named \"{n}\"."));
+                    }
+                    Some(n)
+                }
                 Err(e) => return Handled::Reply(Response::Error(e)),
             },
             None => None,
         };
         let folder = folder.unwrap_or_else(sys::home);
-        let w = self.new_window(None);
+        let w = self.new_window(name.clone());
         let by = self.clients.get(&key).map(|c| c.identity.ran_by()).unwrap_or_else(|| "you".into());
-        match self.spawn_tab(None, w, &folder, name, &by, None) {
-            Ok(o) => {
+        match self.spawn_tab(None, w, &folder, None, &by, None) {
+            Ok(mut o) => {
                 self.last_window = Some(w);
-                ok(Output::Opened(o))
+                o.new_window = true;
+                o.window_name = name;
+                self.when_ready(key, o)
             }
             Err(e) => {
                 self.windows.retain(|x| x.number != w);
@@ -1231,7 +1272,7 @@ impl Server {
         });
         let by = self.clients.get(&key).map(|c| c.identity.ran_by()).unwrap_or_else(|| "you".into());
         match self.spawn_tab(None, w, &folder, name, &by, None) {
-            Ok(o) => ok(Output::Opened(o)),
+            Ok(o) => self.when_ready(key, o),
             Err(e) => {
                 self.windows.retain(|w| !w.tabs.is_empty());
                 Handled::Reply(Response::Error(e))
@@ -1408,7 +1449,7 @@ impl Server {
             w.tabs.push(number);
         }
         self.broadcast_tabs();
-        Ok(Opened { tab: Some(number), window, name, folder, not_restored })
+        Ok(Opened { tab: Some(number), window, new_window: false, window_name: None, name, folder, not_restored })
     }
 
     fn shell_env(&self, tab: u64, window: u64, is_zsh: bool) -> Vec<(String, String)> {
@@ -1887,10 +1928,9 @@ impl Server {
                 format!("To run a shell command, use: ctx run in {} {}", tab_ref_words(t), quote(text)),
             );
         }
-        let mut bytes = t.term.encode_paste(text);
-        if !t.term.bracketed_paste() {
-            bytes = text.as_bytes().to_vec();
-        }
+        // Typed exactly as keystrokes; multi-line text goes as a bracketed paste (when the
+        // program asked for that) so it doesn't run line by line.
+        let mut bytes = if text.contains('\n') { t.term.encode_paste(text) } else { text.as_bytes().to_vec() };
         if let Some(k) = &then_press {
             match t.term.encode_key(k) {
                 Some(b) => bytes.extend(b),
@@ -2727,13 +2767,14 @@ impl Server {
                         if t.output_seq > *seen {
                             let needle = text.to_lowercase();
                             // Look at recent lines (new output is near the bottom).
-                            let (lines, _) = t.last_lines(t.rows as usize * 2 + fx.new_lines as usize, false);
+                            let lines = t.recent_output(t.rows as usize * 2 + fx.new_lines as usize);
                             if lines.iter().any(|l| l.to_lowercase().contains(&needle)) {
                                 fire = true;
                             }
                         }
                     }
                     WaitKind::Quiet { .. } => {}
+                    WaitKind::Ready { .. } => fire = fx.prompt || t.integration,
                 }
             }
             if fire {
@@ -2762,8 +2803,14 @@ impl Server {
         let words = tab_ref_words(t);
         let name = t.name.clone();
         let response = match w.kind {
+            WaitKind::Ready { opened } => Response::Ok(Output::Opened(opened)),
             WaitKind::Run { command, number, max_lines, colors, wait, .. } => {
                 let tab_n = w.tab;
+                // The caller sees this output now.
+                if let Some(tm) = self.tabs.get_mut(&tab_n) {
+                    tm.unread_lines = 0;
+                }
+                let Some(t) = self.tabs.get(&tab_n) else { return };
                 match number {
                     None if timed_out => Response::Error(ErrorReply::new(
                         ErrorKind::TimeLimit,
@@ -2878,7 +2925,7 @@ impl Server {
                     ))
                 } else {
                     let needle = text.to_lowercase();
-                    let (lines, _) = t.last_lines(t.rows as usize * 2 + fx.new_lines as usize, false);
+                    let lines = t.recent_output(t.rows as usize * 2 + fx.new_lines as usize);
                     let line = lines.into_iter().rev().find(|l| l.to_lowercase().contains(&needle));
                     Response::Ok(Output::Waited(WaitResult {
                         tab: w.tab,

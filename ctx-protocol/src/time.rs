@@ -81,6 +81,9 @@ pub fn parse_iso(s: &str) -> Option<i64> {
 
 /// `2.4 seconds`, `3 minutes 5 seconds`, `1 hour 2 minutes`: whole words, as the spec asks.
 pub fn duration_words(seconds: f64) -> String {
+    if seconds < 0.1 {
+        return "under 0.1 seconds".into();
+    }
     if seconds < 10.0 {
         let rounded = (seconds * 10.0).round() / 10.0;
         let unit = if rounded == 1.0 { "second" } else { "seconds" };

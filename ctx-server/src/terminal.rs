@@ -6,10 +6,10 @@
 //! *harvested* exactly once, in order, so ctx can move them to its compressed store and its
 //! saved records.
 
-use ghostty_vt::fmt::Format;
+use ghostty_vt::fmt::{Format, Formatter, FormatterOptions};
 use ghostty_vt::key::{self, Encoder, Key, Mods};
 use ghostty_vt::screen::{Screen, TrackedGridRef};
-use ghostty_vt::selection::{FormatOptions, Selection};
+use ghostty_vt::selection::Selection;
 use ghostty_vt::terminal::{Mode, Point, PointCoordinate, PointSpace};
 use ghostty_vt::{Event, TerminalOptions};
 
@@ -62,10 +62,7 @@ pub trait Terminal: std::fmt::Debug {
         self.history_rows()
     }
     /// The visible screen, one string per row (trailing blank rows kept).
-    fn screen(&self, styled: bool) -> Vec<String> {
-        let top = self.active_top();
-        (0..self.size().1 as u64).map(|i| self.row(top + i, styled)).collect()
-    }
+    fn screen(&self, styled: bool) -> Vec<String>;
     /// Rows that have scrolled into history since the last call, oldest first.
     fn harvest(&mut self) -> Vec<HarvestedRow>;
     /// Screen row of the next row harvest() will return.
@@ -75,7 +72,10 @@ pub trait Terminal: std::fmt::Debug {
     fn pin_row(&self, pin: &Pin) -> Option<u64>;
     /// Draw a dimmed event line above the line at `prompt_top` (or the cursor's line) so it
     /// becomes part of the scrollback, without disturbing the program at the prompt.
-    fn insert_event_line(&mut self, text: &str, prompt_top: Option<u64>);
+    /// Returns where the prompt's top row is afterwards (screen row), when one was given.
+    fn insert_event_line(&mut self, text: &str, prompt_top: Option<u64>) -> Option<u64>;
+    /// Pin a screen row.
+    fn pin_screen_row(&mut self, y: u64) -> Option<Pin>;
     fn encode_key(&mut self, key: &str) -> Option<Vec<u8>>;
     fn encode_paste(&self, text: &str) -> Vec<u8>;
     /// Put back every mode a program can leave on (mouse, keypad, alternate screen…).
@@ -143,17 +143,35 @@ impl Ghostty {
 
     fn format_rows(&self, y0: u64, y1: u64, styled: bool) -> String {
         let cols = self.t.cols().unwrap_or(80);
-        let (Ok(a), Ok(b)) = (
-            self.t.grid_ref(Point::Screen(PointCoordinate { x: 0, y: y0 as u32 })),
-            self.t.grid_ref(Point::Screen(PointCoordinate { x: cols - 1, y: y1 as u32 })),
-        ) else {
+        self.format_points(
+            Point::Screen(PointCoordinate { x: 0, y: y0 as u32 }),
+            Point::Screen(PointCoordinate { x: cols - 1, y: y1 as u32 }),
+            styled,
+        )
+    }
+
+    /// One row of the active area (the program's screen, whichever buffer is in front).
+    pub fn active_row(&self, y: u16, styled: bool) -> String {
+        let cols = self.t.cols().unwrap_or(80);
+        self.format_points(
+            Point::Active(PointCoordinate { x: 0, y: y as u32 }),
+            Point::Active(PointCoordinate { x: cols - 1, y: y as u32 }),
+            styled,
+        )
+    }
+
+    fn format_points(&self, a: Point, b: Point, styled: bool) -> String {
+        let (Ok(a), Ok(b)) = (self.t.grid_ref(a), self.t.grid_ref(b)) else {
             return String::new();
         };
         let sel = Selection::new(a, b, false);
         let fmt = if styled { Format::Vt } else { Format::Plain };
-        let opts = FormatOptions::new().with_emit_format(fmt).with_trim(true).with_unwrap(false).with_selection(&sel);
-        match self.t.format_selection_alloc(opts) {
-            Ok(Some(bytes)) => {
+        // A formatter rather than the one-shot selection formatter: that one also emits the
+        // whole colour palette (OSC 4) in front of every row.
+        let opts = FormatterOptions::new().with_format(fmt).with_trim(true).with_unwrap(false).with_selection(&sel);
+        let out = Formatter::new(&self.t, opts).and_then(|mut f| f.format_alloc());
+        match out {
+            Ok(bytes) => {
                 let mut s = String::from_utf8_lossy(&bytes).into_owned();
                 while s.ends_with('\n') || s.ends_with('\r') {
                     s.pop();
@@ -341,6 +359,10 @@ impl Terminal for Ghostty {
         self.format_rows(y, y, styled)
     }
 
+    fn screen(&self, styled: bool) -> Vec<String> {
+        (0..self.size().1).map(|i| self.active_row(i, styled)).collect()
+    }
+
     fn row_wraps(&self, y: u64) -> bool {
         self.t
             .grid_ref(Point::Screen(PointCoordinate { x: 0, y: y as u32 }))
@@ -426,34 +448,40 @@ impl Terminal for Ghostty {
         pin.0.point(PointSpace::Screen).ok().flatten().map(|p| p.y as u64)
     }
 
-    fn insert_event_line(&mut self, text: &str, prompt_top: Option<u64>) {
-        let (cx, cy) = self.cursor();
+    fn pin_screen_row(&mut self, y: u64) -> Option<Pin> {
+        self.t.track_grid_ref(Point::Screen(PointCoordinate { x: 0, y: y as u32 })).ok().map(Pin)
+    }
+
+    fn insert_event_line(&mut self, text: &str, prompt_top: Option<u64>) -> Option<u64> {
+        let (_, cy) = self.cursor();
         let (_, rows) = self.size();
         let top = self.history_rows();
-        // Active-screen row (1-based for escape sequences) where the event goes above.
+        // Active-screen row (0-based) that the event goes directly above.
         let anchor = match prompt_top {
-            Some(y) if y >= top => (y - top) as u16,
+            Some(y) if y >= top && y < top + rows as u64 => (y - top) as u16,
             _ => cy,
         };
         let line = format!("\x1b[0;2m{text}\x1b[0m");
-        let seq = if anchor == 0 {
-            // Nothing above: push the screen down one row (insert line) and keep the cursor
-            // with its text.
-            format!("\x1b7\x1b[1;1H\x1b[L{line}\x1b8\x1b[B")
+        let bottom_free = cy + 1 < rows && self.active_row(rows - 1, false).trim().is_empty();
+        let (seq, event_row) = if bottom_free {
+            // Room below: insert a line at the anchor, pushing the prompt (and cursor) down.
+            (format!("\x1b7\x1b[{r};1H\x1b[L\x1b[2K{line}\x1b8\x1b[B", r = anchor + 1), anchor)
+        } else if anchor == 0 {
+            // Prompt at the top of a full screen: nothing above to keep; insert anyway.
+            (format!("\x1b7\x1b[1;1H\x1b[L\x1b[2K{line}\x1b8\x1b[B"), 0)
         } else {
-            // Scroll rows 1..=anchor up by one inside a temporary scroll region, so the top row
-            // goes to scrollback, then write the event on the freed row just above the anchor.
-            format!("\x1b7\x1b[1;{anchor}r\x1b[{anchor};1H\n\x1b[r\x1b[{anchor};1H\x1b[2K{line}\x1b8", anchor = anchor)
+            // Screen full: scroll everything up one row (the top row goes to scrollback), then
+            // insert a line just above the prompt, which brings the prompt back to its row.
+            (format!("\x1b7\x1b[{rows};1H\n\x1b[{r};1H\x1b[L\x1b[2K{line}\x1b8", r = anchor), anchor - 1)
         };
-        let _ = (cx, rows);
         self.t.vt_write(seq.as_bytes());
-        // Drain any replies the sequence produced (none expected).
         let _ = self.t.events().count();
         let top = self.history_rows();
-        let event_row = if anchor == 0 { top } else { top + anchor as u64 - 1 };
+        let event_row = top + event_row as u64;
         if let Ok(p) = self.t.track_grid_ref(Point::Screen(PointCoordinate { x: 0, y: event_row as u32 })) {
             self.event_pins.push(p);
         }
+        prompt_top.map(|_| event_row + 1)
     }
 
     fn encode_key(&mut self, key_name: &str) -> Option<Vec<u8>> {
@@ -628,6 +656,47 @@ mod tests {
         assert_eq!(events, vec!["[renamed \"a\" -> \"b\"]".to_string()]);
         let plain: Vec<String> = rows.iter().map(|r| ctx_store::ansi::strip(&r.text)).collect();
         assert_eq!(&plain[..3], &["one", "two", "[renamed \"a\" -> \"b\"]"]);
+    }
+
+    #[test]
+    fn two_events_above_a_prompt_keep_their_order() {
+        let mut t = Ghostty::new(40, 6);
+        t.write(b"out 1\r\nout 2\r\n");
+        let top = Some(t.history_rows() + t.cursor().1 as u64);
+        t.write(b"$ ");
+        let top = t.insert_event_line("[first]", top);
+        t.insert_event_line("[second]", top);
+        let screen = t.screen(false);
+        let cy = t.cursor().1 as usize;
+        assert_eq!(screen[cy], "$");
+        assert_eq!(screen[cy - 1], "[second]");
+        assert_eq!(screen[cy - 2], "[first]");
+        assert_eq!(screen[cy - 3], "out 2");
+    }
+
+    #[test]
+    fn events_above_a_prompt_on_the_second_row_and_at_the_bottom() {
+        let mut t = Ghostty::new(40, 4);
+        t.write(b"[opened]\r\n");
+        let top = Some(t.history_rows() + t.cursor().1 as u64);
+        t.write(b"$ ");
+        let top = t.insert_event_line("[renamed]", top);
+        let _ = t.insert_event_line("[moved]", top);
+        let (all, _) = (0..t.history_rows() + 4).map(|y| t.row(y, false)).fold((Vec::new(), ()), |(mut v, _), r| {
+            v.push(r);
+            (v, ())
+        });
+        let all: Vec<String> = all.into_iter().filter(|l| !l.is_empty()).collect();
+        assert_eq!(all, vec!["[opened]", "[renamed]", "[moved]", "$"]);
+        // Prompt on the last row: earlier lines scroll into history.
+        let mut t = Ghostty::new(40, 3);
+        t.write(b"a\r\nb\r\n");
+        let top = Some(t.history_rows() + t.cursor().1 as u64);
+        t.write(b"$ ");
+        t.insert_event_line("[e]", top);
+        let all: Vec<String> = (0..t.history_rows() + 3).map(|y| t.row(y, false)).collect();
+        assert_eq!(all, vec!["a", "b", "[e]", "$"]);
+        assert_eq!(t.cursor(), (2, 2));
     }
 
     #[test]

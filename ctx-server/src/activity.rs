@@ -62,31 +62,46 @@ impl Identity {
     }
 }
 
+fn matches_agent(word: &str) -> Option<&'static str> {
+    let w = word.to_lowercase();
+    AGENTS.iter().copied().find(|a| w == *a || w.starts_with(&format!("{a}-")) || w.starts_with(&format!("{a}.")))
+}
+
+/// The agent a process is, judged by its name, its argv[0] and its executable's path (Claude
+/// Code's binary is named after its version, e.g. `~/.local/share/claude/versions/2.1.296`).
 fn agent_name(p: &sys::ProcInfo) -> Option<String> {
-    let name = p.name.to_lowercase();
-    if let Some(a) =
-        AGENTS.iter().find(|a| name == **a || name.starts_with(&format!("{a}-")) || name.starts_with(&format!("{a}.")))
+    if let Some(a) = matches_agent(&p.name) {
+        return Some(a.to_string());
+    }
+    let args = sys::proc_args(p.pid).unwrap_or_default();
+    if let Some(arg0) = args.first()
+        && let Some(a) = matches_agent(arg0.rsplit('/').next().unwrap_or(arg0))
     {
         return Some(a.to_string());
     }
-    // Agents that run as node or python scripts: look at the script name.
-    if ["node", "bun", "python", "python3", "deno"].contains(&name.as_str())
-        && let Some(args) = sys::proc_args(p.pid)
-    {
+    if let Some(path) = sys::proc_path(p.pid) {
+        let path = path.display().to_string().to_lowercase();
+        for a in AGENTS {
+            if path.contains(&format!("/{a}/versions/")) || path.ends_with(&format!("/{a}")) {
+                return Some(a.to_string());
+            }
+        }
+    }
+    // Agents that run as node, bun or python scripts: look at the script.
+    let name = p.name.to_lowercase();
+    if ["node", "bun", "python", "python3", "deno"].contains(&name.as_str()) {
         for a in args.iter().skip(1).take(3) {
-            let base = a.rsplit('/').next().unwrap_or(a).to_lowercase();
-            if let Some(agent) = AGENTS.iter().find(|ag| {
-                base == **ag
-                    || base.starts_with(&format!("{ag}-"))
-                    || base.starts_with(&format!("{ag}."))
-                    || a.contains(&format!("/{ag}/"))
-                    || a.contains(&format!("@{ag}"))
-            }) {
+            let base = a.rsplit('/').next().unwrap_or(a);
+            if let Some(agent) = matches_agent(base) {
                 return Some(agent.to_string());
             }
-            // e.g. @google/gemini-cli, @openai/codex
             if a.contains("gemini-cli") {
                 return Some("gemini".into());
+            }
+            for ag in AGENTS {
+                if a.contains(&format!("/{ag}/")) || a.contains(&format!("@{ag}")) {
+                    return Some(ag.to_string());
+                }
             }
         }
     }

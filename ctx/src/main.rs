@@ -15,6 +15,9 @@ use std::io::{IsTerminal, Read, Write};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) != Some("server") {
+        ctx_server::sys::default_sigpipe();
+    }
     let code = run(args);
     let _ = std::io::stdout().flush();
     std::process::exit(code);

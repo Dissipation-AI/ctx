@@ -503,3 +503,9 @@ impl Poller {
 fn events(write: bool) -> libc::c_short {
     if write { libc::POLLIN | libc::POLLOUT } else { libc::POLLIN }
 }
+
+/// Let a broken pipe end the program quietly, as command-line tools do (`ctx read … | head`).
+pub fn default_sigpipe() {
+    // SAFETY: setting a signal disposition at startup.
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+}
