@@ -69,6 +69,8 @@ SHIM
 import json, sys
 try:
     d = json.load(open(sys.argv[1]))
+    if isinstance(d, list):
+        d = next((x for x in reversed(d) if x.get("type") == "result"), {})
     u = d.get("usage", {})
     tin = u.get("input_tokens", 0) + u.get("cache_read_input_tokens", 0) + u.get("cache_creation_input_tokens", 0)
     print(tin, u.get("output_tokens", 0), d.get("num_turns", 0), d.get("total_cost_usd", 0))
