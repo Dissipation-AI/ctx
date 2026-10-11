@@ -10,6 +10,7 @@
 //! serialising: absent values are `None` and print as `null` in JSON.
 
 pub mod config;
+pub mod docs;
 pub mod time;
 pub mod toon;
 
@@ -535,6 +536,8 @@ pub struct TextOutput {
     pub tab: u64,
     pub tab_name: Option<String>,
     pub lines: Vec<String>,
+    /// Which of `lines` are event lines drawn by ctx, with their JSON forms.
+    pub events: Vec<EventLine>,
     /// Total lines available for this request before any cap.
     pub total_lines: u64,
     /// Said when output was capped, with the command that shows everything.
@@ -563,9 +566,20 @@ pub struct CommandRecord {
     /// Whether this was a full-screen program (only its final screen is kept).
     pub full_screen: bool,
     pub output: Vec<String>,
-    /// Lines of output in total (before any cap).
+    /// Which of `output` are event lines drawn by ctx, with their JSON forms.
+    pub events: Vec<EventLine>,
+    /// Lines of output in total (before any cap), event lines not counted.
     pub output_lines: u64,
     pub note: Option<String>,
+}
+
+/// An event line among other lines: its position (from 1) and its JSON form. In `as json` it
+/// prints as `{"line": 3, "event": "renamed", "at": "…", "from": "auth", "to": "…"}`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct EventLine {
+    pub line: u64,
+    /// The event's JSON form, as text (merged into the object in `as json`).
+    pub event: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -643,6 +657,8 @@ pub struct RunResult {
     pub still_running: bool,
     pub took_seconds: f64,
     pub output: Vec<String>,
+    /// Which of `output` are event lines drawn by ctx, with their JSON forms.
+    pub events: Vec<EventLine>,
     pub output_lines: u64,
     pub note: Option<String>,
 }
@@ -797,7 +813,47 @@ impl Output {
             Output::RanBy(v) => serde_json::to_value(v),
         }
         .expect("output types always serialise");
-        with_schema(inner)
+        with_schema(expand_events(inner))
+    }
+}
+
+/// Turn every `{"line": n, "event": "<json text>"}` into one object with the event's fields.
+fn expand_events(v: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match v {
+        Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (k, val) in map {
+                if k == "events"
+                    && let Value::Array(items) = &val
+                {
+                    let expanded: Vec<Value> = items
+                        .iter()
+                        .map(|item| {
+                            let line = item.get("line").cloned().unwrap_or(Value::Null);
+                            let parsed = item
+                                .get("event")
+                                .and_then(Value::as_str)
+                                .and_then(|t| serde_json::from_str::<Value>(t).ok());
+                            let mut m = serde_json::Map::new();
+                            m.insert("line".into(), line);
+                            if let Some(Value::Object(fields)) = parsed {
+                                for (fk, fv) in fields {
+                                    m.insert(fk, fv);
+                                }
+                            }
+                            Value::Object(m)
+                        })
+                        .collect();
+                    out.insert(k, Value::Array(expanded));
+                } else {
+                    out.insert(k, expand_events(val));
+                }
+            }
+            Value::Object(out)
+        }
+        Value::Array(items) => Value::Array(items.into_iter().map(expand_events).collect()),
+        other => other,
     }
 }
 

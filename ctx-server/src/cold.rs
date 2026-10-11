@@ -3,7 +3,7 @@
 //! in bytes; the oldest blocks go first. Cold blocks stay in RAM.
 
 use crate::terminal::HarvestedRow;
-use ctx_store::record::EVENT_MARK;
+use ctx_store::record::event_line;
 use std::collections::VecDeque;
 
 pub const BLOCK_LINES: usize = 256;
@@ -19,8 +19,8 @@ pub struct ColdStore {
     blocks: VecDeque<Block>,
     open: Vec<String>,
     open_bytes: usize,
-    /// A soft-wrapped line still being joined.
-    partial: Option<(String, bool)>,
+    /// A soft-wrapped line still being joined (and its event JSON, if it's an event line).
+    partial: Option<(String, Option<String>)>,
     /// Lines dropped to stay within budget.
     pub dropped_lines: u64,
     compressed_bytes: usize,
@@ -31,12 +31,15 @@ impl ColdStore {
     pub fn push_row(&mut self, row: &HarvestedRow) {
         let (mut text, event) = self.partial.take().unwrap_or_default();
         text.push_str(&row.text);
-        let event = event || row.event;
+        let event = event.or_else(|| row.event.clone());
         if row.wraps {
             self.partial = Some((text, event));
             return;
         }
-        let line = if event { format!("{EVENT_MARK}{text}") } else { text };
+        let line = match event {
+            Some(json) => event_line(&json, &text),
+            None => text,
+        };
         self.push_line(line);
     }
 
@@ -101,7 +104,10 @@ impl ColdStore {
     pub fn last(&self, n: usize) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         if let Some((p, e)) = &self.partial {
-            out.push(if *e { format!("{EVENT_MARK}{p}") } else { p.clone() });
+            out.push(match e {
+                Some(json) => event_line(json, p),
+                None => p.clone(),
+            });
         }
         for l in self.open.iter().rev() {
             if out.len() >= n {
@@ -141,7 +147,7 @@ mod tests {
     use super::*;
 
     fn row(t: &str, wraps: bool) -> HarvestedRow {
-        HarvestedRow { text: t.into(), wraps, event: false, y: 0 }
+        HarvestedRow { text: t.into(), wraps, event: None, y: 0 }
     }
 
     #[test]
@@ -171,8 +177,8 @@ mod tests {
         let mut c = ColdStore::default();
         c.push_row(&row("abc", true));
         c.push_row(&row("def", false));
-        c.push_row(&HarvestedRow { text: "[moved]".into(), wraps: false, event: true, y: 0 });
-        assert_eq!(c.all(), vec!["abcdef".to_string(), format!("{EVENT_MARK}[moved]")]);
+        c.push_row(&HarvestedRow { text: "[moved]".into(), wraps: false, event: Some("{}".into()), y: 0 });
+        assert_eq!(c.all(), vec!["abcdef".to_string(), event_line("{}", "[moved]")]);
     }
 
     #[test]

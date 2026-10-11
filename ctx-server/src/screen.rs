@@ -35,6 +35,12 @@ pub fn update(tab: &mut Tab, full: bool) -> Option<ScreenUpdate> {
         tab.render = Renderer::new();
     }
     let title = tab.title.clone();
+    let top = tab.term.active_top();
+    let event_rows: Vec<u16> = if tab.term.full_screen() {
+        Vec::new()
+    } else {
+        (0..tab.rows).filter(|y| tab.term.event_at(top + *y as u64).is_some()).collect()
+    };
     let number = tab.number;
     let full_screen = tab.term.full_screen();
     let term = tab.term.ghostty()?;
@@ -130,7 +136,7 @@ pub fn update(tab: &mut Tab, full: bool) -> Option<ScreenUpdate> {
                 }
             }
             let _ = row.set_dirty(false);
-            changed.push(RowUpdate { row: row_y, runs, event: false });
+            changed.push(RowUpdate { row: row_y, runs, event: event_rows.contains(&row_y) });
         }
     }
     let _ = snapshot.set_dirty(Dirty::Clean);

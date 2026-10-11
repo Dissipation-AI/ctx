@@ -20,8 +20,8 @@ pub struct HarvestedRow {
     pub text: String,
     /// The row soft-wraps into the next one.
     pub wraps: bool,
-    /// An event line drawn by ctx.
-    pub event: bool,
+    /// An event line drawn by ctx: its JSON form.
+    pub event: Option<String>,
     /// Screen row it had when harvested (for comparison with pins).
     pub y: u64,
 }
@@ -73,7 +73,9 @@ pub trait Terminal: std::fmt::Debug {
     /// Draw a dimmed event line above the line at `prompt_top` (or the cursor's line) so it
     /// becomes part of the scrollback, without disturbing the program at the prompt.
     /// Returns where the prompt's top row is afterwards (screen row), when one was given.
-    fn insert_event_line(&mut self, text: &str, prompt_top: Option<u64>) -> Option<u64>;
+    fn insert_event_line(&mut self, text: &str, json: &str, prompt_top: Option<u64>) -> Option<u64>;
+    /// The JSON form of the event line at a screen row, if it is one.
+    fn event_at(&self, y: u64) -> Option<String>;
     /// Pin a screen row.
     fn pin_screen_row(&mut self, y: u64) -> Option<Pin>;
     fn encode_key(&mut self, key: &str) -> Option<Vec<u8>>;
@@ -102,8 +104,8 @@ pub struct Ghostty {
     t: ghostty_vt::Terminal,
     /// Next row to harvest; None until there's any history.
     harvest_pin: Option<TrackedGridRef>,
-    /// Event lines not yet harvested.
-    event_pins: Vec<TrackedGridRef>,
+    /// Event lines not yet harvested, with their JSON forms.
+    event_pins: Vec<(TrackedGridRef, String)>,
     encoder: Encoder,
     events: Vec<TermEvent>,
     /// Compression activity when the terminal was last compacted.
@@ -413,11 +415,11 @@ impl Terminal for Ghostty {
                 Some(p) if !styled && !plain.is_empty() => p.clone(),
                 _ => self.format_rows(y, y, true),
             };
-            let mut event = false;
+            let mut event = None;
             if !self.event_pins.is_empty() {
-                self.event_pins.retain(|p| match p.point(PointSpace::Screen) {
+                self.event_pins.retain(|(p, json)| match p.point(PointSpace::Screen) {
                     Ok(Some(pp)) if pp.y as u64 == y => {
-                        event = true;
+                        event = Some(json.clone());
                         false
                     }
                     Ok(Some(_)) => true,
@@ -433,7 +435,7 @@ impl Terminal for Ghostty {
             let _ = self.t.set_scrollback_max_lines(Some(HOT_SCROLLBACK_LINES));
             let _ = self.t.set_scrollback_max_lines(None);
             // Event pins in pruned rows are gone with them.
-            self.event_pins.retain(|p| matches!(p.point(PointSpace::Screen), Ok(Some(_))));
+            self.event_pins.retain(|(p, _)| matches!(p.point(PointSpace::Screen), Ok(Some(_))));
             let remaining = self.history_rows();
             if remaining > 0 {
                 let point = Point::Screen(PointCoordinate { x: 0, y: (remaining - 1) as u32 });
@@ -476,7 +478,14 @@ impl Terminal for Ghostty {
         self.t.track_grid_ref(Point::Screen(PointCoordinate { x: 0, y: y as u32 })).ok().map(Pin)
     }
 
-    fn insert_event_line(&mut self, text: &str, prompt_top: Option<u64>) -> Option<u64> {
+    fn event_at(&self, y: u64) -> Option<String> {
+        self.event_pins
+            .iter()
+            .find(|(p, _)| p.point(PointSpace::Screen).ok().flatten().is_some_and(|pp| pp.y as u64 == y))
+            .map(|(_, j)| j.clone())
+    }
+
+    fn insert_event_line(&mut self, text: &str, json: &str, prompt_top: Option<u64>) -> Option<u64> {
         let (_, cy) = self.cursor();
         let (_, rows) = self.size();
         let top = self.history_rows();
@@ -503,7 +512,7 @@ impl Terminal for Ghostty {
         let top = self.history_rows();
         let event_row = top + event_row as u64;
         if let Ok(p) = self.t.track_grid_ref(Point::Screen(PointCoordinate { x: 0, y: event_row as u32 })) {
-            self.event_pins.push(p);
+            self.event_pins.push((p, json.to_string()));
         }
         prompt_top.map(|_| event_row + 1)
     }
@@ -681,7 +690,7 @@ mod tests {
     fn event_lines_are_harvested_as_events() {
         let mut t = Ghostty::new(40, 4);
         t.write(b"one\r\ntwo\r\n$ ");
-        t.insert_event_line("[renamed \"a\" -> \"b\"]", None);
+        t.insert_event_line("[renamed \"a\" -> \"b\"]", "{}", None);
         // The prompt stays on the cursor's row with the event just above it.
         let screen = t.screen(false);
         let cy = t.cursor().1 as usize;
@@ -691,7 +700,8 @@ mod tests {
             t.write(b"\r\nmore");
         }
         let rows = t.harvest();
-        let events: Vec<_> = rows.iter().filter(|r| r.event).map(|r| ctx_store::ansi::strip(&r.text)).collect();
+        let events: Vec<_> =
+            rows.iter().filter(|r| r.event.is_some()).map(|r| ctx_store::ansi::strip(&r.text)).collect();
         assert_eq!(events, vec!["[renamed \"a\" -> \"b\"]".to_string()]);
         let plain: Vec<String> = rows.iter().map(|r| ctx_store::ansi::strip(&r.text)).collect();
         assert_eq!(&plain[..3], &["one", "two", "[renamed \"a\" -> \"b\"]"]);
@@ -703,8 +713,8 @@ mod tests {
         t.write(b"out 1\r\nout 2\r\n");
         let top = Some(t.history_rows() + t.cursor().1 as u64);
         t.write(b"$ ");
-        let top = t.insert_event_line("[first]", top);
-        t.insert_event_line("[second]", top);
+        let top = t.insert_event_line("[first]", "{}", top);
+        t.insert_event_line("[second]", "{}", top);
         let screen = t.screen(false);
         let cy = t.cursor().1 as usize;
         assert_eq!(screen[cy], "$");
@@ -719,8 +729,8 @@ mod tests {
         t.write(b"[opened]\r\n");
         let top = Some(t.history_rows() + t.cursor().1 as u64);
         t.write(b"$ ");
-        let top = t.insert_event_line("[renamed]", top);
-        let _ = t.insert_event_line("[moved]", top);
+        let top = t.insert_event_line("[renamed]", "{}", top);
+        let _ = t.insert_event_line("[moved]", "{}", top);
         let (all, _) = (0..t.history_rows() + 4).map(|y| t.row(y, false)).fold((Vec::new(), ()), |(mut v, _), r| {
             v.push(r);
             (v, ())
@@ -732,7 +742,7 @@ mod tests {
         t.write(b"a\r\nb\r\n");
         let top = Some(t.history_rows() + t.cursor().1 as u64);
         t.write(b"$ ");
-        t.insert_event_line("[e]", top);
+        t.insert_event_line("[e]", "{}", top);
         let all: Vec<String> = (0..t.history_rows() + 3).map(|y| t.row(y, false)).collect();
         assert_eq!(all, vec!["a", "b", "[e]", "$"]);
         assert_eq!(t.cursor(), (2, 2));
@@ -742,7 +752,7 @@ mod tests {
     fn event_line_on_first_row() {
         let mut t = Ghostty::new(40, 4);
         t.write(b"$ ");
-        t.insert_event_line("[opened]", None);
+        t.insert_event_line("[opened]", "{}", None);
         let screen = t.screen(false);
         assert_eq!(screen[0], "[opened]");
         assert_eq!(screen[1], "$");

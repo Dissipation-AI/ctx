@@ -6,7 +6,7 @@ use crate::scan::{Mark, Piece, Scanner};
 use crate::terminal::{HarvestedRow, Pin, TermEvent, Terminal};
 use ctx_protocol::config::Config;
 use ctx_store::index::{CommandRow, Index};
-use ctx_store::record::{EVENT_MARK, Event, Record, TabLog};
+use ctx_store::record::{EVENT_MARK, Event, Record, TabLog, event_line, split_event_line};
 use std::collections::{BTreeMap, VecDeque};
 use std::os::fd::{AsRawFd, OwnedFd};
 
@@ -197,8 +197,8 @@ pub struct Tab {
     pub title: Option<String>,
     pub last_output_ms: i64,
     pub unread_lines: u64,
-    /// Event lines waiting for a place between output lines.
-    pub event_queue: Vec<String>,
+    /// Event lines waiting for a place between output lines: (text, JSON form).
+    pub event_queue: Vec<(String, String)>,
     /// Viewers (CTX.app subscriptions and attached terminals).
     pub viewers: usize,
     /// Output lines outside any command, waiting for the record (only without integration).
@@ -317,13 +317,16 @@ impl Tab {
                 if row.wraps {
                     cmd.partial = Some(text);
                 } else {
-                    let line = if row.event { format!("{EVENT_MARK}{text}") } else { text };
+                    let line = match &row.event {
+                        Some(json) => event_line(json, &text),
+                        None => text,
+                    };
                     cmd.push_line(line, cap);
                 }
                 return;
             }
         }
-        if !self.integration && !row.event {
+        if !self.integration && row.event.is_none() {
             let mut text = self.unmarked_partial.take().unwrap_or_default();
             text.push_str(&row.text);
             if row.wraps {
@@ -674,7 +677,7 @@ impl Tab {
     /// Record an event and show it as a dimmed line between output lines.
     pub fn add_event(&mut self, event: Event, cx: &Ctx) {
         self.log.push(&Record::Event { at_ms: cx.now_ms, event: event.clone() });
-        self.event_queue.push(event.line(cx.now_ms, cx.tz));
+        self.event_queue.push((event.line(cx.now_ms, cx.tz), event.json(cx.now_ms)));
         self.place_queued_events(cx);
     }
 
@@ -691,8 +694,8 @@ impl Tab {
             return;
         }
         let mut prompt_top = prompt_top;
-        for line in std::mem::take(&mut self.event_queue) {
-            prompt_top = self.term.insert_event_line(&line, prompt_top);
+        for (line, json) in std::mem::take(&mut self.event_queue) {
+            prompt_top = self.term.insert_event_line(&line, &json, prompt_top);
         }
         // Row anchors don't follow content moved inside a scroll region: pin the prompt again.
         if let Some(y) = prompt_top {
@@ -715,7 +718,10 @@ impl Tab {
             if self.term.row_wraps(y) {
                 partial = Some(text);
             } else {
-                emu.push(text);
+                match self.term.event_at(y) {
+                    Some(json) => emu.push(event_line(&json, &text)),
+                    None => emu.push(text),
+                }
             }
         }
         if let Some(p) = partial {
@@ -752,7 +758,18 @@ impl Tab {
 
     /// The visible screen as text, trailing blank rows removed.
     pub fn screen_text(&self, styled: bool) -> Vec<String> {
-        let mut rows = self.term.screen(styled);
+        let top = self.term.active_top();
+        let full = self.term.full_screen();
+        let mut rows: Vec<String> = self
+            .term
+            .screen(styled)
+            .into_iter()
+            .enumerate()
+            .map(|(i, r)| match (full, self.term.event_at(top + i as u64)) {
+                (false, Some(json)) => event_line(&json, &r),
+                _ => r,
+            })
+            .collect();
         while rows.last().is_some_and(|l| ctx_store::ansi::strip(l).trim().is_empty()) {
             rows.pop();
         }
@@ -846,13 +863,13 @@ pub fn tilde(path: &str, home: Option<&str>) -> String {
 
 /// A stored line as plain text: styles removed, event marker removed.
 pub fn plain_line(l: &str) -> String {
-    let l = l.strip_prefix(EVENT_MARK).unwrap_or(l);
+    let l = split_event_line(l).map(|(_, t)| t).unwrap_or(l);
     ctx_store::ansi::strip(l).trim_end().to_string()
 }
 
 /// A stored line for display: event marker turned into dim styling when styled.
 pub fn display_line(l: &str, styled: bool) -> String {
-    match l.strip_prefix(EVENT_MARK) {
+    match split_event_line(l).map(|(_, t)| t) {
         Some(ev) if styled => format!("\x1b[2m{}\x1b[0m", ctx_store::ansi::strip(ev)),
         Some(ev) => ctx_store::ansi::strip(ev),
         None if styled => l.to_string(),

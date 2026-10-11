@@ -403,6 +403,7 @@ mod tests {
                 approximate: false,
                 full_screen: false,
                 output: vec!["test result: FAILED".into()],
+                events: vec![],
                 output_lines: 1,
                 note: None,
             }],

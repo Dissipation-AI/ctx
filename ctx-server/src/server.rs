@@ -2303,16 +2303,10 @@ impl Server {
                         ReadWhat::Screen => {
                             let s = t.screen_text(colors);
                             let len = s.len() as u64;
-                            (s.into_iter().map(|l| display_line(&l, colors)).collect::<Vec<_>>(), len)
+                            (s, len)
                         }
-                        ReadWhat::LastLines(k) => {
-                            let (l, total) = t.last_lines(k as usize, true);
-                            (l.into_iter().map(|l| display_line(&l, colors)).collect(), total)
-                        }
-                        _ => {
-                            let (l, total) = t.last_lines(usize::MAX, true);
-                            (l.into_iter().map(|l| display_line(&l, colors)).collect(), total)
-                        }
+                        ReadWhat::LastLines(k) => t.last_lines(k as usize, true),
+                        _ => t.last_lines(usize::MAX, true),
                     }
                 } else {
                     let h = match History::load(&self.paths.tab_log(n), self.tz) {
@@ -2326,11 +2320,12 @@ impl Server {
                         _ => usize::MAX,
                     };
                     let skip = h.transcript.len().saturating_sub(take);
-                    (h.transcript[skip..].iter().map(|l| display_line(l, colors)).collect(), total)
+                    (h.transcript[skip..].to_vec(), total)
                 };
                 let shown = lines.len() as u64;
                 let (lines, note) =
                     cap_lines(lines, max_lines.map(|m| m as usize), &format!("ctx read everything in {words}"));
+                let (lines, events) = present(lines, colors);
                 let note = note.or_else(|| {
                     if matches!(what, ReadWhat::LastLines(_)) && total > shown {
                         Some(format!(
@@ -2342,7 +2337,7 @@ impl Server {
                         None
                     }
                 });
-                ok(Output::Text(TextOutput { tab: n, tab_name: name, lines, total_lines: total, note }))
+                ok(Output::Text(TextOutput { tab: n, tab_name: name, lines, events, total_lines: total, note }))
             }
             ReadWhat::LastCommands(k) => {
                 let max = max_lines.unwrap_or(self.config.run_max_lines) as usize;
@@ -2413,13 +2408,9 @@ impl Server {
                 output.extend(t.live_rows(true));
             }
             let total = output.iter().filter(|l| !l.starts_with(EVENT_MARK)).count() as u64;
-            let shown: Vec<String> = output
-                .iter()
-                .filter(|l| events || !l.starts_with(EVENT_MARK))
-                .map(|l| display_line(l, colors))
-                .collect();
-            let (shown, mut note) =
-                cap_lines(shown, Some(max), &format!("ctx read command {} in {tab_words}", c.number));
+            let raw: Vec<String> = output.into_iter().filter(|l| events || !l.starts_with(EVENT_MARK)).collect();
+            let (raw, mut note) = cap_lines(raw, Some(max), &format!("ctx read command {} in {tab_words}", c.number));
+            let (shown, event_lines) = present(raw, colors);
             if c.dropped_lines > 0 {
                 let extra = format!(
                     "{} lines in the middle weren't saved (the per-command limit is {} MB)",
@@ -2443,6 +2434,7 @@ impl Server {
                 approximate: c.approximate,
                 full_screen: c.full_screen,
                 output: shown,
+                events: event_lines,
                 output_lines: total,
                 note,
             });
@@ -3028,6 +3020,7 @@ impl Server {
                             took_seconds: waited,
                             output_lines: lines.len() as u64,
                             output: lines,
+                            events: vec![],
                             note: Some("the shell didn't run it (see its message above)".into()),
                         }))
                     }
@@ -3048,9 +3041,9 @@ impl Server {
                             }
                             _ => (Vec::new(), false, 0, None, false),
                         };
-                        lines = lines.into_iter().map(|l| display_line(&l, colors)).collect();
                         let read_all = format!("ctx read command {num} in {words}");
-                        let (lines, mut note) = cap_lines(lines, Some(max_lines), &read_all);
+                        let (raw, mut note) = cap_lines(std::mem::take(&mut lines), Some(max_lines), &read_all);
+                        let (lines, events) = present(raw, colors);
                         if gap && note.is_none() {
                             note = Some(format!("some lines in the middle are not shown; {read_all} for all"));
                         }
@@ -3080,6 +3073,7 @@ impl Server {
                             still_running: still,
                             took_seconds: took,
                             output: lines,
+                            events,
                             output_lines: total,
                             note,
                         }))
@@ -3323,6 +3317,19 @@ fn cap_lines(lines: Vec<String>, max: Option<usize>, read_all: &str) -> (Vec<Str
         thousands(lines.len() as u64)
     );
     (out, Some(note))
+}
+
+/// Stored lines → lines to show (styled or plain) and where the event lines are.
+fn present(raw: Vec<String>, colors: bool) -> (Vec<String>, Vec<EventLine>) {
+    let mut events = Vec::new();
+    let mut shown = Vec::with_capacity(raw.len());
+    for (i, l) in raw.iter().enumerate() {
+        if let Some((json, _)) = ctx_store::record::split_event_line(l) {
+            events.push(EventLine { line: i as u64 + 1, event: json.to_string() });
+        }
+        shown.push(display_line(l, colors));
+    }
+    (shown, events)
 }
 
 /// Remove ctx's private OSC reports from bytes going to an attached terminal.

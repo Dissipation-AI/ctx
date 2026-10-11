@@ -13,6 +13,22 @@ use std::path::{Path, PathBuf};
 /// Prefix on an output line that is an event line drawn by ctx (never produced by a program:
 /// terminal cells can't hold control characters).
 pub const EVENT_MARK: char = '\u{1}';
+/// Separates an event line's JSON form from its text: `EVENT_MARK json EVENT_SEP text`.
+pub const EVENT_SEP: char = '\u{2}';
+
+/// A stored event line: marker, JSON form, separator, text.
+pub fn event_line(json: &str, text: &str) -> String {
+    format!("{EVENT_MARK}{json}{EVENT_SEP}{text}")
+}
+
+/// (JSON form, text) of a stored event line; `None` for ordinary output.
+pub fn split_event_line(l: &str) -> Option<(&str, &str)> {
+    let rest = l.strip_prefix(EVENT_MARK)?;
+    Some(match rest.split_once(EVENT_SEP) {
+        Some((json, text)) => (json, text),
+        None => ("", rest),
+    })
+}
 
 /// Something that happened *to* a tab, shown as a dimmed `[…]` line.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -40,6 +56,46 @@ impl Event {
             Event::ScreenCleared => "screen_cleared",
             Event::Closed => "closed",
         }
+    }
+
+    /// The JSON form shown in `as json` output, e.g. `{"event":"reopened","at":"…","reason":"reboot"}`.
+    pub fn json(&self, at_ms: i64) -> String {
+        use ctx_protocol::time::iso_utc;
+        let mut m = serde_json::Map::new();
+        m.insert("event".into(), self.word().into());
+        m.insert("at".into(), iso_utc(at_ms).into());
+        match self {
+            Event::Opened { by } => {
+                m.insert("by".into(), by.clone().into());
+            }
+            Event::Reopened { reason, last_active_ms } => {
+                m.insert(
+                    "reason".into(),
+                    reason.clone().map(serde_json::Value::from).unwrap_or(serde_json::Value::Null),
+                );
+                m.insert("last_active".into(), iso_utc(*last_active_ms).into());
+            }
+            Event::Renamed { from, to } => {
+                m.insert("from".into(), from.clone().map(serde_json::Value::from).unwrap_or(serde_json::Value::Null));
+                m.insert("to".into(), to.clone().into());
+            }
+            Event::Moved { window, window_name } => {
+                m.insert("window".into(), (*window).into());
+                m.insert(
+                    "window_name".into(),
+                    window_name.clone().map(serde_json::Value::from).unwrap_or(serde_json::Value::Null),
+                );
+            }
+            Event::SshStarted { target } => {
+                m.insert("target".into(), target.clone().into());
+            }
+            Event::SshEnded { target, how } => {
+                m.insert("target".into(), target.clone().into());
+                m.insert("how".into(), how.clone().into());
+            }
+            Event::ScreenCleared | Event::Closed => {}
+        }
+        serde_json::Value::Object(m).to_string()
     }
 
     /// The bracketed line, e.g. `[renamed "auth" → "Claude - auth refactor"]`.
@@ -353,5 +409,58 @@ mod tests {
             Event::Moved { window: 2, window_name: Some("Work".into()) }.line(at, 0),
             "[moved to window 2 \"Work\"]"
         );
+    }
+}
+
+/// `docs/events.md`: every event, its line and its JSON form.
+pub fn events_markdown() -> String {
+    let at = 1_791_654_721_000; // 2026-10-10T17:52:01Z
+    let events = [
+        (Event::Opened { by: "claude (pid 5512)".into() }, "A tab was opened (by you or an agent)."),
+        (
+            Event::Reopened { reason: Some("reboot".into()), last_active_ms: at - 3_600_000 },
+            "A closed tab came back after a reboot.",
+        ),
+        (Event::Reopened { reason: None, last_active_ms: at - 3_600_000 }, "A closed tab was reopened."),
+        (
+            Event::Reopened { reason: Some("server restart".into()), last_active_ms: at },
+            "Open tabs came back after the server restarted.",
+        ),
+        (Event::Renamed { from: Some("auth".into()), to: "Claude - auth refactor".into() }, "The tab was renamed."),
+        (Event::Renamed { from: None, to: "Dev server".into() }, "The tab got its first name."),
+        (Event::Moved { window: 2, window_name: Some("Work".into()) }, "The tab moved to another window."),
+        (Event::SshStarted { target: "deploy@web-1".into() }, "An interactive ssh session started."),
+        (
+            Event::SshEnded { target: "deploy@web-1".into(), how: "connection lost".into() },
+            "It ended (`closed` or `connection lost`).",
+        ),
+        (Event::ScreenCleared, "A program tried to erase the scrollback; ctx kept it."),
+        (Event::Closed, "The tab was closed."),
+    ];
+    let mut out = String::from(
+        "# ctx events\n\n_Generated from `ctx-store/src/record.rs`. Don't edit by hand._\n\n\
+Things that happen *to* a tab, as opposed to output from a program, are drawn as one dimmed line in\n\
+square brackets between output lines, included in `ctx read` and `ctx run` output, and kept in the saved\n\
+record as events (never as text, so a program can't fake one). The set is fixed:\n\n\
+| Event | Line | JSON |\n|---|---|---|\n",
+    );
+    for (e, what) in events {
+        let json = e.json(at);
+        out.push_str(&format!("| {what} | `{}` | `{json}` |\n", e.line(at, 0)));
+    }
+    out.push_str("\nTimes in lines are local; the examples use UTC.\n");
+    out
+}
+
+#[cfg(test)]
+mod doc_tests {
+    #[test]
+    fn events_doc_is_current() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../docs/events.md");
+        let want = super::events_markdown();
+        if std::fs::read_to_string(path).unwrap_or_default() != want {
+            std::fs::write(path, want).unwrap();
+            panic!("docs/events.md was out of date and has been regenerated; commit it");
+        }
     }
 }

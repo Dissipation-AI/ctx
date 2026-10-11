@@ -291,6 +291,7 @@ dependencies = [
  "postcard",
  "rusqlite",
  "serde",
+ "serde_json",
  "zstd",
 ]
 

@@ -2,7 +2,7 @@
 //! transcript of everything it showed. Used for closed tabs (`read`, `find`, `reopen`) and for
 //! the parts of open tabs that are already on disk.
 
-use crate::record::{EVENT_MARK, Event, Record, for_each_record, read_records};
+use crate::record::{EVENT_MARK, Event, Record, event_line, for_each_record, read_records};
 use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
@@ -83,7 +83,7 @@ impl History {
                     Event::SshEnded { .. } => self.ssh_target = None,
                     _ => {}
                 }
-                let line = format!("{EVENT_MARK}{}", event.line(at_ms, self.tz));
+                let line = event_line(&event.json(at_ms), &event.line(at_ms, self.tz));
                 if let Some(c) = self.unfinished.and_then(|n| self.commands.iter_mut().rev().find(|c| c.number == n)) {
                     c.output.push(line.clone());
                 }
