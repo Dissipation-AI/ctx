@@ -9,6 +9,7 @@ cargo build --release --quiet
 CTX=$PWD/target/release/ctx
 export CTX_HOME=$(mktemp -d /tmp/ctx-budgets.XXXXXX)
 export CTX_ASSIST=off
+print 'shell = "/bin/zsh"' > "$CTX_HOME/config.toml"
 fail=0
 check() { # name value limit unit
   if (( $2 <= $3 )); then print "ok    $1: $2 $4 (budget $3)"; else print "OVER  $1: $2 $4 (budget $3)"; fail=1; fi

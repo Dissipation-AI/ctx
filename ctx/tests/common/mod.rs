@@ -46,6 +46,8 @@ impl Server {
         let _ = std::fs::remove_dir_all(&dir);
         let home = dir.join("home");
         std::fs::create_dir_all(&home).unwrap();
+        // ctx's local shell integration is for zsh; CI runners log in with bash.
+        std::fs::write(dir.join("config.toml"), "shell = \"/bin/zsh\"\n").unwrap();
         let mut s = Server { dir, home, child: None };
         s.spawn();
         s
