@@ -259,10 +259,19 @@ fn local_sshd(dir: &std::path::Path) -> Option<(std::process::Child, std::path::
 #[test]
 fn ssh_sessions_are_recorded_with_remote_marks() {
     let s = Server::start("ssh");
-    let Some((mut sshd, cfg)) = local_sshd(&s.dir) else {
+    let Some((sshd, cfg)) = local_sshd(&s.dir) else {
         eprintln!("skipping: no usable sshd here");
         return;
     };
+    // Stopped even if an assertion fails.
+    struct Kill(std::process::Child);
+    impl Drop for Kill {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let _sshd = Kill(sshd);
     s.ctx(&["open", "tab", "named", "Remote", "at", "/tmp"]).ok();
     s.ctx(&["run", "in", "Remote", &format!("ssh -F {} testhost", cfg.display()), "without", "waiting"]).ok();
     // Wait for the remote prompt, then run commands there as if local.
@@ -282,7 +291,6 @@ fn ssh_sessions_are_recorded_with_remote_marks() {
     );
     let screen = s.ctx(&["read", "Remote"]).ok().stdout.clone();
     assert!(screen.contains("[ssh to testhost started") && screen.contains("[ssh to testhost ended"), "{screen}");
-    let _ = sshd.kill();
 }
 
 #[test]
