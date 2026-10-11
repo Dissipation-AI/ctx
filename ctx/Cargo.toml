@@ -12,4 +12,5 @@ ctx-mcp.workspace = true
 ctx-protocol.workspace = true
 ctx-server.workspace = true
 libc.workspace = true
+serde.workspace = true
 serde_json.workspace = true

@@ -43,6 +43,8 @@ pub struct Running {
     pub approximate: bool,
     pub finished_ms: Option<i64>,
     pub exit_status: Option<i32>,
+    /// The first line is the command line itself (screen-found commands): not output.
+    pub skip_first: bool,
 }
 
 impl Running {
@@ -51,6 +53,10 @@ impl Running {
     }
 
     fn push_line(&mut self, line: String, cap_bytes: u64) {
+        if self.skip_first {
+            self.skip_first = false;
+            return;
+        }
         self.total_lines += 1;
         if self.head.len() < KEEP_LINES {
             self.head.push(line.clone());
@@ -163,6 +169,14 @@ pub struct Tab {
     pub rows: u16,
     /// ssh target while an ssh command is running in front.
     pub ssh_target: Option<String>,
+    /// The remote shell's folder and `user@host`, from its own marks.
+    pub remote_folder: Option<String>,
+    pub remote_location: Option<String>,
+    /// The remote shell has ctx's marks (else commands are recorded from the screen).
+    pub remote_marks: bool,
+    /// Enter held back until the remote has echoed what was typed: (Enter's bytes, the typed
+    /// text, since when).
+    pub pending_enter: Option<(Vec<u8>, String, std::time::Instant)>,
     /// Bumped on every chunk of output.
     pub output_seq: u64,
     pub ended: bool,
@@ -280,8 +294,11 @@ impl Tab {
         match m {
             Mark::PromptStart => {
                 self.integration = true;
-                // The shell is back: any mode a program left on is put back.
-                if self.running.iter().all(|r| r.text.is_empty()) || self.running.is_empty() {
+                if self.in_ssh() {
+                    self.remote_marks = true;
+                }
+                // The local shell is back: any mode a program left on is put back.
+                if self.running.is_empty() {
                     self.term.reset_program_modes();
                 }
                 self.at_prompt = true;
@@ -293,7 +310,7 @@ impl Tab {
             Mark::InputStart => {}
             Mark::OutputStart => {
                 self.integration = true;
-                self.start_command(cx, fx);
+                self.start_command(cx, fx, false);
             }
             Mark::CommandEnd(status) => {
                 if self.running.is_empty() {
@@ -306,6 +323,11 @@ impl Tab {
                 }
             }
             Mark::Folder { host, path } => {
+                if self.in_ssh() {
+                    // A remote shell's folder: shown for its commands, not the tab's own.
+                    self.remote_folder = Some(path);
+                    return;
+                }
                 if path != self.folder {
                     self.folder = path.clone();
                     self.log.push(&Record::Folder { at_ms: cx.now_ms, folder: path.clone() });
@@ -342,7 +364,13 @@ impl Tab {
         let (kind, rest) = payload.split_once(';').unwrap_or((payload, ""));
         match kind {
             "cmd" => self.pending_text = Some(rest.to_string()),
-            "where" => self.location = rest.to_string(),
+            "where" => {
+                if self.in_ssh() {
+                    self.remote_location = Some(rest.to_string());
+                } else {
+                    self.location = rest.to_string();
+                }
+            }
             "typing" => {
                 self.typing = rest == "1";
                 fx.typing_changed = true;
@@ -392,7 +420,14 @@ impl Tab {
                     }
                     (Some("end"), Some(target)) => {
                         let how = parts.next().unwrap_or("closed").to_string();
+                        // Remote commands still open when the connection ended end here.
+                        while self.running.len() > 1 {
+                            self.finish_command(None, cx, fx);
+                        }
                         self.ssh_target = None;
+                        self.remote_folder = None;
+                        self.remote_location = None;
+                        self.remote_marks = false;
                         self.add_event(Event::SshEnded { target: target.to_string(), how }, cx);
                     }
                     _ => {}
@@ -402,7 +437,7 @@ impl Tab {
         }
     }
 
-    fn start_command(&mut self, cx: &Ctx, fx: &mut Effects) {
+    fn start_command(&mut self, cx: &Ctx, fx: &mut Effects, approximate: bool) {
         let number = self.next_command;
         self.next_command += 1;
         let text = self.pending_text.take().unwrap_or_default().trim_end_matches('\n').to_string();
@@ -416,11 +451,19 @@ impl Tab {
             by.push("you".into());
         }
         let ran_by = by.join(" and ");
-        let location = format!(
-            "{}:{}",
-            if self.location.is_empty() { "?".to_string() } else { self.location.clone() },
-            tilde(&self.folder, self.env.get("HOME").map(String::as_str))
-        );
+        let location = if self.in_ssh() && !self.running.is_empty() {
+            format!(
+                "{}:{}",
+                self.remote_location.clone().or_else(|| self.ssh_target.clone()).unwrap_or_else(|| "?".into()),
+                self.remote_folder.clone().unwrap_or_else(|| "~".into())
+            )
+        } else {
+            format!(
+                "{}:{}",
+                if self.location.is_empty() { "?".to_string() } else { self.location.clone() },
+                tilde(&self.folder, self.env.get("HOME").map(String::as_str))
+            )
+        };
         let pin = self.term.pin_cursor_row();
         self.log.push(&Record::CommandStart {
             number,
@@ -429,7 +472,7 @@ impl Tab {
             folder: self.folder.clone(),
             location: location.clone(),
             ran_by: ran_by.clone(),
-            approximate: false,
+            approximate,
         });
         let _ = cx.index.add_command(&CommandRow {
             tab: self.number,
@@ -441,7 +484,7 @@ impl Tab {
             exit_status: None,
             started_ms: cx.now_ms,
             finished_ms: None,
-            approximate: false,
+            approximate,
         });
         self.running.push(Running {
             number,
@@ -462,9 +505,10 @@ impl Tab {
             full_screen: false,
             final_screen: None,
             partial: None,
-            approximate: false,
+            approximate,
             finished_ms: None,
             exit_status: None,
+            skip_first: approximate,
         });
         // On disk at once: if the server dies, a reopened tab can still offer this command.
         let _ = self.log.flush();
@@ -499,7 +543,15 @@ impl Tab {
     }
 
     fn finish_command(&mut self, status: Option<i32>, cx: &Ctx, fx: &mut Effects) {
-        let rest = self.live_rows(true);
+        self.finish_command_at(status, cx, fx, false);
+    }
+
+    /// `before_cursor`: the cursor's line isn't this command's (it's the next prompt).
+    fn finish_command_at(&mut self, status: Option<i32>, cx: &Ctx, fx: &mut Effects, before_cursor: bool) {
+        let mut rest = self.live_rows(true);
+        if before_cursor && self.term.cursor().0 > 0 {
+            rest.pop();
+        }
         let cap = (cx.config.saved_output_mb_per_command * 1024.0 * 1024.0) as u64;
         let Some(mut cmd) = self.running.pop() else { return };
         if let Some(p) = cmd.partial.take() {
@@ -682,6 +734,37 @@ impl Tab {
             }
             None => true,
         }
+    }
+
+    /// The text at the cursor's line (plain), for matching an echo.
+    pub fn cursor_line(&self) -> String {
+        let (_, cy) = self.term.cursor();
+        self.term.screen(false).get(cy as usize).cloned().unwrap_or_default().trim_end().to_string()
+    }
+
+    pub fn in_ssh(&self) -> bool {
+        self.ssh_target.is_some()
+    }
+
+    /// Enter was pressed (by a person or an agent). Inside ssh without remote marks, the line at
+    /// the cursor (prompt and command, as the screen shows it; never keystrokes) becomes an
+    /// approximate command.
+    pub fn note_enter(&mut self, cx: &Ctx) {
+        if !self.in_ssh() || self.remote_marks || self.term.full_screen() || self.running.is_empty() {
+            return;
+        }
+        let (_, cy) = self.term.cursor();
+        let line = self.term.screen(false).get(cy as usize).cloned().unwrap_or_default();
+        let line = line.trim_end().to_string();
+        if line.is_empty() {
+            return;
+        }
+        let mut fx = Effects::default();
+        if self.running.len() > 1 && self.running.last().is_some_and(|r| r.approximate) {
+            self.finish_command_at(None, cx, &mut fx, true);
+        }
+        self.pending_text = Some(line);
+        self.start_command(cx, &mut fx, true);
     }
 
     /// Exit status of a recently finished command.

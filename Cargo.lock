@@ -219,6 +219,7 @@ dependencies = [
  "ctx-protocol",
  "ctx-server",
  "libc",
+ "serde",
  "serde_json",
 ]
 
@@ -245,6 +246,10 @@ dependencies = [
 [[package]]
 name = "ctx-mcp"
 version = "0.1.0"
+dependencies = [
+ "ctx-cli",
+ "serde_json",
+]
 
 [[package]]
 name = "ctx-protocol"

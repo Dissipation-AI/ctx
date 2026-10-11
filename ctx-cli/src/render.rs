@@ -310,7 +310,11 @@ pub fn render(o: &Output, st: &Style) -> Printed {
 }
 
 fn command_heading(number: u64, location: &str, command: &str, approximate: bool) -> String {
-    let approx = if approximate { "~ " } else { "" };
+    // Found from the screen (no marks): the line already has the remote prompt in it.
+    if approximate {
+        return format!("~ {command}");
+    }
+    let approx = "";
     let mut lines = command.lines();
     let first = lines.next().unwrap_or("");
     let more = lines.count();

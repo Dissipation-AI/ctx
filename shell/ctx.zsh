@@ -15,6 +15,8 @@ _ctx_osc() { builtin print -nr -- $'\e]'"$1"$'\a' }
 
 # Exported variables as "S<US>name<US>value<RS>" entries; only changes after the first report.
 _ctx_report_env() {
+    # Remote environments aren't saved.
+    [[ -n "$CTX_REMOTE" ]] && return
     local k v out="" kind="diff"
     local -A now
     for k in ${(k)parameters[(R)*export*]}; do
@@ -52,7 +54,7 @@ _ctx_mark_prompt() {
 _ctx_precmd() {
     local st=$?
     (( _ctx_first )) || _ctx_osc "133;D;$st"
-    local where="${USER}@${HOST%%.*}"
+    local where="${USER:-$USERNAME}@${HOST%%.*}"
     if [[ "$where" != "$_ctx_where" ]]; then
         _ctx_where=$where
         _ctx_osc "6973;where;$where"
@@ -89,8 +91,55 @@ _ctx_line_finish() {
     fi
 }
 
+# ssh: an interactive session (no remote command) gets ctx's marks on the remote side through
+# an inline bootstrap, so remote commands are recorded like local ones. Everything else (a remote
+# command, scp/sftp/rsync/git, hosts skipped in ctx's config or with a RemoteCommand) runs as typed.
+ssh() {
+    [[ -n "$CTX_REMOTE" || -z "$CTX_SSH_COMMAND" ]] && { command ssh "$@"; return; }
+    local a target="" skip_next=0 has_command=0 plain=0
+    for a in "$@"; do
+        if (( skip_next )); then skip_next=0; continue; fi
+        if [[ -z "$target" ]]; then
+            case "$a" in
+                -[BbcDEeFIiJLlmOoPpQRSWw]) skip_next=1 ;;
+                -[NfTGVW]*|-O*) plain=1 ;;
+                -*) ;;
+                *) target=$a ;;
+            esac
+        else
+            has_command=1
+            break
+        fi
+    done
+    if (( plain || has_command )) || [[ -z "$target" || ! -t 0 ]]; then
+        command ssh "$@"
+        return
+    fi
+    local host=${target#*@} p skip=0
+    for p in ${=CTX_SSH_SKIP}; do [[ "$host" == ${~p} || "$target" == ${~p} ]] && skip=1; done
+    if (( ! skip )) && command ssh -G "$@" 2>/dev/null | command grep -qi '^remotecommand '; then
+        skip=1
+    fi
+    _ctx_osc "6973;ssh;start;$target"
+    local st
+    if (( skip )); then
+        command ssh "$@"
+    else
+        command ssh -t "$@" "$CTX_SSH_COMMAND"
+    fi
+    st=$?
+    if (( st == 255 )); then
+        _ctx_osc "6973;ssh;end;$target;connection lost"
+    else
+        _ctx_osc "6973;ssh;end;$target;closed"
+    fi
+    return $st
+}
+
 # Runs at the first prompt, after the user's .zshrc.
 _ctx_deferred_init() {
+    # Launchers made with `ctx make launcher` run by name (login files may have reset PATH).
+    [[ -n "$CTX_LAUNCHERS" && ":$PATH:" != *":$CTX_LAUNCHERS:"* ]] && export PATH="$PATH:$CTX_LAUNCHERS"
     autoload -Uz add-zle-hook-widget 2>/dev/null && {
         add-zle-hook-widget line-pre-redraw _ctx_line_redraw
         add-zle-hook-widget line-finish _ctx_line_finish

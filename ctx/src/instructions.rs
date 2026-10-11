@@ -1,5 +1,6 @@
 //! `ctx install instructions for …`: ctx's block in agents' instruction files.
 
+use crate::exec::{Out, message};
 use ctx_cli::parse::Format;
 
 pub const BEGIN: &str = "<!-- ctx instructions: begin -->";
@@ -61,68 +62,55 @@ pub fn without_block(existing: &str) -> Option<String> {
     Some(format!("{before}{after}"))
 }
 
-fn report(msg: String, format: Format) {
-    match format {
-        Format::Text => println!("{msg}"),
-        Format::Json => println!(
-            "{}",
-            serde_json::to_string_pretty(&ctx_protocol::with_schema(serde_json::json!({ "message": msg })))
-                .unwrap_or_default()
-        ),
-        Format::Toon => println!(
-            "{}",
-            ctx_protocol::toon::encode(&ctx_protocol::with_schema(serde_json::json!({ "message": msg })))
-        ),
-    }
-}
-
-pub fn install(agent: &str, folder: Option<&str>, format: Format) -> i32 {
+pub fn install(agent: &str, folder: Option<&str>, format: Format) -> Out {
+    let mut out = Out::default();
     let path = file_for(agent, folder);
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
     let updated = with_block(&existing, &ctx_cli::help::agent_instructions());
     if let Some(d) = path.parent()
         && let Err(e) = std::fs::create_dir_all(d)
     {
-        eprintln!("Couldn't create {}: {e}", d.display());
-        return 1;
+        out.err(format!("Couldn't create {}: {e}", d.display()));
+        return out.code(1);
     }
     let verb = if existing.contains(BEGIN) { "Updated" } else { "Added" };
     if existing == updated {
-        report(format!("ctx's instructions in {} are already up to date.", path.display()), format);
-        return 0;
+        message(&mut out, &format!("ctx's instructions in {} are already up to date.", path.display()), format);
+        return out;
     }
     match std::fs::write(&path, updated) {
         Ok(()) => {
-            report(format!("{verb} ctx's instructions in {}.", path.display()), format);
-            0
+            message(&mut out, &format!("{verb} ctx's instructions in {}.", path.display()), format);
+            out
         }
         Err(e) => {
-            eprintln!("Couldn't write {}: {e}", path.display());
-            1
+            out.err(format!("Couldn't write {}: {e}", path.display()));
+            out.code(1)
         }
     }
 }
 
-pub fn remove(agent: &str, folder: Option<&str>, format: Format) -> i32 {
+pub fn remove(agent: &str, folder: Option<&str>, format: Format) -> Out {
+    let mut out = Out::default();
     let path = file_for(agent, folder);
     let Ok(existing) = std::fs::read_to_string(&path) else {
-        report(format!("{} doesn't exist, so there's nothing to remove.", path.display()), format);
-        return 0;
+        message(&mut out, &format!("{} doesn't exist, so there's nothing to remove.", path.display()), format);
+        return out;
     };
     match without_block(&existing) {
         Some(updated) => match std::fs::write(&path, updated) {
             Ok(()) => {
-                report(format!("Removed ctx's instructions from {}.", path.display()), format);
-                0
+                message(&mut out, &format!("Removed ctx's instructions from {}.", path.display()), format);
+                out
             }
             Err(e) => {
-                eprintln!("Couldn't write {}: {e}", path.display());
-                1
+                out.err(format!("Couldn't write {}: {e}", path.display()));
+                out.code(1)
             }
         },
         None => {
-            report(format!("{} has no ctx instructions.", path.display()), format);
-            0
+            message(&mut out, &format!("{} has no ctx instructions.", path.display()), format);
+            out
         }
     }
 }

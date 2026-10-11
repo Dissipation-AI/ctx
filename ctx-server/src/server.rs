@@ -24,6 +24,30 @@ const SIGNALS: usize = 1;
 const TAB_KEY_BASE: usize = 1 << 40;
 const ZSHENV: &str = include_str!("../../shell/zsh/.zshenv");
 const CTX_ZSH: &str = include_str!("../../shell/ctx.zsh");
+const REMOTE_BOOTSTRAP: &str = include_str!("../../shell/remote/bootstrap.sh");
+const REMOTE_BASH: &str = include_str!("../../shell/remote/ctx.bash");
+
+/// The remote command ssh gets for an interactive session: the bootstrap, base64-encoded so no
+/// quoting survives the trip, decoded and run by the remote `sh`.
+pub fn ssh_command() -> String {
+    let script = REMOTE_BOOTSTRAP.replace("@ZSH@", CTX_ZSH).replace("@BASH@", REMOTE_BASH);
+    let b64 = base64(script.as_bytes());
+    format!("sh -c 'x={b64}; eval \"$(printf %s \"$x\" | base64 -d 2>/dev/null || printf %s \"$x\" | base64 -D)\"'")
+}
+
+fn base64(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for c in data.chunks(3) {
+        let b = [c[0], *c.get(1).unwrap_or(&0), *c.get(2).unwrap_or(&0)];
+        let n = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
+        out.push(T[(n >> 18) as usize & 63] as char);
+        out.push(T[(n >> 12) as usize & 63] as char);
+        out.push(if c.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if c.len() > 2 { T[n as usize & 63] as char } else { '=' });
+    }
+    out
+}
 /// Raw frame a client sends after a version mismatch to ask for a restart (never changes).
 pub const RESTART_MAGIC: &[u8] = b"ctx: restart the server";
 
@@ -370,6 +394,9 @@ impl Server {
         if !self.dirty.is_empty() {
             t = t.min(Duration::from_millis(8));
         }
+        if self.tabs.values().any(|x| x.pending_enter.is_some()) || !self.starting.is_empty() {
+            t = t.min(Duration::from_millis(50));
+        }
         t.max(Duration::from_millis(1))
     }
 
@@ -418,6 +445,10 @@ impl Server {
     fn timers(&mut self) {
         if !self.starting.is_empty() {
             self.replay_starting(true);
+        }
+        let held: Vec<u64> = self.tabs.values().filter(|t| t.pending_enter.is_some()).map(|t| t.number).collect();
+        for n in held {
+            self.release_enter(n, true);
         }
         let now = Instant::now();
         let ms = now_ms();
@@ -1449,6 +1480,10 @@ impl Server {
             columns,
             rows,
             ssh_target: None,
+            remote_folder: None,
+            remote_location: None,
+            remote_marks: false,
+            pending_enter: None,
             output_seq: 0,
             ended: false,
             shell_name,
@@ -1524,6 +1559,18 @@ impl Server {
         }
         if !env.iter().any(|(k, _)| k == "PATH") {
             set(&mut env, "PATH", "/usr/bin:/bin:/usr/sbin:/sbin".into());
+        }
+        // Scoped launchers made with `ctx make launcher` run by name.
+        let launchers = self.paths.launchers().join("bin").display().to_string();
+        if let Some((_, p)) = env.iter_mut().find(|(k, _)| k == "PATH") {
+            *p = format!("{p}:{launchers}");
+        }
+        set(&mut env, "CTX_LAUNCHERS", launchers);
+        if self.config.ssh_integration {
+            set(&mut env, "CTX_SSH_COMMAND", ssh_command());
+        }
+        if !self.config.ssh_integration_skip.is_empty() {
+            set(&mut env, "CTX_SSH_SKIP", self.config.ssh_integration_skip.join(" "));
         }
         if !env.iter().any(|(k, _)| k == "HOME") {
             set(&mut env, "HOME", sys::home());
@@ -1985,7 +2032,15 @@ impl Server {
             }
         }
         t.contributors.push(by);
-        t.to_pty.extend_from_slice(&bytes);
+        if enter && t.in_ssh() && !t.remote_marks {
+            // Recording from the screen: let the remote echo the text before Enter is noted.
+            let enter_len = t.term.encode_key("enter").map(|b| b.len()).unwrap_or(1);
+            let (text_bytes, enter_bytes) = bytes.split_at(bytes.len() - enter_len);
+            t.to_pty.extend_from_slice(text_bytes);
+            t.pending_enter = Some((enter_bytes.to_vec(), text.to_string(), Instant::now()));
+        } else {
+            t.to_pty.extend_from_slice(&bytes);
+        }
         self.flush_tab(n);
         done(format!(
             "Typed into tab {n}{}.",
@@ -2012,9 +2067,12 @@ impl Server {
                 }
             }
         }
-        if keys.iter().any(|k| k == "enter" || k == "return") {
+        let has_enter = keys.iter().any(|k| k == "enter" || k == "return");
+        if has_enter {
             t.contributors.push(by);
+            self.enter_pressed(n);
         }
+        let Some(t) = self.tabs.get_mut(&n) else { return done("") };
         t.to_pty.extend_from_slice(&bytes);
         self.flush_tab(n);
         done(format!("Pressed {} in tab {n}.", keys.join(" then ")))
@@ -2517,9 +2575,46 @@ impl Server {
         Handled::Deferred
     }
 
+    /// Send a held-back Enter once the typed text is on screen, or the output has paused for
+    /// 100 ms (no echo, e.g. a password prompt), or after 600 ms.
+    fn release_enter(&mut self, n: u64, _timer: bool) {
+        let due = match self.tabs.get(&n) {
+            Some(t) => match &t.pending_enter {
+                Some((_, text, at)) => {
+                    let echoed = t.cursor_line().ends_with(text.trim_end());
+                    let quiet = now_ms() - t.last_output_ms >= 100 && at.elapsed() >= Duration::from_millis(100);
+                    echoed || quiet || at.elapsed() >= Duration::from_millis(600)
+                }
+                None => false,
+            },
+            None => false,
+        };
+        if !due {
+            return;
+        }
+        let Some((bytes, _, _)) = self.tabs.get_mut(&n).and_then(|t| t.pending_enter.take()) else { return };
+        self.enter_pressed(n);
+        if let Some(t) = self.tabs.get_mut(&n) {
+            t.to_pty.extend_from_slice(&bytes);
+        }
+        self.flush_tab(n);
+    }
+
+    /// Enter was pressed in tab `n` (before the bytes reach the program).
+    fn enter_pressed(&mut self, n: u64) {
+        let (ms, tz) = self.cx();
+        let cx = Ctx { index: &self.index, config: &self.config, tz, now_ms: ms };
+        if let Some(t) = self.tabs.get_mut(&n) {
+            t.note_enter(&cx);
+        }
+    }
+
     fn on_attached_input(&mut self, key: usize, n: u64, msg: StreamIn) {
         match msg {
             StreamIn::Bytes(b) => {
+                if b.contains(&b'\r') {
+                    self.enter_pressed(n);
+                }
                 if let Some(t) = self.tabs.get_mut(&n) {
                     if b.contains(&b'\r') || b.contains(&b'\n') || !b.is_empty() {
                         t.contributors.push("you".into());
@@ -2585,6 +2680,14 @@ impl Server {
             return err(ErrorKind::NoSuchTab, format!("Tab {n} isn't open."));
         };
         match input {
+            AppInput::Key { key, text } if key == "enter" || key == "return" => {
+                let bytes = t.term.encode_key(&key).or_else(|| text.map(|s| s.into_bytes())).unwrap_or_default();
+                t.contributors.push("you".into());
+                self.enter_pressed(n);
+                if let Some(t) = self.tabs.get_mut(&n) {
+                    t.to_pty.extend_from_slice(&bytes);
+                }
+            }
             AppInput::Key { key, text } => {
                 let bytes = t.term.encode_key(&key).or_else(|| text.map(|s| s.into_bytes())).unwrap_or_default();
                 if key == "enter" || key == "return" || !bytes.is_empty() {
@@ -2722,6 +2825,7 @@ impl Server {
         self.dirty.insert(n);
         self.enforce_memory(n);
         self.check_waiters(n, &fx);
+        self.release_enter(n, false);
         if fx.prompt {
             self.replay_starting(false);
         }
