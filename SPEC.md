@@ -194,7 +194,7 @@ the server couldn't be reached, 3 if a time limit ran out. For `run`, the comman
 | `ctx list` | Every open window and its tabs: number, name, folder, what's running, idle or busy, unread output. |
 | `ctx list closed tabs` | Saved tabs that aren't running any more: number, name, folder, who opened it, when it closed. Newest 20; `up to 100` for more. |
 | `ctx list commands in "Dev server"` | Commands run in that tab: where (`user@host:path`), exit status, start time, duration. No output. |
-| `ctx list activity` | The activity log: who did what to which tab, newest first. |
+| `ctx list activity` | The activity log: who did what to which tab, newest first. Narrow with `by claude`, `in "Dev server"`, `since 1 hour ago`. |
 | `ctx read "Dev server"` | What's on screen in that tab right now, as plain text. |
 | `ctx read last 200 lines in "Dev server"` | The last 200 lines, including scrollback. |
 | `ctx read everything in "Dev server"` | All of it. |
@@ -204,7 +204,7 @@ the server couldn't be reached, 3 if a time limit ran out. For `run`, the comman
 | `ctx ask "where did this session discover why the auth test fails?" about tab 212` | Have a language model read the tab and return a short answer plus the **exact lines** that support it, so the asker doesn't have to read the whole tab. See Asking about a tab. |
 | `ctx find "cargo publish"` | Search every tab, open and closed: names, commands and output. Newest first; prints tab, line and surrounding lines. |
 | `ctx find "deploy" in "Dev server"` | …only in that tab. |
-| `ctx find "deploy" at ~/code/site by claude since 30 days ago` | …narrowed by folder, by who opened the tab, and by date (any combination). |
+| `ctx find "deploy" at ~/code/site by claude since 30 days ago` | …narrowed by folder, by who ran the command (an agent, or `by me`), and by date (any combination). |
 | `ctx status` | Server version, uptime, memory per tab, socket path. |
 
 `read`, `list commands in` and `find` work on closed tabs too, from the saved record.
@@ -219,7 +219,7 @@ the server couldn't be reached, 3 if a time limit ran out. For `run`, the comman
 | `ctx open window` | A new window with one tab in your home folder. |
 | `ctx open window at ~/code/site` | …starting in that folder. |
 | `ctx open tab` | A new tab in the current window (window 1 when headless; the Agents window for agents). |
-| `ctx open tab in window 2 at ~/code/site named "Dev server" running "npm run dev"` | Any combination of where, which folder, a name, and a command to start (the shell stays open after it ends). |
+| `ctx open tab in window 2 at ~/code/site named "Dev server"` | Any combination of which window, which folder and a name. To start something in it, use `ctx run … without waiting`. |
 | `ctx close "Dev server"` | Close that tab. Asks first if something is running. |
 | `ctx close window 2` | Close a window and all its tabs. Same rule. |
 | `ctx close "Dev server" without asking` | Don't ask. |
@@ -235,9 +235,10 @@ the server couldn't be reached, 3 if a time limit ran out. For `run`, the comman
 
 | Command | What it does |
 |---|---|
-| `ctx run in "Dev server" "npm test"` | Run a command at that tab's prompt, wait for it to finish, then print its output and exit with its exit status. This is the verb agents use instead of a throwaway shell (see Agents). Options: `within 10 minutes`, `with colors`, `up to 1000 lines`. |
-| `ctx type "npm test" into "Dev server"` | Type text into the tab, exactly as if typed. Doesn't press Enter. |
-| `ctx type "npm test" into "Dev server" then press enter` | …and press Enter. |
+| `ctx run in "Dev server" "npm test"` | **The** way to run a shell command. Runs it at that tab's prompt, waits for it to finish, then prints its output and exits with its exit status. This is the verb agents use instead of a throwaway shell (see Agents). Options: `with colors`, `up to 1000 lines`, `within 10 minutes`. |
+| `ctx run in "Dev server" "npm run dev" without waiting` | Start a long-running command (a server, a watcher, a build) and return immediately. Check on it later with `read`, `wait` or `find`. |
+| `ctx type "print(df.head())" into "Python"` | Type text into whatever program is running in the tab (a REPL, a prompt asking y/n, a TUI), exactly as if typed. Doesn't press Enter. |
+| `ctx type "yes" into "Dev server" then press enter` | …and press Enter. |
 | `ctx press ctrl-c in "Dev server"` | Press a key or combination: `enter`, `escape`, `tab`, `up`, `ctrl-c`, `ctrl-d`, `f5`… |
 | `ctx wait until "Dev server" is idle` | Wait for the running command to finish (prompt is back). Prints its exit status. |
 | `ctx wait until "Dev server" shows "Listening on"` | Wait for that text to appear in new output. |
@@ -248,6 +249,16 @@ the server couldn't be reached, 3 if a time limit ran out. For `run`, the comman
 
 `type` uses bracketed paste when the program has asked for it, so multi-line text arrives intact
 and doesn't run line by line.
+
+**`run` vs `type`, so there's one way to do each thing:** `run` is for shell commands at the
+shell's prompt. `type` is for talking to a program that's already running. ctx knows which is in
+front (from the shell-integration marks), so:
+
+- `type … then press enter` at an idle **shell prompt** is refused:
+  `To run a shell command, use: ctx run in "Dev server" "npm test"`.
+- `type` *without* Enter at a shell prompt is allowed. It **pre-fills** a command for a person to
+  review and run themselves, which is useful for an agent proposing something risky.
+- `run` when a program other than the shell is in front is refused, with a pointer to `type`.
 
 ### Help
 
@@ -270,10 +281,34 @@ and `ctx list closed tabs` shows ones that have been closed.
   `ctx/docs/grammar.md`, the MCP tool schemas and the canonical form used in logs are all generated.
 - Shell completion for zsh is generated from the same table and completes tab names in quotes.
 
-## JSON output
+## Structured output: `as json` and `as toon`
 
-Every command supports `as json`. The schemas are versioned (`"schema": 1`) and documented in
-`ctx/docs/json.md`, generated from the Rust types in `ctx-protocol`. Example:
+Every command can answer in three forms:
+
+- **plain text** (default): readable sentences and labelled tables, for people and for agents
+  reading transcripts;
+- **`as json`**: for programs and scripts;
+- **`as toon`**: [TOON](https://github.com/toon-format/toon) (Token-Oriented Object Notation),
+  for agents. TOON writes a list of same-shaped records as one header line plus one row each,
+  instead of repeating every key, which is much shorter for ctx's tabular answers (`list`,
+  `list commands in`, `find`, `list activity`).
+
+Notes on TOON, so it's chosen for the right reasons:
+
+- The **token savings are real** for uniform lists (the format's own benchmarks report roughly
+  40% fewer tokens than JSON). For nested or irregular data it saves little and can be worse, so
+  ctx's output types are kept flat where that's natural.
+- The **comprehension claims are thin.** The maintainers report a small accuracy edge over JSON
+  (about 76% vs 75%), and an independent preprint found plain JSON still the most accurate when
+  models *write* structured output. Models have seen far more JSON in training.
+- So: `as toon` is offered and **advertised to agents** (in `ctx help`, the agent instructions
+  and the MCP tool descriptions), but the default for agents isn't decided until the agent
+  evaluation (see Agents → Evaluation) compares plain text, JSON and TOON on real tasks.
+- ctx only *emits* TOON and never parses it, so a small encoder written against the TOON spec is
+  enough, with no dependency needed.
+
+The schemas are versioned (`"schema": 1`) and documented in `ctx/docs/output.md`, generated from
+the Rust types in `ctx-protocol`. JSON and TOON carry exactly the same fields. JSON example:
 
 ```json
 { "schema": 1,
@@ -286,18 +321,43 @@ Every command supports `as json`. The schemas are versioned (`"schema": 1`) and 
 ```
 
 `ctx read last N commands in … as json` returns structured command records
-(`{command, folder, exit_status, started, finished, output}`) based on shell-integration marks.
-This is what `bro` and agents use.
+(`{number, command, where, ran_by, exit_status, started_at, finished_at, output}`) based on
+shell-integration marks. This is what `bro` and agents use. The same request `as toon`:
+
+```
+commands[2]{number,command,where,ran_by,exit_status,started_at,finished_at}:
+  13,cargo build,c@macbook:~/code/site,claude (pid 5512),0,2026-10-10T17:52:01Z,2026-10-10T17:52:40Z
+  14,cargo test -p auth,c@macbook:~/code/site,you,101,2026-10-10T17:53:02Z,2026-10-10T17:53:11Z
+```
+
+(Outputs follow as separate blocks, since multi-line text isn't tabular.)
 
 ## Activity log and visibility
 
-Any process running as your macOS user can connect (see Security). To keep that understandable:
+Any process running as your macOS user can connect (see Security). ctx records **who did
+what**: which agent or person opened, read, typed into or ran a command in which tab. The
+record is for searching and auditing, so it isn't shown everywhere. Plain-text views stay
+uncluttered, and the information is in `as json`/`as toon` output, the activity log, and
+search filters.
 
 - Every request from a client that isn't CTX.app is logged: time, client (process name, pid, and
   the nearest recognisable ancestor, e.g. `claude (pid 5512) in tab 2`), verb, target tab. Typed
   text is logged in full. Read requests are logged too, without the returned content.
 - The server resolves the client from the socket peer credentials (`LOCAL_PEERPID`,
-  `LOCAL_PEERCRED`) and walks its parent chain. It never trusts a name the client sends.
+  `LOCAL_PEERCRED`) and walks its parent chain to the nearest recognisable program (`claude`,
+  `codex`, `gemini`, `agy`, CTX.app, a shell in tab 41…). It records name, pid and process start
+  time, so two Claude sessions are told apart. This identity is **verified**: it comes from
+  the OS, never from the client.
+- An agent may also **declare** a label by setting `CTX_AGENT_NAME` (e.g. `Claude - auth
+  refactor`) in the environment it runs `ctx` from. It's stored next to the verified identity and
+  marked as claimed, never instead of it.
+- **Every command in every tab records who ran it** (`ran_by`): `you` when it was typed on the
+  keyboard in CTX.app (or in an attached terminal), or the agent's identity when it came through
+  `ctx run`/`ctx type`. If both contributed (an agent typed it, you pressed Enter), both are
+  recorded. This is kept in the saved record, so it's searchable forever:
+  - `ctx find "migrate" by claude`: commands Claude ran that mention "migrate";
+  - `ctx list activity by codex in "Dev server"`: everything Codex did to that tab;
+  - `ctx list commands in tab 212 as toon`: includes the `ran_by` column.
 - CTX.app shows a small badge on a tab when something other than you has typed into it or read it
   in the last minute; clicking it shows the matching log entries.
 - Log: `~/Library/Application Support/ctx/activity.log` (JSON lines, rotated at 10 MB).
@@ -401,11 +461,13 @@ shell that's thrown away after every command.
 
 ### Why
 
-Claude Code's Bash tool starts a fresh shell per command, so variables, activated virtualenvs,
-`cd` and the like don't persist, and the human sees the commands only inside the agent's own UI.
-With ctx:
+Claude Code's Bash tool runs each command in a fresh shell. It does carry the **working
+directory** over between calls, but nothing else: `export`ed variables, an activated virtualenv,
+shell functions and aliases defined along the way, and anything interactive are gone on the next
+call. The human sees the commands only inside the agent's own UI, without colours. With ctx:
 
-- State persists across commands: `export`, `cd`, `source .venv/bin/activate`, background servers.
+- All state persists across commands: `export`, `cd`, `source .venv/bin/activate`, background
+  servers, a REPL with data loaded.
 - The human can open the agent's tab in CTX.app and watch every command next to its output, in
   colour, in real time or afterwards.
 - The record is kept (Saved tabs), so a later agent can look up how an earlier one did something:
@@ -429,8 +491,17 @@ $ echo $?
   terminal can't separate the two, and that's accepted.
 - Long output: prints at most 400 lines (`up to 1000 lines` to change it), as head + tail with a line saying how
   much was skipped and the exact `ctx read` command to see all of it.
-- Time limit: 2 minutes unless told otherwise (`within 10 minutes`). On timeout it prints the output so far plus
-  `still running in tab 42; use ctx wait or ctx read`, and exits 3. The command keeps running.
+- **No time limit by default.** `run` waits as long as the command takes. Agents' tools already
+  impose their own timeouts, and if the caller gives up or is killed, the **command keeps
+  running in the tab** and nothing is lost. The next call can pick it up with
+  `ctx wait until "…" is idle` or `ctx read last command in "…"`. A caller that wants a limit
+  says so (`within 10 minutes`). When it runs out, `run` prints the output so far plus
+  `still running in tab 42; use ctx wait or ctx read`, and exits 3. The command is never killed
+  by ctx.
+- **Long-running things** (dev servers, watchers, long builds) use `without waiting`. It returns
+  as soon as the command has started, with the tab number and how to check on it.
+- **People** have no limits at all. Typing in a tab in CTX.app is just a terminal; `run` and its
+  options exist only for programs driving ctx.
 - Multi-line scripts: if the command argument is omitted, it's read from stdin (a heredoc), which
   avoids quoting trouble.
 - Refuses, with a clear message, when:
@@ -449,22 +520,68 @@ naming a window, the tab goes to a window named **Agents**, created if needed. A
 land in the window you're typing in. Agents are expected to name their tabs
 (`ctx open tab named "Claude - auth refactor"`). Tabs opened without a name are shown by folder only.
 
-### Hooking up Claude Code
+### Teaching agents the rules: instruction files
 
-Three levels, from simplest to most complete. Phase 0 verifies each against the current Claude Code.
+Agents only use ctx if they're told to, and how. ctx writes a short, generated instruction
+block into the files each agent reads at startup:
 
-1. **Instruction only:** a snippet for `CLAUDE.md` ("run shell commands with
-   `ctx run in "<your tab name>" "…"`; create your tab first with `ctx open tab named "…"`"). Claude's
-   own Bash tool still starts a throwaway shell, but only to call `ctx`, which is instant and
-   stateless. The real work happens in the persistent tab.
-2. **MCP server:** `ctx mcp` serves the same verbs as MCP tools (`run`, `read`, `list`, `open`,
-   `wait`, `type`, `press`, `find`, `ask`), with schemas generated from the same grammar table. Add it to Claude Code's MCP config and deny the built-in
-   `Bash` tool in its permission settings, so every command goes through ctx.
-3. **Hook:** a Claude Code `PreToolUse` hook on `Bash` that rewrites each command into
-   `ctx run in "<this Claude session's tab>" "…"`. This is transparent to the model. Whether hooks may rewrite
-   tool input in the current Claude Code version needs verifying.
+| Command | Writes to |
+|---|---|
+| `ctx install instructions for claude` | `~/.claude/CLAUDE.md` |
+| `ctx install instructions for codex` | `~/.codex/AGENTS.md` |
+| `ctx install instructions for gemini` | `~/.gemini/GEMINI.md` |
+| `ctx install instructions for agents at ~/code/site` | that project's `AGENTS.md` (or `CLAUDE.md` if that's what the project uses) |
 
-`ctx` itself is agent-agnostic. The same works for any agent that can run a command.
+- The block sits between `<!-- ctx instructions: begin -->` and `<!-- ctx instructions: end -->`.
+  Installing again **updates** it in place, `ctx remove instructions for claude` removes it, and
+  nothing outside the markers is ever touched. A missing file is created.
+- It's generated from the grammar table, so it always matches the installed `ctx`. It's
+  deliberately short (under ~400 tokens), since it's paid for in every session:
+  - run shell commands with `ctx run in "<tab>" "…"` in a tab you open and **name** for your task;
+    use `without waiting` for servers;
+  - check `ctx list` for existing tabs (like a running dev server) before starting another;
+  - read with bounded commands (`read last 3 commands`, `find`, `ask`), never `read everything`
+    on a big tab;
+  - `as toon` / `as json` exist for structured answers;
+  - leave the human's tabs alone unless asked.
+- Phase 0 checks the exact instruction-file locations for each agent's current version, and the
+  table is kept in one place in the code.
+
+### Replacing agents' built-in tools (later, after evaluation)
+
+Instructions *ask* an agent to use ctx; the deeper step is to make ctx **the** shell tool, so
+agents can't fall back to a throwaway shell. Each agent has its own extension mechanism:
+
+- **Claude Code:** a plugin that bundles the `ctx mcp` server, the instruction block, and a
+  `PreToolUse` hook on `Bash`. The hook either rewrites commands into `ctx run` or, where that isn't
+  supported, denies them with a message pointing at the MCP tool. Alternatively, permission settings
+  deny the built-in `Bash` tool.
+- **OpenAI Codex CLI:** `ctx mcp` registered as an MCP server in its config, plus whatever it offers
+  for disabling or restricting its built-in shell tool.
+- **Google Gemini CLI / Antigravity:** an extension bundling the MCP server and the instruction file,
+  plus their settings for excluding built-in shell tools.
+- Exact mechanisms change between agent versions, so each is verified when this phase starts,
+  not assumed from this spec.
+
+`ctx` itself stays agent-agnostic: the MCP server and CLI are the same for everyone. The
+per-agent pieces live in `ctx/integrations/<agent>/`.
+
+### Evaluation (gates tool replacement)
+
+Replacing an agent's shell can slow it down, raise token spend, or lower output quality, so
+it isn't shipped on by default until it's measured. `ctx/evals/agents/` holds a task suite (fix
+a failing test, start a dev server and verify a page, debug from logs, a multi-step refactor,
+pick up a task another agent started). Each agent runs it in configurations:
+
+1. built-in shell (baseline);
+2. built-in shell + ctx instructions;
+3. ctx MCP with the built-in shell disabled;
+4. same as 3, with plain text vs `as json` vs `as toon` outputs.
+
+Measured per run: task success (scripted checks), wall-clock time, tokens in and out, number of
+tool calls, and how often the agent misused ctx (unparsed sentences, unbounded reads). A
+configuration becomes a default only if it's no worse on success and no more than ~10% worse on
+time and tokens than the baseline.
 
 ### Sharing tabs between agents (and you)
 
@@ -660,8 +777,8 @@ at the prompt, not run, so reconnecting is one Enter.
   model, proven against real-world TUIs; objects are single-threaded, which suits this design).
   Fallback if its API churns too much: `alacritty_terminal`. Pick one in the Phase 0 spike and hide
   it behind a `Terminal` trait.
-- **PTY:** `openpty` + `posix_spawn` directly (not `portable-pty`), because spawning needs the
-  macOS-specific attributes below.
+- **PTY:** `openpty` directly (not `portable-pty`). Shells are started through `ctx-launch`
+  (see Permissions), which needs macOS-specific spawn attributes.
 - **Shell integration:** the server injects a tiny zsh integration (via `ZDOTDIR` shim that then
   sources the user's real `~/.zshrc`) that emits OSC 133 prompt/command/output marks and OSC 7 for
   the current folder. This is what makes `read last command`, `list commands in`, `wait until … is idle`, and the
@@ -670,8 +787,10 @@ at the prompt, not run, so reconnecting is one Enter.
 
 ### Scrollback and memory
 
-Scrollback, not the GPU, is where terminals actually spend memory: 15 tabs × 10,000 lines ×
-200 columns × ~16 bytes per cell ≈ 480 MB if stored naively. So:
+Other terminals spend memory in two places: **GPU surfaces per tab** (avoided by CTX.app drawing
+every tab through one surface per window; see the ctx-app spec) and **scrollback**. Scrollback
+can be just as large: 15 tabs × 10,000 lines × 200 columns × ~16 bytes per cell ≈ 480 MB if
+stored naively. So:
 
 - Each tab keeps a small **hot** region (screen + ~1,000 lines) in the emulator's native format.
 - Older lines are moved to a **cold** store: lines packed as text plus run-length-encoded styles,
@@ -692,7 +811,7 @@ Scrollback, not the GPU, is where terminals actually spend memory: 15 tabs × 10
 - Unix domain socket at `$TMPDIR/ctx-<uid>/server.sock`. The directory is mode 0700 and the
   socket 0600.
 - Length-prefixed messages encoded with `postcard` (compact serde). Types are defined once in
-  `ctx-protocol` and shared by the CLI, CTX.app and `bro`. The protocol carries a version, and the
+  `ctx-protocol` and shared by the CLI and CTX.app. The protocol carries a version, and the
   server refuses mismatched clients with a clear message.
 - Request/response for CLI verbs. CTX.app additionally **subscribes** to the tabs it is showing
   and receives screen updates: changed rows only (damage tracking from the emulator), as runs of
@@ -713,47 +832,140 @@ refused), OSC 133, wide characters, emoji and grapheme clusters, and reporting
 ## Permissions
 
 **Requirement:** the terminal grants nothing. Whether a process may read `~/Documents`, record the
-screen or control other apps is decided by macOS for that process. Giving CTX.app access to
-something must not give it to the commands you run, and vice versa.
+screen or control other apps is decided by macOS for that process's signed binary. Giving
+CTX.app access to something must not give it to the commands you run, and vice versa.
 
-**How other terminals behave (and why that's bad):** macOS privacy checks (TCC) look at a
-process's *responsible process*, and children inherit it. Everything run inside iTerm2,
-Terminal.app or Ghostty is attributed to the terminal app. Grant iTerm Full Disk Access so you can
-`ls` a protected folder, and every agent or tool you ever run in it gets Full Disk Access too.
+### How other terminals actually behave (researched 2026-10-10)
 
-**How ctx does it:**
+macOS privacy checks (TCC) look at a process's *responsible process*, and children inherit it.
 
-1. The server is started by launchd, not by any app, so it inherits nobody's grants.
-2. Each tab's shell is spawned with `posix_spawn` and the attribute
-   `responsibility_spawnattrs_setdisclaim(attr, 1)`. This is a private but long-stable macOS API
-   (since 10.14), used by Chromium and LLDB. The tab's process becomes its own responsible
-   process instead of the server's or CTX.app's.
-3. CTX.app and the server request no privacy permissions and need none. They only read their own
-   config and state files.
-4. Apps launched from a tab with `open` go through launchd and get their own identity and their own
-   grants. For example, a screen-recording app can have Screen Recording even though nothing in
-   CTX does.
+- **Terminal.app, iTerm2 and Ghostty all behave the same way:** everything run inside them is
+  attributed to the terminal app. Grant the terminal Full Disk Access and every command, agent and
+  script run in it has Full Disk Access too.
+- **Ghostty tried to fix this and backed out.** Issue
+  [ghostty#9263](https://github.com/ghostty-org/ghostty/issues/9263) proposed exactly the mechanism
+  below: a launch helper started with `posix_spawn` + `responsibility_spawnattrs_setdisclaim`,
+  which then forks the shell (so `setsid` and `TIOCSCTTY` still work), with a proof of concept in
+  #9274. It was closed as *not planned* in October 2025. The maintainer's reasoning: disclaiming
+  "pushes the TCC permissions down to the shells". If a user then grants the shell (`/bin/zsh`)
+  a permission to make things work, **any** process on the system can spawn a disclaimed shell
+  and use that grant. A grant on a general-purpose shell is worse than a grant on a terminal app.
+- There are reports of Apple planning changes to Full Disk Access (announced 2026-10-02, details
+  unpublished, not verified here). Phase 0 re-checks against the current macOS.
 
-**What this means in practice (to verify in Phase 0, then document honestly in the README):**
+### Evidence: per-binary permissions already work, in any terminal (tested 2026-10-10)
 
-- After a disclaim, a command run directly from the shell (`ls`, `cat`, a CLI agent) is attributed
-  to the tab's responsible process, the shell binary, rather than to each command's own binary.
-  macOS assigns responsibility at spawn time, and zsh doesn't disclaim for its children. The
-  spike must show exactly what happens for:
-  - `ls ~/Documents` (prompt? silent `Operation not permitted`?);
-  - a signed CLI tool with its own identity, run from the shell;
-  - a `.app` launched with `open`;
-  - screen recording from a CLI tool;
-  - what appears in System Settings → Privacy & Security, and what the user can grant there.
-- If CLI commands end up attributed to `/bin/zsh`, that is still strictly better than iTerm. The
-  terminal's own grants never leak, and nothing is granted unless the user does it on purpose.
-  But per-command granularity would then need more work. Options to evaluate:
-  `ctx`-provided `exec` wrapper that disclaims (opt-in per command), or a zsh module that
-  disclaims on every spawn.
-- When a command fails with `Operation not permitted` on a protected location, `ctx` notices it in
-  the output (best-effort pattern match) and CTX.app shows a one-line hint explaining why and which
-  System Settings pane to open. `bro` can explain it too.
-- First run will have some friction. That is accepted.
+- **This Claude Code session** runs as `ghostty → login → zsh → claude → zsh`. Neither Ghostty
+  nor `claude` has Full Disk Access, and `ls ~/Library/Mail`, `~/Library/Messages`,
+  `~/Library/Safari` and `/Library/Application Support/com.apple.TCC` all fail with
+  `Operation not permitted`.
+- **Charles's sys-admin agent** (`~/Agents/sys-admin`) runs Claude Code inside Ghostty with Full
+  Disk Access, and only that Claude. It's started by `bin/sysadmin-agent`, a ~100-line C
+  *scoped launcher* (ad-hoc signed, identifier `com.c.sysadmin-agent`), which alone is granted
+  Full Disk Access:
+  1. Stage 1 re-spawns its own executable with `posix_spawn` +
+     `responsibility_spawnattrs_setdisclaim(attr, 1)`, so stage 2 becomes its own responsible
+     process instead of Ghostty.
+  2. Stage 2 `chdir`s to the project and spawns `claude` **as a child, staying alive as its
+     parent** (spawn, not exec). `claude` and everything it runs inherit stage 2 as their
+     responsible process, so TCC checks *the launcher's* code signature.
+  3. It forwards job control: it ignores SIGINT/SIGQUIT while waiting (they reach `claude`
+     through the process group) and stops itself when `claude` stops, so Ctrl-Z/`fg` work.
+
+So Ghostty's maintainers were right about the risk, but their conclusion doesn't follow.
+Disclaiming is only dangerous when the grant lands on a **general-purpose** binary (a shell).
+When it lands on a **narrow, purpose-built signed launcher**, you get exactly the "permissions per
+signed binary" model, and it works today regardless of which terminal it runs in.
+
+One caution from that same example: a launcher's grant is available to **anything that can run
+the launcher**. `sysadmin-agent` passes its arguments straight through to `claude`, so any process
+running as you could start an FDA-holding Claude with a prompt of its choosing. Narrow
+launchers should fix their arguments, or check who's calling them (parent process, or an
+interactive terminal with a person present).
+
+### The underlying constraint
+
+Anything that holds a permission can be driven by anything that can drive it. If CTX's shells
+held Full Disk Access, every process that can talk to the ctx socket could use it with
+`ctx run`, and by design that includes every agent. So **CTX's own processes and shells hold no
+permissions**, and permissions live only on narrow, signed launchers chosen by the user.
+
+### Design
+
+1. **Nothing flows down from CTX.** The server is started by launchd (not by any app), and each
+   tab's shell is spawned disclaimed. A tiny launcher (`ctx-launch`) uses the same two-stage
+   technique as above, then forks the shell with `setsid`/`TIOCSCTTY`. `ctx-launch` holds no
+   grants. CTX.app and the server request no privacy permissions and need none. Even if a user
+   grants CTX.app something, it can't reach a tab.
+2. **Fail closed.** Plain commands in a tab get only what needs no permission. A protected location
+   gives `Operation not permitted`, and ctx's hint explains why. The hint actively warns *against*
+   granting `zsh`, `bash`, `sh`, `python`, `node`, `perl`, `ruby` or a terminal app, because a grant
+   on any of those is a grant to everything that can run them.
+3. **Scoped launchers are the way to grant.** Exactly the sys-admin pattern: a small signed binary
+   per purpose, holding the permission, staying as the parent of what it starts. ctx makes them
+   first-class without owning them:
+   - They work in a ctx tab exactly as in Ghostty: PTY, process groups and job control behave
+     like any terminal's (covered by tests).
+   - **Visibility:** ctx shows when a tab is running under a different responsible process than
+     its shell, e.g. `ctx list` → `tab 44 "Sysadmin agent" … running with the permissions of
+     sysadmin-agent`. The badge in CTX.app is distinct. The server reads this per foreground process
+     (via the private `responsibility_get_pid_responsible_for_pid`, verified in Phase 0).
+   - **ctx builds them for you** (see Making launchers below). ctx never grants anything
+     itself; you grant the launcher in System Settings.
+4. **Signing note.** Ad-hoc signed launchers (like `sysadmin-agent`) are identified by their code
+   hash, so every rebuild needs a re-grant. A launcher signed with a Developer ID keeps its grant
+   across rebuilds (TCC matches its designated requirement: team + identifier). The template
+   supports both.
+5. **Apps launched with `open`** get their own identity and grants through launchd, as always.
+
+### Making launchers
+
+`ctx make launcher` turns "this program, in this folder, with this permission" into a small,
+signed, narrow binary, like `sysadmin-agent` but generated from a reviewed template, so nobody
+has to write spawn-and-disclaim C by hand.
+
+```
+$ ctx make launcher named "sysadmin" for ~/.local/bin/claude at ~/Agents/sys-admin
+Made ~/Library/Application Support/ctx/launchers/sysadmin/sysadmin (signed, ad-hoc).
+It starts ~/.local/bin/claude in ~/Agents/sys-admin under its own macOS identity.
+Arguments: accepted only when a person runs it at an interactive terminal, not from agents.
+
+To give it Full Disk Access: System Settings → Privacy & Security → Full Disk Access → + →
+choose the file above. (Opening that pane now.)
+Start it in a tab with: ctx run in "Sysadmin agent" "sysadmin"
+```
+
+| Command | What it does |
+|---|---|
+| `ctx make launcher named "sysadmin" for ~/.local/bin/claude at ~/Agents/sys-admin` | Generate, build and sign a launcher for that program and folder. |
+| `ctx make launcher … allowing any arguments` | Pass arguments through (the `sysadmin-agent` behaviour). ctx says plainly that anything able to run the launcher can then use its permission. |
+| `ctx make launcher … signed by "Developer ID Application: …"` | Sign with a Developer ID so grants survive rebuilds (default: ad-hoc). |
+| `ctx list launchers` | Launchers ctx made: name, program, folder, argument policy, signature, which tabs are running them now. Permissions can't be read without them, so it says where to check. |
+| `ctx rebuild launcher "sysadmin"` | Rebuild after a ctx update to the template. Says whether a re-grant is needed (ad-hoc: yes). |
+| `ctx remove launcher "sysadmin"` | Delete it, and remind you to remove its entry in System Settings. |
+
+What every generated launcher does (the template, reviewed once, tested on every macOS release):
+
+- **Two stages**, exactly as proven by `sysadmin-agent`: disclaim on the re-spawn, then spawn the
+  program as a child and stay as its parent, forwarding job control (Ctrl-C, Ctrl-Z, `fg`).
+- **Fixed program and folder**, compiled in as absolute paths. The program's path is checked
+  against the code signature or hash recorded at build time, so swapping the file on disk
+  doesn't inherit the permission.
+- **Argument policy** (default: none from callers other than a person). It refuses arguments
+  unless stdin is an interactive terminal *and* the call didn't come through an agent. Agents can
+  still start it with no arguments.
+- **Refuses to act as a generic shell**: no `-c`, no environment-variable program override, and a
+  fixed `PATH`.
+- **Visible in ctx**: the tab shows that it's running with the launcher's permissions, and the
+  activity log records who started it.
+- Builds with the system `clang` (Xcode Command Line Tools). If they're missing, `ctx make
+  launcher` says how to install them. Source and build script are kept next to the binary, so
+  you can read exactly what you're granting.
+
+Phase 0 confirms on the current macOS: a disclaimed tab shell's behaviour on protected paths
+(silent failure or prompt, and what appears in System Settings); scoped launchers inside ctx tabs
+(Full Disk Access, Screen Recording); job control through a launcher; reading the responsible pid
+of a tab's foreground process.
 
 ## Security
 
@@ -782,6 +994,7 @@ saved_total_gb = 5
 saved_output_mb_per_command = 5
 reopen_on_launch = "ask"           # ask | always | never
 dont_save_env = []                 # e.g. ["*_TOKEN", "AWS_SECRET_*"]
+
 allow_programs_to_clear_scrollback = false
 
 # ssh
@@ -789,8 +1002,7 @@ ssh_integration = true
 ssh_integration_skip = []          # host patterns, e.g. ["router", "*.prod"]
 
 # agents
-run_timeout = "2 minutes"
-run_max_lines = 400
+run_max_lines = 400                # run has no default time limit
 agent_window_name = "Agents"
 
 # assist: suggest a fix for sentences that don't parse (uses bro if installed)
@@ -807,26 +1019,55 @@ max_model_calls = 20
 time_limit = "1 minute"
 ```
 
+## Stack
+
+| Concern | Choice | Why |
+|---|---|---|
+| Language | Rust, edition 2024, stable toolchain pinned in `rust-toolchain.toml` | speed, memory control, one language across the repo |
+| Event loop | `mio` (or `polling`), single-threaded | no async runtime, low idle memory and wakeups |
+| Terminal emulation | `libghostty-vt` (fallback `alacritty_terminal`), behind a `Terminal` trait | proven TUI fidelity; decided in Phase 0 |
+| macOS APIs | `libc`, `nix` for PTY/process; small hand-written FFI for `responsibility_spawnattrs_setdisclaim`, `libproc`, `LOCAL_PEERPID` | few dependencies, explicit unsafe |
+| Wire encoding | `serde` + `postcard` | compact, fast, no schema compiler |
+| Saved records | `zstd` per record; `lz4_flex` for in-memory cold scrollback | zstd for ratio on disk, lz4 for speed in RAM |
+| Index | `rusqlite` (bundled SQLite, FTS5) | one file, full-text search, no service |
+| JSON / TOON output | `serde_json`; own TOON encoder | TOON encoding only, small |
+| HTTP (`ctx ask` only) | `ureq` with rustls | blocking, no runtime; kept out of every other crate |
+| MCP | the official Rust MCP SDK if it stays small, else a hand-written stdio JSON-RPC server | decided when phase 5 starts |
+| Errors | `thiserror` in libraries, plain `Result<_, String>`-style messages at the CLI edge | error text is user-facing English |
+| Logging | `tracing` to a file only when `CTX_DEBUG` is set; off otherwise | no idle cost |
+
+Rules:
+
+- **Every dependency is justified** in the PR that adds it, and checked for maintenance and known
+  advisories (`cargo deny`, `cargo audit` in CI). The binary size and idle-memory budgets in CI
+  catch heavy ones.
+- No `tokio`, no `clap`, no GUI or web crates in `ctx`.
+- `unsafe` only in the FFI modules, each block with a `// SAFETY:` comment.
+- MSRV = the pinned toolchain; bumped deliberately.
+
 ## Crate layout
 
 ```
 ctx/
-  ctx-protocol/   message types, JSON schemas, versioning (shared with ctx-app and bro)
+  ctx-protocol/   message types, output schemas (JSON/TOON), versioning (shared with ctx-app)
   ctx-server/     event loop, PTYs, spawning, emulator wrapper, scrollback store, activity log
   ctx-cli/        sentence grammar table + parser, human and JSON output
   ctx-store/      saved-tab records (.ctxlog), SQLite index, search, retention
   ctx-mcp/        MCP server exposing the CLI verbs
+  integrations/   per-agent instruction templates, plugins/extensions, hooks
   ctx-ask/        `ask`: narrowing, chunking, model client, citation verification, prompts
   ctx/            the single `ctx` binary (cli + `ctx server`)
+  ctx-launch/     tiny launcher for tab shells: disclaimed spawn, setsid, controlling tty
+  launchers/      template + builder for `ctx make launcher` (C source, build script, signing)
   shell/          zsh integration scripts (embedded into the binary at build time)
 ```
 
-Use a hand-written argument parser (or `lexopt`), not `clap` derive, because the grammar is
-sentence-like (`new tab in window 2 at ~/x`) and startup must stay tiny.
+The sentence parser is hand-written (see Command reference → Implementation notes); no `clap`.
 
 ## Phases
 
-0. **Spike (decides the open questions):** disclaim + TCC behaviour matrix above; libghostty-vt vs
+0. **Spike (decides the open questions):** disclaimed tab shells, scoped launchers inside tabs,
+   responsible-pid lookup (see Permissions); libghostty-vt vs
    alacritty_terminal (fidelity on Claude Code, vim, htop, an Ink app; ability to take lines leaving
    scrollback; memory per tab); measure baseline memory.
 1. Sentence parser + grammar table, server, `list`, `open`, `close`, `read`, `type`, `press`, headless attach for testing
@@ -835,16 +1076,40 @@ sentence-like (`new tab in window 2 at ~/x`) and startup must stay tiny.
 2. Shell integration: `list commands in`, `read last command(s)`, `wait`, `run`.
 3. Cold scrollback store and memory budgets. `find`.
 4. Activity log, `ctx list activity`, peer identification.
-5. `ctx run`, the Agents window, the `CLAUDE.md` snippet, then `ctx mcp`.
-6. Saved tabs: per-tab records, index, `list closed`, `search`, `reopen`, `forget`, retention,
+5. `ctx run` (incl. `without waiting`), the Agents window, `ran_by` attribution,
+   `ctx install instructions for …`, then `ctx mcp`, then `as toon`.
+6. Saved tabs: per-tab records, index, `list closed tabs`, `find` over closed tabs, `reopen`, `forget`, retention,
    event lines.
-7. ssh: mode reset at prompt, scrollback-clear protection, remote bootstrap (bash + zsh), screen
+7. Launchers: template, `make`/`list`/`rebuild`/`remove launcher(s)`, responsible-process
+   visibility in `list` and CTX.app. (Proven technique; can move earlier if wanted.)
+8. ssh: mode reset at prompt, scrollback-clear protection, remote bootstrap (bash + zsh), screen
    fallback.
-8. Subscription protocol for CTX.app.
-9. Assist (deterministic suggestions first, then the model).
-10. `ctx ask`, with an eval set of tabs + questions + expected evidence lines.
+9. Subscription protocol for CTX.app.
+10. Assist (deterministic suggestions first, then the model).
+11. `ctx ask`, with an eval set of tabs + questions + expected evidence lines.
+12. Agent evaluation suite, then per-agent tool replacement (`integrations/`), shipped per agent
+    only once it passes the evaluation bar.
 
 ## Testing
+
+**Unit tests** live next to the code (`#[cfg(test)]` modules) and run on every commit with
+`cargo test`. Required coverage, by crate:
+
+- `ctx-cli`: the sentence parser. Every grammar row, phrases in every order, fillers, quoting,
+  reserved words, and each error with its suggested rewrite. Property tests (`proptest`) check
+  that any valid sentence, re-printed in canonical form, parses to the same request.
+- `ctx-protocol`: encode → decode round trips for every message, and that version mismatches
+  are rejected. Snapshot tests (`insta`) pin the JSON and TOON output of every command.
+- `ctx-store`: record write/read round trips, a crash mid-write (truncated file) recovers to the
+  last whole record, retention pruning, index rebuild from records.
+- `ctx-server`: scrollback hot → cold migration and budgets, mode reset at prompt, `ran_by`
+  attribution, `run` refusal rules (busy, someone typing, wrong program in front), and event-line
+  placement.
+- `ctx-ask`: chunking stays within budget; citation verification drops non-existent addresses;
+  redaction applied to prompt and evidence.
+- shared `redact`: a corpus of must-redact and must-not-redact strings.
+
+**Integration and system tests** (in `ctx/tests/`, run in CI on macOS runners):
 
 - Golden-screen tests: feed recorded PTY sessions (vim, htop, Claude Code, an Ink app) to the
   server and compare `read` output to expected screens.
@@ -852,6 +1117,15 @@ sentence-like (`new tab in window 2 at ~/x`) and startup must stay tiny.
   canonical order and in shuffled phrase orders, and must give identical results.
 - Memory test: open 15 tabs, run a fixed workload, assert server footprint is under budget.
 - Latency test: keystroke-to-PTY and PTY-to-update timings under load (`yes` in another tab).
+- Saved-tab tests: run a scripted session, kill the server with `kill -9`, restart, `reopen`, and
+  compare folder, environment, history and event lines.
+- ssh tests against a local `sshd` in CI (bash and zsh remote shells, and an unknown shell for the
+  fallback).
+- Permission tests (manual checklist per macOS release, since TCC can't be scripted reliably):
+  the Phase 0 matrix, re-run on each new macOS version.
+
+CI: GitHub Actions on macOS (Apple Silicon) runners: `cargo fmt --check`, `cargo clippy -- -D
+warnings`, `cargo test`, `cargo deny check`, memory and binary-size budgets.
 
 ## Open questions
 
