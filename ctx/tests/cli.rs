@@ -284,3 +284,76 @@ fn ssh_sessions_are_recorded_with_remote_marks() {
     assert!(screen.contains("[ssh to testhost started") && screen.contains("[ssh to testhost ended"), "{screen}");
     let _ = sshd.kill();
 }
+
+#[test]
+fn ctx_app_subscription_gets_screens_and_sends_input() {
+    use ctx_protocol::*;
+    use std::os::unix::net::UnixStream;
+    let s = Server::start("app");
+    s.ctx(&["open", "tab", "named", "Shown", "at", "/tmp"]).ok();
+    // Connect as CTX.app would.
+    let paths = {
+        // SAFETY of set_var in a test: this test reads its own environment only.
+        unsafe { std::env::set_var("CTX_HOME", &s.dir) };
+        ctx_protocol::config::Paths::resolve(std::env::temp_dir(), 0, s.home.to_str().unwrap())
+    };
+    let mut c = UnixStream::connect(paths.socket()).expect("connect");
+    let hello = Hello {
+        protocol: PROTOCOL_VERSION,
+        client_version: "test".into(),
+        kind: ClientKind::App,
+        folder: "/tmp".into(),
+        in_tab: None,
+        declared_name: None,
+        interactive: false,
+    };
+    write_message(&mut c, &hello).unwrap();
+    assert!(matches!(read_message::<Welcome>(&mut c).unwrap(), Some(Welcome::Accepted { .. })));
+    let sub =
+        StreamIn::Request(Envelope { sentence: "subscribe".into(), request: Request::Subscribe { tabs: vec![1] } });
+    write_message(&mut c, &sub).unwrap();
+    c.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+    let mut full = None;
+    let mut tabs_listed = false;
+    for _ in 0..10 {
+        match read_message::<StreamOut>(&mut c).unwrap() {
+            Some(StreamOut::Screen(u)) if full.is_none() => full = Some(u),
+            Some(StreamOut::TabsChanged(list)) => {
+                tabs_listed = list.windows[0].tabs[0].name.as_deref() == Some("Shown")
+            }
+            Some(StreamOut::Reply(_)) => break,
+            _ => {}
+        }
+    }
+    let full = full.expect("a first screen");
+    assert_eq!(full.changed.len(), full.rows as usize, "the first update is the whole screen");
+    assert!(tabs_listed);
+    let text = |u: &ScreenUpdate| {
+        u.changed
+            .iter()
+            .map(|r| r.runs.iter().map(|x| x.text.as_str()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert!(text(&full).contains("[opened"), "{}", text(&full));
+    assert!(full.changed.iter().any(|r| r.event), "event lines are marked");
+    // Typing from the app reaches the shell; only changed rows come back.
+    for k in ["e", "c", "h", "o", "space", "h", "i", "enter"] {
+        let input = StreamIn::Request(Envelope {
+            sentence: String::new(),
+            request: Request::Input { tab: 1, input: AppInput::Key { key: k.into(), text: None } },
+        });
+        write_message(&mut c, &input).unwrap();
+    }
+    let start = std::time::Instant::now();
+    let mut saw_output = false;
+    while start.elapsed() < std::time::Duration::from_secs(5) && !saw_output {
+        if let Ok(Some(StreamOut::Screen(u))) = read_message::<StreamOut>(&mut c) {
+            assert!(u.changed.len() < u.rows as usize, "only changed rows");
+            saw_output = text(&u).lines().any(|l| l.trim() == "hi");
+        }
+    }
+    assert!(saw_output, "the app saw the command's output");
+    let o = s.ctx(&["list", "commands", "in", "Shown", "as", "json"]).ok().stdout.clone();
+    assert!(o.contains("\"ran_by\": \"you\""), "keys from the app are the person's: {o}");
+}

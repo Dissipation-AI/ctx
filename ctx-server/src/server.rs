@@ -757,6 +757,10 @@ impl Server {
                 c.identity = identity;
                 c.identity.is_app = c.identity.is_app || is_app;
                 c.hello = Some(hello);
+                // CTX.app talks in stream messages from the start.
+                if is_app {
+                    c.mode = Mode::App(Vec::new());
+                }
             }
             self.send(
                 key,

@@ -19,8 +19,27 @@ It replaces tmux for this workspace, and an agent's throwaway shell: agents run 
 named, persistent tabs that a person can watch and audit, and every tab is saved as it goes, so it
 can be read, searched and reopened later, even after a reboot.
 
-The full design is in [SPEC.md](SPEC.md). The grammar is in [docs/grammar.md](docs/grammar.md)
-(generated), the output schemas in [docs/output.md](docs/output.md).
+The full design is in [SPEC.md](SPEC.md). Generated references: the grammar
+([docs/grammar.md](docs/grammar.md)), output schemas ([docs/output.md](docs/output.md)) and event
+lines ([docs/events.md](docs/events.md)). What was measured and decided while building it:
+[docs/phase0.md](docs/phase0.md).
+
+## What's here
+
+| | |
+|---|---|
+| `ctx-cli` | The sentence grammar (one table), parser, help, completion, plain-text answers |
+| `ctx-protocol` | Messages, `as json` / `as toon` schemas, config and paths |
+| `ctx-server` | Event loop, tabs, libghostty-vt emulation, scrollback store, activity log, CTX.app updates |
+| `ctx-store` | Saved tabs (`.ctxlog` records), SQLite index, search |
+| `ctx-ask` | `ctx ask` (map, reduce, verified evidence) and assist through `bro` |
+| `ctx-mcp` | `ctx mcp`: the verbs as MCP tools |
+| `ctx-launch` | Starts each tab's shell under its own macOS identity |
+| `launchers/` | The reviewed template for `ctx make launcher` |
+| `shell/` | zsh and bash integration, the ssh bootstrap, zsh completion |
+| `integrations/` | Claude Code plugin, Codex and Gemini setups (off until evaluated) |
+| `evals/agents/` | The agent evaluation that gates those integrations |
+| `scripts/budgets.sh` | Memory, latency and size budgets |
 
 ## Building
 
