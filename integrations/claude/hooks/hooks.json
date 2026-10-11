@@ -1,0 +1,11 @@
+{
+  "description": "Route Bash tool calls through ctx tabs (ctx run in the session's own tab).",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [{ "type": "command", "command": "ctx", "args": ["hook", "claude"], "timeout": 10 }]
+      }
+    ]
+  }
+}

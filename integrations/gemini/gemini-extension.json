@@ -1,0 +1,10 @@
+{
+  "name": "ctx",
+  "version": "0.1.0",
+  "description": "Run shell commands in persistent, named ctx tabs.",
+  "mcpServers": {
+    "ctx": { "command": "ctx", "args": ["mcp"] }
+  },
+  "contextFileName": "GEMINI.md",
+  "excludeTools": ["run_shell_command"]
+}

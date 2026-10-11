@@ -61,6 +61,10 @@ pub fn run(args: &[String], caller: Caller) -> Out {
     if caller == Caller::Cli && args.len() == 2 && args[0] == "launcher-check" {
         return launchers::check(&args[1]);
     }
+    // A Claude Code PreToolUse hook (integrations/claude); not a sentence.
+    if caller == Caller::Cli && args.len() == 2 && args[0] == "hook" && args[1] == "claude" {
+        return crate::hook::claude();
+    }
     // Used by the zsh completion; not a sentence.
     if caller == Caller::Cli && args.len() == 2 && args[0] == "completion-words" && args[1] == "tabs" {
         return completion_tabs();

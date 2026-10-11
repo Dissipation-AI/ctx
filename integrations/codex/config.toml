@@ -1,0 +1,7 @@
+# Add to ~/.codex/config.toml: ctx's verbs as MCP tools for the OpenAI Codex CLI.
+[mcp_servers.ctx]
+command = "ctx"
+args = ["mcp"]
+
+# To make ctx the only shell, also turn off Codex's own shell tool (the setting's name changes
+# between Codex versions; check `codex --help` and its config reference for the current one).

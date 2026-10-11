@@ -1,0 +1,8 @@
+{
+  "name": "ctx",
+  "version": "0.1.0",
+  "description": "Run Claude Code's shell commands in persistent, named ctx tabs that a person can watch, search and reopen.",
+  "author": { "name": "Dissipation AI" },
+  "repository": "https://github.com/Dissipation-AI/ctx",
+  "license": "Apache-2.0"
+}
