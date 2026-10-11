@@ -27,6 +27,7 @@ const CTX_ZSH: &str = include_str!("../../shell/ctx.zsh");
 const ZSH_COMPLETION: &str = include_str!("../../shell/_ctx");
 const REMOTE_BOOTSTRAP: &str = include_str!("../../shell/remote/bootstrap.sh");
 const REMOTE_BASH: &str = include_str!("../../shell/remote/ctx.bash");
+const LOCAL_BASHRC: &str = include_str!("../../shell/ctx.bashrc");
 
 /// The remote command ssh gets for an interactive session: the bootstrap, base64-encoded so no
 /// quoting survives the trip, decoded and run by the remote `sh`.
@@ -246,6 +247,8 @@ impl Server {
         let integration = paths.runtime.join("ctx.zsh");
         std::fs::write(&integration, CTX_ZSH).map_err(|e| e.to_string())?;
         std::fs::write(paths.runtime.join("_ctx"), ZSH_COMPLETION).map_err(|e| e.to_string())?;
+        // bash tabs: the login files, then the same marks as the remote bash integration.
+        std::fs::write(paths.runtime.join("ctx.bashrc"), format!("{LOCAL_BASHRC}\n{REMOTE_BASH}")).map_err(|e| e.to_string())?;
 
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ctx"));
         let launch_path = exe.parent().map(|d| d.join("ctx-launch")).unwrap_or_else(|| PathBuf::from("ctx-launch"));
@@ -1442,8 +1445,14 @@ impl Server {
                 env.push(("CTX_PREFILL".into(), p.clone()));
             }
         }
-        let argv0 = format!("-{shell_name}");
-        let args = vec!["ctx-launch".to_string(), folder.clone(), shell.clone(), argv0];
+        let mut args = vec!["ctx-launch".to_string(), folder.clone(), shell.clone()];
+        if shell_name == "bash" {
+            // A login bash can't take an rc file; this one reads the login files itself.
+            let rc = self.paths.runtime.join("ctx.bashrc").display().to_string();
+            args.extend(["bash".to_string(), "--rcfile".into(), rc, "-i".into()]);
+        } else {
+            args.push(format!("-{shell_name}"));
+        }
         let disclaim = sys::can_disclaim() && std::env::var_os("CTX_NO_DISCLAIM").is_none();
         let pid = sys::spawn(&self.launch_path, &args, &env, Some(slave.as_raw_fd()), disclaim)
             .map_err(|e| failed(format!("couldn't start the shell: {e}")))?;
@@ -1483,7 +1492,7 @@ impl Server {
             cold,
             log,
             to_pty: Vec::new(),
-            integration_expected: is_zsh,
+            integration_expected: is_zsh || shell_name == "bash",
             integration: false,
             at_prompt: false,
             prompt_pin: None,
