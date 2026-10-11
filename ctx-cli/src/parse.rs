@@ -200,6 +200,16 @@ fn phrases_of(verb: &Verb) -> impl Iterator<Item = &Phrase> {
 
 /// Peel labelled phrases off in any order; collect the rest as the object.
 fn peel(verb: &'static Verb, tokens: &[Token], ctx: &Context) -> Result<Parts, ParseError> {
+    peel_spans(verb, tokens, ctx).map(|(p, _)| p)
+}
+
+/// Like `peel`, and also returns each phrase's token range (for tests that shuffle phrases).
+fn peel_spans(
+    verb: &'static Verb,
+    tokens: &[Token],
+    ctx: &Context,
+) -> Result<(Parts, Vec<(usize, usize)>), ParseError> {
+    let mut spans = Vec::new();
     let mut phrases: BTreeMap<P, (Value, String)> = BTreeMap::new();
     let mut leftover: Vec<Token> = Vec::new();
     let mut i = 0;
@@ -222,6 +232,7 @@ fn peel(verb: &'static Verb, tokens: &[Token], ctx: &Context) -> Result<Parts, P
                 return Err(ParseError::new(format!("`{}` appears twice.", p.words.join(" "))));
             }
             phrases.insert(p.id, (value, shown));
+            spans.push((i, end));
             i = end;
             continue;
         }
@@ -229,7 +240,27 @@ fn peel(verb: &'static Verb, tokens: &[Token], ctx: &Context) -> Result<Parts, P
         i += 1;
     }
     let object = parse_object(verb, &leftover, ctx, &phrases)?;
-    Ok(Parts { verb, phrases, object })
+    Ok((Parts { verb, phrases, object }, spans))
+}
+
+/// A sentence cut into its verb, its object words and its phrases (each phrase's words kept
+/// together), so tests can reorder phrases. `None` if it doesn't parse.
+pub fn chunks(args: &[String], ctx: &Context) -> Option<(String, Vec<String>, Vec<Vec<String>>)> {
+    let tokens: Vec<Token> =
+        args.iter().map(|a| Token { text: a.trim().to_string() }).filter(|t| !t.text.is_empty()).collect();
+    let verb = grammar::verb(&tokens.first()?.lower())?;
+    let words = drop_fillers(&tokens[1..]);
+    let (_, spans) = peel_spans(verb, &words, ctx).ok()?;
+    let mut object = Vec::new();
+    let mut phrases = Vec::new();
+    let mut i = 0;
+    for (a, b) in spans {
+        object.extend(words[i..a].iter().map(|t| t.text.clone()));
+        phrases.push(words[a..b].iter().map(|t| t.text.clone()).collect());
+        i = b;
+    }
+    object.extend(words[i..].iter().map(|t| t.text.clone()));
+    Some((tokens[0].text.clone(), object, phrases))
 }
 
 fn missing(p: &Phrase) -> ParseError {
@@ -332,7 +363,10 @@ fn parse_value(kind: Kind, tokens: &[Token], ctx: &Context, p: &Phrase) -> Resul
         }
         Kind::Name => {
             if grammar::is_sentence_word(&first.text) {
-                return Err(missing(p));
+                return Err(ParseError::new(format!(
+                    "\"{}\" is one of ctx's sentence words, so it can't be a name. Try a longer name, such as \"{} tab\".",
+                    first.text, first.text
+                )));
             }
             Ok((Value::Name(first.text.clone()), 1, quote(&first.text)))
         }
@@ -1535,5 +1569,56 @@ mod tests {
         assert_eq!(quote("cargo test"), "\"cargo test\"");
         assert_eq!(quote("echo $HOME"), "\"echo \\$HOME\"");
         assert_eq!(quote(r#"say "hi""#), r#"'say "hi"'"#);
+    }
+
+    use proptest::prelude::*;
+
+    /// Every help example, as argv words.
+    fn examples() -> Vec<Vec<String>> {
+        crate::grammar::VERBS
+            .iter()
+            .flat_map(|v| v.examples.iter())
+            .map(|(s, _)| crate::parse::tests::words(s.strip_prefix("ctx ").unwrap_or(s)))
+            .collect()
+    }
+
+    #[test]
+    fn every_help_example_parses_and_its_canonical_form_parses_the_same() {
+        for ex in examples() {
+            let a = parse(&ex, &ctx()).unwrap_or_else(|e| panic!("{ex:?}: {e:?}"));
+            let canonical = words(a.canonical.strip_prefix("ctx ").unwrap());
+            let b =
+                parse(&canonical, &ctx()).unwrap_or_else(|e| panic!("canonical of {ex:?}: {:?}: {e:?}", a.canonical));
+            assert_eq!(a.command, b.command, "{ex:?}");
+            assert_eq!(a.canonical, b.canonical);
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn phrases_in_any_order_mean_the_same(seed in any::<u64>(), which in 0usize..64) {
+            let all = examples();
+            let ex = &all[which % all.len()];
+            let (verb, object, mut phrases) = chunks(ex, &ctx()).unwrap();
+            // A deterministic shuffle from the seed, with the object placed anywhere.
+            let mut state = seed | 1;
+            for i in (1..phrases.len()).rev() {
+                state ^= state << 13; state ^= state >> 7; state ^= state << 17;
+                phrases.swap(i, (state % (i as u64 + 1)) as usize);
+            }
+            let at = if phrases.is_empty() { 0 } else { (seed as usize) % (phrases.len() + 1) };
+            let mut shuffled = vec![verb];
+            for (i, p) in phrases.iter().enumerate() {
+                if i == at { shuffled.extend(object.iter().cloned()); }
+                shuffled.extend(p.iter().cloned());
+            }
+            if at >= phrases.len() { shuffled.extend(object.iter().cloned()); }
+            let a = parse(ex, &ctx()).unwrap();
+            let b = parse(&shuffled, &ctx());
+            prop_assert!(b.is_ok(), "{:?} → {:?}: {:?}", ex, shuffled, b.err());
+            let b = b.unwrap();
+            prop_assert_eq!(a.command, b.command);
+            prop_assert_eq!(a.canonical, b.canonical);
+        }
     }
 }

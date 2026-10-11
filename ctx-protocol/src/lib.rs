@@ -451,8 +451,9 @@ pub struct TabInfo {
     /// When the running command started.
     pub started: Option<String>,
     pub unread_lines: u64,
-    /// Columns and rows.
-    pub size: [u16; 2],
+    /// Size in character cells (kept as two fields so lists of tabs stay flat tables in TOON).
+    pub columns: u16,
+    pub rows: u16,
     /// Whether shell integration marks are active (needed by `run`, `wait until … is idle`).
     pub shell_integration: bool,
     /// Name of the program whose macOS permissions the foreground process runs with, when that
