@@ -193,6 +193,8 @@ pub struct Tab {
     /// Who typed into the current prompt line (`you`, `claude (pid 5512)`).
     pub contributors: Vec<String>,
     pub env: BTreeMap<String, String>,
+    /// Exported variables kept out of the record by `dont_save_env`.
+    pub hidden_env: Vec<String>,
     pub env_reported: bool,
     pub title: Option<String>,
     pub last_output_ms: i64,
@@ -431,11 +433,17 @@ impl Tab {
                 let full = mode == "full";
                 let mut set = Vec::new();
                 let mut unset = Vec::new();
+                let mut hidden = Vec::new();
                 for entry in body.split('\x1e').filter(|e| !e.is_empty()) {
                     let mut parts = entry.splitn(3, '\x1f');
                     match (parts.next(), parts.next(), parts.next()) {
                         (Some("S"), Some(k), Some(v)) => {
-                            if !cx.config.env_excluded(k) {
+                            if cx.config.env_excluded(k) {
+                                if !self.hidden_env.iter().any(|h| h == k) {
+                                    self.hidden_env.push(k.to_string());
+                                    hidden.push(k.to_string());
+                                }
+                            } else {
                                 set.push((k.to_string(), v.to_string()));
                             }
                         }
@@ -454,6 +462,9 @@ impl Tab {
                 }
                 if full || !set.is_empty() || !unset.is_empty() {
                     self.log.push(&Record::Env { at_ms: cx.now_ms, full, set, unset });
+                }
+                if !hidden.is_empty() {
+                    self.log.push(&Record::EnvHidden { at_ms: cx.now_ms, names: hidden });
                 }
                 self.env_reported = true;
             }

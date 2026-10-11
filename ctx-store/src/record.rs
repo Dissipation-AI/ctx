@@ -200,6 +200,11 @@ pub enum Record {
         at_ms: i64,
         reason: String,
     },
+    /// Names of exported variables kept out of the record by `dont_save_env` (never values).
+    EnvHidden {
+        at_ms: i64,
+        names: Vec<String>,
+    },
 }
 
 pub fn encode_record(r: &Record) -> io::Result<Vec<u8>> {

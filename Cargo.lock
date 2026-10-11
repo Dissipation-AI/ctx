@@ -219,6 +219,7 @@ dependencies = [
  "ctx-mcp",
  "ctx-protocol",
  "ctx-server",
+ "ctx-store",
  "libc",
  "serde",
  "serde_json",

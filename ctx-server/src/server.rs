@@ -1438,9 +1438,9 @@ impl Server {
                 env.retain(|(ek, _)| ek != k);
                 env.push((k.clone(), v.clone()));
             }
-            for p in &self.config.dont_save_env {
-                if !not_restored.contains(p) && !r.env.keys().any(|k| ctx_protocol::config::glob_match(p, k)) {
-                    continue;
+            for name in &r.hidden_env {
+                if !not_restored.contains(name) {
+                    not_restored.push(name.clone());
                 }
             }
             if let Some(h) = &r.history_file {
@@ -1510,6 +1510,7 @@ impl Server {
             last_finished: None,
             contributors: Vec::new(),
             env: Default::default(),
+            hidden_env: Vec::new(),
             env_reported: false,
             title: None,
             last_output_ms: now,
@@ -1937,6 +1938,7 @@ impl Server {
         }
         let r = Reopening {
             env: h.env.clone(),
+            hidden_env: h.hidden_env.clone(),
             transcript,
             reason,
             last_active_ms: h.last_active_ms,
@@ -3227,6 +3229,7 @@ fn w_started_ms(w: &Waiter) -> i64 {
 
 struct Reopening {
     env: BTreeMap<String, String>,
+    hidden_env: Vec<String>,
     transcript: Vec<String>,
     reason: Option<String>,
     last_active_ms: i64,

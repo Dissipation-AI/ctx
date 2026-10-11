@@ -357,3 +357,26 @@ fn ctx_app_subscription_gets_screens_and_sends_input() {
     let o = s.ctx(&["list", "commands", "in", "Shown", "as", "json"]).ok().stdout.clone();
     assert!(o.contains("\"ran_by\": \"you\""), "keys from the app are the person's: {o}");
 }
+
+#[test]
+fn dont_save_env_keeps_values_out_and_says_so_on_reopen() {
+    let s = Server::start("hidden-env");
+    std::fs::write(s.dir.join("config.toml"), "shell = \"/bin/zsh\"\ndont_save_env = [\"*_TOKEN\"]\n").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2500)); // the server rereads its config
+    s.ctx(&["open", "tab", "named", "Secretive", "at", "/tmp"]).ok();
+    s.ctx(&["run", "in", "Secretive", "export MY_TOKEN=$(printf hunt)er2; export PLAIN=visible"]).ok();
+    s.ctx(&["close", "Secretive", "without", "asking"]).ok();
+    // The value is in no record (the command line didn't contain it either).
+    let h = ctx_store_history(&s.path("data/tabs/1.ctxlog"));
+    assert!(!h.contains("hunter2"), "{h}");
+    assert!(h.contains("PLAIN"));
+    let o = s.ctx(&["reopen", "tab", "1"]).ok().stdout.clone();
+    assert!(o.contains("Not restored (dont_save_env): MY_TOKEN."), "{o}");
+    assert_eq!(s.ctx(&["run", "in", "tab", "1", "echo \"[$MY_TOKEN] $PLAIN\""]).ok().stdout, "[] visible\n");
+}
+
+/// Every record of a tab, decoded, as text (for checking what was saved).
+fn ctx_store_history(path: &std::path::Path) -> String {
+    let (records, _) = ctx_store::record::read_records(path).unwrap();
+    format!("{records:?}")
+}

@@ -17,4 +17,5 @@ serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+ctx-store.workspace = true
 serde_json.workspace = true

@@ -39,6 +39,8 @@ pub struct History {
     pub columns: u16,
     pub rows: u16,
     pub env: BTreeMap<String, String>,
+    /// Variables kept out of the record by `dont_save_env`: not restored on reopen.
+    pub hidden_env: Vec<String>,
     pub commands: Vec<SavedCommand>,
     /// Every line in order: prompts with commands, outputs, unmarked output and event lines.
     pub transcript: Vec<String>,
@@ -148,6 +150,13 @@ impl History {
             Record::Resize { columns, rows, .. } => {
                 self.columns = columns;
                 self.rows = rows;
+            }
+            Record::EnvHidden { names, .. } => {
+                for n in names {
+                    if !self.hidden_env.contains(&n) {
+                        self.hidden_env.push(n);
+                    }
+                }
             }
             Record::Closed { at_ms, reason } => {
                 self.closed_ms = Some(at_ms);
