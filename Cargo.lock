@@ -214,6 +214,7 @@ dependencies = [
 name = "ctx"
 version = "0.1.0"
 dependencies = [
+ "ctx-ask",
  "ctx-cli",
  "ctx-mcp",
  "ctx-protocol",
@@ -226,6 +227,12 @@ dependencies = [
 [[package]]
 name = "ctx-ask"
 version = "0.1.0"
+dependencies = [
+ "redact",
+ "serde",
+ "serde_json",
+ "ureq",
+]
 
 [[package]]
 name = "ctx-cli"
@@ -867,6 +874,11 @@ checksum = "60aa6af80be32871323012e02e6e65f8a7cc7890931ae421d217ad8fe0df2ccf"
 dependencies = [
  "rand_core",
 ]
+
+[[package]]
+name = "redact"
+version = "0.1.0"
+source = "git+https://github.com/Dissipation-AI/redact?tag=v0.1.0#60a8eed4b4ea5bbbe2f5f97c51a2f7cf5c961b72"
 
 [[package]]
 name = "redox_users"

@@ -136,6 +136,18 @@ A tab is its name in quotes, `tab <number>`, or `this tab`. A window is `window 
     out
 }
 
+/// A compact grammar for assist (kept under ~800 tokens so small models cope): each verb's
+/// sentence shape and one example.
+pub fn assist_summary() -> String {
+    let mut out = String::new();
+    for v in VERBS.iter().filter(|v| !v.hidden && v.name != "mcp" && v.name != "help") {
+        let example = v.examples.first().map(|(s, _)| *s).unwrap_or("");
+        out.push_str(&format!("{example}  ({})\n", v.summary.trim_end_matches('.')));
+    }
+    out.push_str("Tabs: \"<name>\" or tab <number>. Phrases (in, at, by, since, within, up to, as json) go in any order. No dashed flags.\n");
+    out
+}
+
 /// The instruction block written into agents' instruction files. Kept short: it's paid for in
 /// every session.
 pub fn agent_instructions() -> String {
@@ -163,6 +175,11 @@ mod tests {
             assert!(p.contains(&format!("ctx {}", v.name)), "{}", v.name);
             assert!(verb(v.name).is_some());
         }
+    }
+
+    #[test]
+    fn assist_summary_stays_small() {
+        assert!(assist_summary().len() < 3200, "{}", assist_summary().len());
     }
 
     #[test]

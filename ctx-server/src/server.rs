@@ -2186,7 +2186,7 @@ impl Server {
             Ok(n) => n,
             Err(e) => return Handled::Reply(Response::Error(e)),
         };
-        let commands = self.command_records(n, None, true, usize::MAX);
+        let commands = self.command_records(n, None, false, usize::MAX, false);
         ok(Output::Records(CommandOutputs { tab: n, tab_name: self.tab_name(n), commands }))
     }
 
@@ -2317,7 +2317,7 @@ impl Server {
             }
             ReadWhat::LastCommands(k) => {
                 let max = max_lines.unwrap_or(self.config.run_max_lines) as usize;
-                let commands = self.command_records(n, Some(k as usize), colors, max);
+                let commands = self.command_records(n, Some(k as usize), colors, max, true);
                 if commands.is_empty() {
                     return err(
                         ErrorKind::NoSuchTab,
@@ -2335,7 +2335,7 @@ impl Server {
             }
             ReadWhat::Command(c) => {
                 let max = max_lines.unwrap_or(self.config.run_max_lines) as usize;
-                let all = self.command_records(n, None, colors, max);
+                let all = self.command_records(n, None, colors, max, true);
                 match all.into_iter().find(|r| r.number == c) {
                     Some(r) => {
                         ok(Output::CommandsWithOutput(CommandOutputs { tab: n, tab_name: name, commands: vec![r] }))
@@ -2351,7 +2351,14 @@ impl Server {
 
     /// Commands with their outputs: from the record on disk, plus whatever is running now.
     /// `last`: only the last N. Outputs longer than `max` lines are cut to head and tail.
-    fn command_records(&mut self, n: u64, last: Option<usize>, colors: bool, max: usize) -> Vec<CommandRecord> {
+    fn command_records(
+        &mut self,
+        n: u64,
+        last: Option<usize>,
+        colors: bool,
+        max: usize,
+        events: bool,
+    ) -> Vec<CommandRecord> {
         if let Some(t) = self.tabs.get_mut(&n) {
             t.flush(now_ms());
         }
@@ -2377,7 +2384,11 @@ impl Server {
                 output.extend(t.live_rows(true));
             }
             let total = output.iter().filter(|l| !l.starts_with(EVENT_MARK)).count() as u64;
-            let shown: Vec<String> = output.iter().map(|l| display_line(l, colors)).collect();
+            let shown: Vec<String> = output
+                .iter()
+                .filter(|l| events || !l.starts_with(EVENT_MARK))
+                .map(|l| display_line(l, colors))
+                .collect();
             let (shown, mut note) =
                 cap_lines(shown, Some(max), &format!("ctx read command {} in {tab_words}", c.number));
             if c.dropped_lines > 0 {

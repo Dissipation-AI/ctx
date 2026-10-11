@@ -94,7 +94,7 @@ pub enum Command {
     Ask {
         question: String,
         about: AskAbout,
-        within_ms: u64,
+        within_ms: Option<u64>,
     },
     Attach {
         tab: TabRef,
@@ -848,7 +848,7 @@ fn to_command(parts: &Parts) -> Result<Command, ParseError> {
                 }
                 _ => AskAbout::Tab(TabRef::This),
             };
-            Command::Ask { question, about, within_ms: duration(parts, P::Within).unwrap_or(60_000) }
+            Command::Ask { question, about, within_ms: duration(parts, P::Within) }
         }
         "status" => Command::Server(Request::Status),
         "open" => {
@@ -1491,7 +1491,7 @@ mod tests {
         assert_eq!(p("attach to tab 4").command, Command::Attach { tab: TabRef::Number(4) });
         assert_eq!(
             p(r#"ask "why?" about tab 212"#).command,
-            Command::Ask { question: "why?".into(), about: AskAbout::Tab(TabRef::Number(212)), within_ms: 60_000 }
+            Command::Ask { question: "why?".into(), about: AskAbout::Tab(TabRef::Number(212)), within_ms: None }
         );
         assert_eq!(p("").command, Command::Help(None));
         assert_eq!(p("help run").command, Command::Help(Some("run".into())));
