@@ -406,6 +406,9 @@ fn parse_tab(tokens: &[Token]) -> Option<(TabRef, usize)> {
 }
 
 fn parse_window(tokens: &[Token]) -> Option<(WindowRef, usize)> {
+    if tokens.first()?.is_word("new") && tokens.get(1).is_some_and(|t| t.is_word("window")) {
+        return Some((WindowRef::New, 2));
+    }
     if !tokens.first()?.is_word("window") {
         return None;
     }
@@ -1074,6 +1077,7 @@ pub fn show_window(w: &WindowRef) -> String {
     match w {
         WindowRef::Number(n) => format!("window {n}"),
         WindowRef::Name(n) => format!("window {}", quote(n)),
+        WindowRef::New => "new window".to_string(),
     }
 }
 

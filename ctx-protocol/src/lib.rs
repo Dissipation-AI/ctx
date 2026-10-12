@@ -11,6 +11,7 @@
 
 pub mod config;
 pub mod docs;
+pub mod sgr;
 pub mod time;
 pub mod toon;
 
@@ -18,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 
 /// Bumped whenever a message changes shape. Client and server must match exactly.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 /// Version of the `as json` / `as toon` schema. Printed as `"schema": 1`.
 pub const SCHEMA_VERSION: u32 = 1;
 /// Largest message either side accepts (a whole `read everything` of a big tab fits).
@@ -175,6 +176,8 @@ pub enum TabRef {
 pub enum WindowRef {
     Number(u64),
     Name(String),
+    /// A window made for this request (`to new window`).
+    New,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -323,6 +326,29 @@ pub enum Request {
         tab: u64,
         input: AppInput,
     },
+    /// CTX.app: the colours of the window showing this tab. The server applies them (palette,
+    /// default foreground/background/cursor) and answers programs' colour queries with them.
+    SetLook {
+        tab: u64,
+        look: Look,
+    },
+    /// CTX.app: scrollback lines above the screen, for scrolling. `from` is a line number as
+    /// counted by [`HistoryLines`]; `None` means the last `count` lines.
+    History {
+        tab: u64,
+        from: Option<u64>,
+        count: u32,
+    },
+    /// CTX.app: find text in one tab (scrollback and screen), case-insensitive.
+    SearchTab {
+        tab: u64,
+        text: String,
+        limit: u32,
+    },
+    /// CTX.app: a closed tab's saved commands and output, with colours, for the History window.
+    SavedTab {
+        tab: u64,
+    },
 
     /// Full records of commands, for `ctx ask`: every command of the tab with its output lines.
     Records {
@@ -417,6 +443,8 @@ pub enum Output {
     Waited(WaitResult),
     Attached(Attached),
     Records(CommandOutputs),
+    History(HistoryLines),
+    TabMatches(TabMatches),
     TabNumbers(Vec<u64>),
     RanBy(RanBy),
 }
@@ -703,8 +731,12 @@ pub enum StreamIn {
         rows: u16,
     },
     Detach,
-    /// CTX.app sends further requests on the same connection.
-    Request(Envelope),
+    /// CTX.app sends further requests on the same connection. The reply carries the same `id`
+    /// (some replies come later than others: opening a tab answers once its shell is ready).
+    Request {
+        id: u64,
+        envelope: Envelope,
+    },
 }
 
 /// Server → client after `Attach` or `Subscribe`.
@@ -716,14 +748,16 @@ pub enum StreamOut {
     Ended { message: String },
     /// Changed rows of a subscribed tab.
     Screen(ScreenUpdate),
-    /// Reply to a `StreamIn::Request`.
-    Reply(Response),
+    /// Reply to the `StreamIn::Request` with this id.
+    Reply { id: u64, response: Response },
     /// The list of windows and tabs changed.
     TabsChanged(TabList),
     /// Bring this tab to the front (`ctx show`).
     Show { tab: u64 },
     /// A program wrote to the clipboard (OSC 52); the app decides whether to accept it.
     Clipboard { tab: u64, text: String },
+    /// Another client (not CTX.app) typed into or read a tab.
+    Activity(ActivityEntry),
 }
 
 /// One coalesced frame of changes to a tab's screen.
@@ -741,6 +775,84 @@ pub struct ScreenUpdate {
     pub full_screen: bool,
     pub default_foreground: [u8; 3],
     pub default_background: [u8; 3],
+    pub cursor_shape: CursorShape,
+    pub cursor_blink: bool,
+    /// A program asked for mouse reports (the app sends [`AppInput::Mouse`] instead of selecting).
+    pub mouse_tracking: bool,
+    /// The shell is showing its prompt (no command running): multi-line paste gets a preview.
+    pub at_prompt: bool,
+    /// Scrollback above the screen: lines numbered `history_first .. history_end`.
+    pub history_first: u64,
+    pub history_end: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CursorShape {
+    #[default]
+    Block,
+    Bar,
+    Underline,
+    /// Drawn as an outline (the terminal isn't focused).
+    Hollow,
+}
+
+/// Colours a viewer wants a tab drawn with.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Look {
+    /// 16 ANSI colours (the rest of the 256-colour palette is the standard cube and greys).
+    pub palette: Vec<[u8; 3]>,
+    pub foreground: [u8; 3],
+    pub background: [u8; 3],
+    pub cursor: [u8; 3],
+    /// Dark appearance (answered to programs that ask for the colour scheme).
+    pub dark: bool,
+    /// The cursor to use until a program asks for another (DECSCUSR).
+    pub cursor_shape: CursorShape,
+    pub cursor_blink: bool,
+}
+
+/// Scrollback lines for CTX.app. Lines are logical (soft wraps joined); the app wraps them to
+/// its width. Numbers count every line the tab ever had, so they stay valid as lines are added.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct HistoryLines {
+    pub tab: u64,
+    /// Oldest line still held.
+    pub first: u64,
+    /// One past the newest line.
+    pub end: u64,
+    /// Number of `lines[0]`.
+    pub from: u64,
+    pub lines: Vec<HistoryLine>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct HistoryLine {
+    pub runs: Vec<StyledRun>,
+    pub event: bool,
+}
+
+/// Matches of a search inside one tab.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct TabMatches {
+    pub tab: u64,
+    pub matches: Vec<TabMatch>,
+    /// More matches exist than were returned.
+    pub more: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct TabMatch {
+    /// Where: a scrollback line number, or a screen row.
+    pub place: MatchPlace,
+    /// Start and end, in characters of the line or row.
+    pub start: u32,
+    pub end: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchPlace {
+    History(u64),
+    Screen(u16),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -749,6 +861,8 @@ pub struct RowUpdate {
     pub runs: Vec<StyledRun>,
     /// An event line drawn by ctx, not by a program.
     pub event: bool,
+    /// The row soft-wraps into the next one (copying joins them).
+    pub wraps: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -782,10 +896,28 @@ pub enum AppInput {
         rows: u16,
     },
     Focus(bool),
-    /// Raw bytes already encoded by the app (mouse reports).
-    Raw(Vec<u8>),
-    /// Scroll the tab's view: positive = towards older lines.
-    Scroll(i32),
+    /// A mouse event for a program that asked for mouse reports; the server encodes it.
+    Mouse(MouseInput),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+pub struct MouseInput {
+    pub action: MouseAction,
+    /// 1 left, 2 right, 3 middle, 4 wheel up, 5 wheel down; 0 for motion with nothing pressed.
+    pub button: u8,
+    /// Cell position (0-based).
+    pub column: u16,
+    pub row: u16,
+    pub shift: bool,
+    pub alt: bool,
+    pub ctrl: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseAction {
+    Press,
+    Release,
+    Motion,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -811,6 +943,8 @@ impl Output {
             Output::Attached(v) => serde_json::to_value(v),
             Output::TabNumbers(v) => serde_json::to_value(serde_json::json!({ "tabs": v })),
             Output::RanBy(v) => serde_json::to_value(v),
+            Output::History(v) => serde_json::to_value(v),
+            Output::TabMatches(v) => serde_json::to_value(v),
         }
         .expect("output types always serialise");
         with_schema(expand_events(inner))

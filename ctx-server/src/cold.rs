@@ -131,6 +131,42 @@ impl ColdStore {
         out
     }
 
+    /// Lines `a..b` counted from the oldest line held (decompressing only the blocks needed).
+    pub fn range(&self, a: usize, b: usize) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut at = 0usize;
+        for blk in &self.blocks {
+            let end = at + blk.lines;
+            if end > a && at < b {
+                let lines = Self::block_lines(blk);
+                for (i, l) in lines.into_iter().enumerate() {
+                    if (a..b).contains(&(at + i)) {
+                        out.push(l);
+                    }
+                }
+            }
+            at = end;
+            if at >= b {
+                return out;
+            }
+        }
+        for l in &self.open {
+            if (a..b).contains(&at) {
+                out.push(l.clone());
+            }
+            at += 1;
+        }
+        if let Some((p, e)) = &self.partial
+            && (a..b).contains(&at)
+        {
+            out.push(match e {
+                Some(json) => event_line(json, p),
+                None => p.clone(),
+            });
+        }
+        out
+    }
+
     /// Every line, oldest first.
     pub fn all(&self) -> Vec<String> {
         self.last(usize::MAX)
@@ -170,6 +206,21 @@ mod tests {
         // Compression: typical output shrinks several times.
         let raw: usize = (0..1024).map(|i| format!("line {i} with some typical output text").len() + 1).sum();
         assert!(c.bytes() * 3 < raw, "{} vs {raw}", c.bytes());
+    }
+
+    #[test]
+    fn range_spans_blocks() {
+        let mut c = ColdStore::default();
+        for i in 0..600 {
+            c.push_line(format!("l{i}"));
+        }
+        let r = c.range(250, 260);
+        assert_eq!(r.len(), 10);
+        assert_eq!(r[0], "l250");
+        assert_eq!(r[9], "l259");
+        assert_eq!(c.range(590, 700).len(), 10);
+        c.drop_oldest();
+        assert_eq!(c.range(0, 1), vec!["l256".to_string()]);
     }
 
     #[test]

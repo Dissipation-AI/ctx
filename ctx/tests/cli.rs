@@ -317,8 +317,10 @@ fn ctx_app_subscription_gets_screens_and_sends_input() {
     };
     write_message(&mut c, &hello).unwrap();
     assert!(matches!(read_message::<Welcome>(&mut c).unwrap(), Some(Welcome::Accepted { .. })));
-    let sub =
-        StreamIn::Request(Envelope { sentence: "subscribe".into(), request: Request::Subscribe { tabs: vec![1] } });
+    let sub = StreamIn::Request {
+        id: 1,
+        envelope: Envelope { sentence: "subscribe".into(), request: Request::Subscribe { tabs: vec![1] } },
+    };
     write_message(&mut c, &sub).unwrap();
     c.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
     let mut full = None;
@@ -329,7 +331,10 @@ fn ctx_app_subscription_gets_screens_and_sends_input() {
             Some(StreamOut::TabsChanged(list)) => {
                 tabs_listed = list.windows[0].tabs[0].name.as_deref() == Some("Shown")
             }
-            Some(StreamOut::Reply(_)) => break,
+            Some(StreamOut::Reply { id, .. }) => {
+                assert_eq!(id, 1, "replies carry the request's id");
+                break;
+            }
             _ => {}
         }
     }
@@ -347,10 +352,13 @@ fn ctx_app_subscription_gets_screens_and_sends_input() {
     assert!(full.changed.iter().any(|r| r.event), "event lines are marked");
     // Typing from the app reaches the shell; only changed rows come back.
     for k in ["e", "c", "h", "o", "space", "h", "i", "enter"] {
-        let input = StreamIn::Request(Envelope {
-            sentence: String::new(),
-            request: Request::Input { tab: 1, input: AppInput::Key { key: k.into(), text: None } },
-        });
+        let input = StreamIn::Request {
+            id: 2,
+            envelope: Envelope {
+                sentence: String::new(),
+                request: Request::Input { tab: 1, input: AppInput::Key { key: k.into(), text: None } },
+            },
+        };
         write_message(&mut c, &input).unwrap();
     }
     let start = std::time::Instant::now();
@@ -362,6 +370,25 @@ fn ctx_app_subscription_gets_screens_and_sends_input() {
         }
     }
     assert!(saw_output, "the app saw the command's output");
+    // Finding text in the tab, and scrollback lines for scrolling, answer by id.
+    let ask = |c: &mut UnixStream, id: u64, request: Request| -> Response {
+        write_message(c, &StreamIn::Request { id, envelope: Envelope { sentence: String::new(), request } }).unwrap();
+        loop {
+            if let Some(StreamOut::Reply { id: got, response }) = read_message::<StreamOut>(c).unwrap()
+                && got == id
+            {
+                return response;
+            }
+        }
+    };
+    match ask(&mut c, 7, Request::SearchTab { tab: 1, text: "echo hi".into(), limit: 10 }) {
+        Response::Ok(Output::TabMatches(m)) => assert!(!m.matches.is_empty(), "{m:?}"),
+        other => panic!("{other:?}"),
+    }
+    match ask(&mut c, 8, Request::History { tab: 1, from: None, count: 50 }) {
+        Response::Ok(Output::History(h)) => assert!(h.end >= h.first && h.lines.len() as u64 == h.end - h.from),
+        other => panic!("{other:?}"),
+    }
     let o = s.ctx(&["list", "commands", "in", "Shown", "as", "json"]).ok().stdout.clone();
     assert!(o.contains("\"ran_by\": \"you\""), "keys from the app are the person's: {o}");
 }

@@ -107,6 +107,8 @@ enum WaitKind {
 #[derive(Debug)]
 struct Waiter {
     client: usize,
+    /// CTX.app's id for the request being answered.
+    id: Option<u64>,
     tab: u64,
     kind: WaitKind,
     deadline: Option<Instant>,
@@ -169,7 +171,9 @@ pub struct Server {
     last_frame: Instant,
     server_exe: PathBuf,
     /// Requests for tabs still starting, replayed at their first prompt.
-    starting: Vec<(usize, Envelope, Instant)>,
+    starting: Vec<(usize, Envelope, Instant, Option<u64>)>,
+    /// CTX.app's id for the request being handled now.
+    current_id: Option<u64>,
     /// When free memory was last handed back.
     relieved_at: i64,
 }
@@ -283,6 +287,7 @@ impl Server {
             last_frame: Instant::now(),
             server_exe: exe,
             starting: Vec::new(),
+            current_id: None,
             relieved_at: 0,
         };
         server.recover();
@@ -447,16 +452,18 @@ impl Server {
     /// Replay held requests whose tab is ready (or all of them after 10 seconds).
     fn replay_starting(&mut self, timed_out_only: bool) {
         let held = std::mem::take(&mut self.starting);
-        for (key, env, at) in held {
+        for (key, env, at, id) in held {
             let target = self.request_tab(key, &env.request);
             let ready = target.and_then(|t| self.tabs.get(&t)).is_none_or(|t| t.at_prompt || !t.integration_expected);
             let expired = at.elapsed() >= Duration::from_secs(10);
             if (ready && !timed_out_only) || expired {
                 if self.clients.contains_key(&key) {
+                    let outer = std::mem::replace(&mut self.current_id, id);
                     self.on_request(key, env);
+                    self.current_id = outer;
                 }
             } else {
-                self.starting.push((key, env, at));
+                self.starting.push((key, env, at, id));
             }
         }
     }
@@ -641,9 +648,14 @@ impl Server {
     }
 
     fn reply(&mut self, key: usize, r: Response) {
+        let id = self.current_id;
+        self.reply_with_id(key, id, r);
+    }
+
+    fn reply_with_id(&mut self, key: usize, id: Option<u64>, r: Response) {
         let in_app = matches!(self.clients.get(&key).map(|c| &c.mode), Some(Mode::App(_)));
         if in_app {
-            self.send(key, &StreamOut::Reply(r));
+            self.send(key, &StreamOut::Reply { id: id.unwrap_or(0), response: r });
         } else {
             self.send(key, &r);
         }
@@ -756,6 +768,10 @@ impl Server {
             if let Some(c) = self.clients.get_mut(&key) {
                 c.identity = identity;
                 c.identity.is_app = c.identity.is_app || is_app;
+                // CTX.app is the person at the keyboard, whoever launched it.
+                if is_app {
+                    c.identity.is_agent = false;
+                }
                 c.hello = Some(hello);
                 // CTX.app talks in stream messages from the start.
                 if is_app {
@@ -787,7 +803,11 @@ impl Server {
             Mode::App(_) => {
                 let Ok(msg) = decode::<StreamIn>(&frame) else { return };
                 match msg {
-                    StreamIn::Request(env) => self.on_request(key, env),
+                    StreamIn::Request { id, envelope } => {
+                        self.current_id = Some(id);
+                        self.on_request(key, envelope);
+                        self.current_id = None;
+                    }
                     StreamIn::Detach => self.drop_client(key),
                     _ => {}
                 }
@@ -811,15 +831,30 @@ impl Server {
                 | Request::ListActivity { .. }
                 | Request::Status
         );
-        if is_read && !self.config.log_reads {
-            return;
-        }
         let typed = match &env.request {
             Request::Type { text, .. } => Some(text.clone()),
             Request::Run { command, .. } => Some(command.clone()),
+            Request::Press { keys, .. } => Some(keys.join(" ")),
             _ => None,
         };
         let ms = now_ms();
+        if tab.is_some() {
+            let entry = ActivityEntry {
+                at: iso_utc(ms),
+                client: c.identity.describe(),
+                program: c.identity.program.clone(),
+                pid: c.identity.pid,
+                declared_name: c.identity.declared.clone(),
+                sentence: env.sentence.clone(),
+                tab,
+                typed: typed.clone(),
+            };
+            self.push_activity(entry);
+        }
+        let Some(c) = self.clients.get(&key) else { return };
+        if is_read && !self.config.log_reads {
+            return;
+        }
         let line = LogLine {
             at: iso_utc(ms),
             at_ms: ms,
@@ -858,9 +893,16 @@ impl Server {
                     | Request::Read { .. }
                     | Request::Records { .. }
                     | Request::CloseTab { .. }
+                    // CTX.app's own traffic is answered in order, never held.
+                    | Request::Input { .. }
+                    | Request::SetLook { .. }
+                    | Request::History { .. }
+                    | Request::SearchTab { .. }
+                    | Request::SavedTab { .. }
+                    | Request::Subscribe { .. }
             )
         {
-            self.starting.push((key, env, Instant::now()));
+            self.starting.push((key, env, Instant::now(), self.current_id));
             return;
         }
         self.log_request(key, &env, target);
@@ -990,6 +1032,7 @@ impl Server {
             WindowRef::Name(name) => {
                 self.windows.iter().find(|x| x.name.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(name)))
             }
+            WindowRef::New => None,
         };
         found.map(|w| w.number).ok_or_else(|| {
             let list: Vec<String> = self
@@ -1003,6 +1046,7 @@ impl Server {
             let shown = match w {
                 WindowRef::Number(n) => format!("window {n}"),
                 WindowRef::Name(n) => format!("window \"{n}\""),
+                WindowRef::New => "a new window".to_string(),
             };
             ErrorReply::new(
                 ErrorKind::NoSuchWindow,
@@ -1078,6 +1122,13 @@ impl Server {
             Request::Show { tab } => self.show(key, &tab),
             Request::Attach { tab, columns, rows } => self.attach(key, &tab, columns, rows),
             Request::Subscribe { tabs } => self.subscribe(key, tabs),
+            Request::SetLook { tab, look } => self.set_look(tab, look),
+            Request::History { tab, from, count } => self.history(tab, from, count),
+            Request::SearchTab { tab, text, limit } => self.search_tab(tab, &text, limit),
+            Request::SavedTab { tab } => {
+                let commands = self.command_records(tab, None, true, usize::MAX, true);
+                ok(Output::Records(CommandOutputs { tab, tab_name: self.tab_name(tab), commands }))
+            }
             Request::Input { tab, input } => self.app_input(key, tab, input),
             Request::Records { tab } => self.records(key, &tab),
             Request::MatchingTabs { filter, limit } => self.matching_tabs(key, filter, limit),
@@ -1308,12 +1359,15 @@ impl Server {
     /// right after `open` never races the shell's startup.
     fn when_ready(&mut self, key: usize, o: Opened) -> Handled {
         let ready = o.tab.and_then(|t| self.tabs.get(&t)).is_none_or(|t| !t.integration_expected || t.integration);
-        if ready {
+        // CTX.app shows the tab at once; typing before the prompt is just buffered.
+        let app = self.clients.get(&key).is_some_and(|c| c.identity.is_app);
+        if ready || app {
             return ok(Output::Opened(o));
         }
         let tab = o.tab.unwrap_or(0);
         self.waiters.push(Waiter {
             client: key,
+            id: self.current_id,
             tab,
             kind: WaitKind::Ready { opened: o },
             deadline: Some(Instant::now() + Duration::from_secs(10)),
@@ -1367,6 +1421,7 @@ impl Server {
             None => None,
         };
         let w = match &window {
+            Some(WindowRef::New) => self.new_window(None),
             Some(wr) => match self.resolve_window(wr) {
                 Ok(w) => w,
                 Err(e) => return Handled::Reply(Response::Error(e)),
@@ -1517,6 +1572,7 @@ impl Server {
             unread_lines: 0,
             event_queue: Vec::new(),
             viewers: 0,
+            look: None,
             unmarked: Vec::new(),
             unmarked_partial: None,
             last_flush_ms: now,
@@ -1725,7 +1781,7 @@ impl Server {
         };
         for w in mine {
             let r = Response::Error(ErrorReply::new(ErrorKind::Failed, format!("Tab {n} closed while waiting.")));
-            self.reply(w.client, r);
+            self.reply_with_id(w.client, w.id, r);
         }
         // Attached terminals are told.
         let attached: Vec<usize> =
@@ -1813,9 +1869,12 @@ impl Server {
             Ok(n) => n,
             Err(e) => return Handled::Reply(Response::Error(e)),
         };
-        let wn = match self.resolve_window(to) {
-            Ok(w) => w,
-            Err(e) => return Handled::Reply(Response::Error(e)),
+        let wn = match to {
+            WindowRef::New => self.new_window(None),
+            _ => match self.resolve_window(to) {
+                Ok(w) => w,
+                Err(e) => return Handled::Reply(Response::Error(e)),
+            },
         };
         for w in self.windows.iter_mut() {
             w.tabs.retain(|t| *t != n);
@@ -2044,6 +2103,7 @@ impl Server {
         let max = max_lines.unwrap_or(self.config.run_max_lines) as usize;
         self.waiters.push(Waiter {
             client: key,
+            id: self.current_id,
             tab: n,
             kind: WaitKind::Run { command, number: None, max_lines: max, colors, wait, sent_at: Instant::now() },
             deadline: within_ms.map(|ms| Instant::now() + Duration::from_millis(ms)),
@@ -2193,6 +2253,7 @@ impl Server {
         };
         self.waiters.push(Waiter {
             client: key,
+            id: self.current_id,
             tab: n,
             kind,
             deadline: Some(Instant::now() + Duration::from_millis(within_ms)),
@@ -2688,7 +2749,7 @@ impl Server {
                     c.close_after_flush = true;
                 }
             }
-            StreamIn::Request(_) => {}
+            StreamIn::Request { .. } => {}
         }
     }
 
@@ -2755,18 +2816,123 @@ impl Server {
                 let b = t.term.encode_paste(&s);
                 t.to_pty.extend_from_slice(&b);
             }
-            AppInput::Resize { columns, rows } => t.resize(columns.max(20), rows.max(5), now_ms()),
+            AppInput::Resize { columns, rows } => {
+                t.resize(columns.max(20), rows.max(5), now_ms());
+                self.dirty.insert(n);
+            }
             AppInput::Focus(f) => {
                 if t.term.focus_reporting() {
                     t.to_pty.extend_from_slice(if f { b"\x1b[I" } else { b"\x1b[O" });
                 }
             }
-            AppInput::Raw(b) => t.to_pty.extend_from_slice(&b),
-            AppInput::Scroll(_) => {}
+            AppInput::Mouse(m) => {
+                let b = t.term.encode_mouse(&m);
+                t.to_pty.extend_from_slice(&b);
+            }
         }
+        // The screen changes when the program answers, not when input goes in.
         self.flush_tab(n);
-        self.dirty.insert(n);
         Handled::Reply(Response::Ok(Output::Done(Done { message: String::new() })))
+    }
+
+    fn set_look(&mut self, n: u64, look: Look) -> Handled {
+        let Some(t) = self.tabs.get_mut(&n) else {
+            return err(ErrorKind::NoSuchTab, format!("Tab {n} isn't open."));
+        };
+        if t.look.as_ref() != Some(&look) {
+            t.term.set_look(&look);
+            t.look = Some(look);
+            if let Some(r) = t.render.as_mut() {
+                r.force_full = true;
+            }
+            self.dirty.insert(n);
+        }
+        done("")
+    }
+
+    fn tab_palette(t: &Tab) -> [[u8; 3]; 256] {
+        match &t.look {
+            Some(l) => ctx_protocol::sgr::full_palette(&l.palette),
+            None => ctx_protocol::sgr::full_palette(&ctx_protocol::sgr::DEFAULT_ANSI),
+        }
+    }
+
+    fn history(&mut self, n: u64, from: Option<u64>, count: u32) -> Handled {
+        let Some(t) = self.tabs.get(&n) else {
+            return err(ErrorKind::NoSuchTab, format!("Tab {n} isn't open."));
+        };
+        let first = t.cold.dropped_lines;
+        let end = first + t.cold.len() as u64;
+        let count = (count as u64).min(10_000);
+        let from = from.unwrap_or(end.saturating_sub(count)).clamp(first, end);
+        let upto = (from + count).min(end);
+        let palette = Self::tab_palette(t);
+        let lines = t
+            .cold
+            .range((from - first) as usize, (upto - first) as usize)
+            .into_iter()
+            .map(|l| match ctx_store::record::split_event_line(&l) {
+                Some((_, text)) => HistoryLine { runs: ctx_protocol::sgr::runs(text, &palette), event: true },
+                None => HistoryLine { runs: ctx_protocol::sgr::runs(&l, &palette), event: false },
+            })
+            .collect();
+        ok(Output::History(HistoryLines { tab: n, first, end, from, lines }))
+    }
+
+    fn search_tab(&mut self, n: u64, text: &str, limit: u32) -> Handled {
+        let Some(t) = self.tabs.get(&n) else {
+            return err(ErrorKind::NoSuchTab, format!("Tab {n} isn't open."));
+        };
+        let needle: Vec<char> = text.to_lowercase().chars().collect();
+        let mut matches = Vec::new();
+        let mut more = false;
+        if needle.is_empty() {
+            return ok(Output::TabMatches(TabMatches { tab: n, matches, more }));
+        }
+        let scan = |place: MatchPlace, line: &str, matches: &mut Vec<TabMatch>| -> bool {
+            let hay: Vec<char> = ctx_store::ansi::strip(line).to_lowercase().chars().collect();
+            let mut i = 0;
+            while i + needle.len() <= hay.len() {
+                if hay[i..i + needle.len()] == needle[..] {
+                    if matches.len() >= limit as usize {
+                        return false;
+                    }
+                    matches.push(TabMatch { place, start: i as u32, end: (i + needle.len()) as u32 });
+                    i += needle.len();
+                } else {
+                    i += 1;
+                }
+            }
+            true
+        };
+        let first = t.cold.dropped_lines;
+        'outer: {
+            for (i, l) in t.cold.all().iter().enumerate() {
+                let l = ctx_store::record::split_event_line(l).map(|(_, t)| t).unwrap_or(l);
+                if !scan(MatchPlace::History(first + i as u64), l, &mut matches) {
+                    more = true;
+                    break 'outer;
+                }
+            }
+            let top = t.term.active_top();
+            for y in 0..t.rows {
+                let row = t.term.row(top + y as u64, false);
+                if !scan(MatchPlace::Screen(y), &row, &mut matches) {
+                    more = true;
+                    break 'outer;
+                }
+            }
+        }
+        ok(Output::TabMatches(TabMatches { tab: n, matches, more }))
+    }
+
+    /// Tell CTX.app that another client typed into or read a tab.
+    fn push_activity(&mut self, entry: ActivityEntry) {
+        let apps: Vec<usize> =
+            self.clients.iter().filter(|(_, c)| matches!(c.mode, Mode::App(_))).map(|(k, _)| *k).collect();
+        for k in apps {
+            self.send(k, &StreamOut::Activity(entry.clone()));
+        }
     }
 
     fn broadcast_tabs(&mut self) {
@@ -2785,7 +2951,6 @@ impl Server {
         if self.dirty.is_empty() || self.last_frame.elapsed() < Duration::from_millis(8) {
             return;
         }
-        self.last_frame = Instant::now();
         let dirty: Vec<u64> = std::mem::take(&mut self.dirty).into_iter().collect();
         let apps: Vec<(usize, Vec<u64>)> = self
             .clients
@@ -2800,6 +2965,8 @@ impl Server {
             for (k, tabs) in &apps {
                 if tabs.contains(&n) {
                     self.send(*k, &StreamOut::Screen(update.clone()));
+                    // Only frames that carry something count towards the one-per-8 ms limit.
+                    self.last_frame = Instant::now();
                 }
             }
         }
@@ -3167,7 +3334,7 @@ impl Server {
                 }
             }
         };
-        self.reply(w.client, response);
+        self.reply_with_id(w.client, w.id, response);
     }
 
     // -----------------------------------------------------------------------------------------

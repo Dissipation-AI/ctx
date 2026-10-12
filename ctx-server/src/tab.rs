@@ -203,6 +203,8 @@ pub struct Tab {
     pub event_queue: Vec<(String, String)>,
     /// Viewers (CTX.app subscriptions and attached terminals).
     pub viewers: usize,
+    /// Colours CTX.app asked for (scrollback sent to it is coloured with them).
+    pub look: Option<ctx_protocol::Look>,
     /// Output lines outside any command, waiting for the record (only without integration).
     pub unmarked: Vec<String>,
     pub unmarked_partial: Option<String>,

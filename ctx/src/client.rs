@@ -195,6 +195,18 @@ fn start_server(paths: &Paths) -> Result<(), NoServer> {
     let wanted = plist(&exe, &paths.server_log());
     let uid = ctx_server::sys::uid();
     let domain = format!("gui/{uid}");
+    // Registered already (CTX.app registers its own copy with SMAppService): just start it,
+    // rather than replacing that registration with ours.
+    let loaded = std::process::Command::new("/bin/launchctl")
+        .args(["print", &format!("{domain}/{LABEL}")])
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if loaded && !plist_file.exists() {
+        let k = std::process::Command::new("/bin/launchctl").args(["kickstart", &format!("{domain}/{LABEL}")]).output();
+        if k.is_ok_and(|o| o.status.success()) {
+            return Ok(());
+        }
+    }
     let current = std::fs::read_to_string(&plist_file).unwrap_or_default();
     if current != wanted {
         if let Some(d) = plist_file.parent() {

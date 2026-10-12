@@ -109,6 +109,9 @@ pub struct Config {
     pub assist_command: String,
 
     pub ask: AskConfig,
+
+    /// CTX.app's own settings. The server ignores them; the app reads them.
+    pub app: toml::Table,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -143,6 +146,7 @@ impl Default for Config {
             assist: true,
             assist_command: "bro".into(),
             ask: AskConfig::default(),
+            app: toml::Table::new(),
         }
     }
 }
@@ -252,6 +256,8 @@ time_limit = "1 minute"
         assert!(!c.env_excluded("PATH"));
         assert_eq!(Config::parse("").unwrap(), Config::default());
         assert!(Config::parse("nonsense = 1").is_err());
+        let with_app = Config::parse("[app]\nfont = \"SF Mono\"\nfont_size = 13\n").unwrap();
+        assert_eq!(with_app.app.get("font_size").and_then(|v| v.as_integer()), Some(13));
     }
 
     #[test]

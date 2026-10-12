@@ -369,6 +369,7 @@ pub const VERBS: &[Verb] = &[
         examples: &[
             ("ctx move \"Dev server\" to window 2", "Move a tab to the end of another window."),
             ("ctx move \"Dev server\" to window 2 position 1", "…and choose its place."),
+            ("ctx move \"Dev server\" to new window", "Give a tab a window of its own."),
         ],
         hidden: false,
     },

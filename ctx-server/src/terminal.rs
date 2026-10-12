@@ -86,6 +86,12 @@ pub trait Terminal: std::fmt::Debug {
     fn clear_all(&mut self);
     fn mouse_tracking(&self) -> bool;
     fn focus_reporting(&self) -> bool;
+    /// Encode a mouse event the way the program asked for (empty when it didn't ask).
+    fn encode_mouse(&mut self, _m: &ctx_protocol::MouseInput) -> Vec<u8> {
+        Vec::new()
+    }
+    /// Use a viewer's colours: palette, defaults, and the colour scheme reported to programs.
+    fn set_look(&mut self, _look: &ctx_protocol::Look) {}
     /// Estimated bytes held.
     fn memory_estimate(&self) -> u64;
     /// Give memory back while the tab is idle (bounded work). Returns true when more remains.
@@ -107,6 +113,7 @@ pub struct Ghostty {
     /// Event lines not yet harvested, with their JSON forms.
     event_pins: Vec<(TrackedGridRef, String)>,
     encoder: Encoder,
+    mouse: Option<ghostty_vt::mouse::Encoder>,
     events: Vec<TermEvent>,
     /// Compression activity when the terminal was last compacted.
     compacted_at: Option<ghostty_vt::terminal::CompressionActivity>,
@@ -141,6 +148,7 @@ impl Ghostty {
             harvest_pin: None,
             event_pins: Vec::new(),
             encoder: Encoder::new().expect("key encoder"),
+            mouse: None,
             events: Vec::new(),
             compacted_at: None,
         }
@@ -623,6 +631,87 @@ impl Terminal for Ghostty {
 
     fn focus_reporting(&self) -> bool {
         self.t.mode(Mode::FOCUS_EVENT).unwrap_or(false)
+    }
+
+    fn encode_mouse(&mut self, m: &ctx_protocol::MouseInput) -> Vec<u8> {
+        use ghostty_vt::mouse::{Action, Button, EncoderSize, Event as MouseEvent, Position};
+        if !self.mouse_tracking() {
+            return Vec::new();
+        }
+        if self.mouse.is_none() {
+            self.mouse = ghostty_vt::mouse::Encoder::new().ok();
+        }
+        let Some(enc) = self.mouse.as_mut() else { return Vec::new() };
+        // The encoder works in pixels; give it a nominal 10×20 cell and aim at cell centres.
+        let (cols, rows) = (self.t.cols().unwrap_or(80) as u32, self.t.rows().unwrap_or(24) as u32);
+        enc.set_options_from_terminal(&self.t);
+        enc.set_size(EncoderSize {
+            screen_width: cols * 10,
+            screen_height: rows * 20,
+            cell_width: 10,
+            cell_height: 20,
+            padding_top: 0,
+            padding_bottom: 0,
+            padding_right: 0,
+            padding_left: 0,
+        });
+        let Ok(mut ev) = MouseEvent::new() else { return Vec::new() };
+        ev.set_action(match m.action {
+            ctx_protocol::MouseAction::Press => Action::Press,
+            ctx_protocol::MouseAction::Release => Action::Release,
+            ctx_protocol::MouseAction::Motion => Action::Motion,
+        });
+        ev.set_button(match m.button {
+            1 => Some(Button::Left),
+            2 => Some(Button::Right),
+            3 => Some(Button::Middle),
+            4 => Some(Button::Four),
+            5 => Some(Button::Five),
+            _ => None,
+        });
+        let mut mods = Mods::empty();
+        if m.shift {
+            mods |= Mods::SHIFT;
+        }
+        if m.alt {
+            mods |= Mods::ALT;
+        }
+        if m.ctrl {
+            mods |= Mods::CTRL;
+        }
+        ev.set_mods(mods);
+        enc.set_any_button_pressed(m.action == ctx_protocol::MouseAction::Motion && m.button != 0);
+        ev.set_position(Position { x: m.column as f32 * 10.0 + 5.0, y: m.row as f32 * 20.0 + 10.0 });
+        let mut out = Vec::new();
+        let _ = enc.encode_to_vec(&ev, &mut out);
+        out
+    }
+
+    fn set_look(&mut self, look: &ctx_protocol::Look) {
+        use ghostty_vt::style::{Palette, RgbColor};
+        let rgb = |c: [u8; 3]| RgbColor { r: c[0], g: c[1], b: c[2] };
+        let full = ctx_protocol::sgr::full_palette(&look.palette);
+        let _ = self.t.set_default_color_palette(Some(Palette(full.map(rgb))));
+        let _ = self.t.set_default_fg_color(Some(rgb(look.foreground)));
+        let _ = self.t.set_default_bg_color(Some(rgb(look.background)));
+        let _ = self.t.set_default_cursor_color(Some(rgb(look.cursor)));
+        let style = match look.cursor_shape {
+            ctx_protocol::CursorShape::Bar => ghostty_vt::terminal::CursorStyle::Bar,
+            ctx_protocol::CursorShape::Underline => ghostty_vt::terminal::CursorStyle::Underline,
+            ctx_protocol::CursorShape::Hollow => ghostty_vt::terminal::CursorStyle::BlockHollow,
+            ctx_protocol::CursorShape::Block => ghostty_vt::terminal::CursorStyle::Block,
+        };
+        let _ = self.t.set_default_cursor_style(Some(style));
+        let _ = self.t.set_default_cursor_blink(Some(look.cursor_blink));
+        // Apply it now (as a reset to the default would), unless a full-screen program is in charge.
+        if !self.full_screen() {
+            self.t.vt_write(b"\x1b[0 q");
+        }
+        self.t.set_color_scheme(Some(if look.dark {
+            ghostty_vt::terminal::ColorScheme::Dark
+        } else {
+            ghostty_vt::terminal::ColorScheme::Light
+        }));
     }
 
     fn memory_estimate(&self) -> u64 {

@@ -305,6 +305,13 @@ pub fn render(o: &Output, st: &Style) -> Printed {
         Output::Attached(_) => {}
         Output::TabNumbers(v) => p.line(v.iter().map(|n| format!("tab {n}")).collect::<Vec<_>>().join(", ")),
         Output::RanBy(r) => p.line(&r.ran_by),
+        // CTX.app-only replies; the CLI never asks for them.
+        Output::History(h) => {
+            for l in &h.lines {
+                p.line(l.runs.iter().map(|r| r.text.as_str()).collect::<String>());
+            }
+        }
+        Output::TabMatches(m) => p.line(format!("{} found", thousands(m.matches.len() as u64))),
     }
     p
 }

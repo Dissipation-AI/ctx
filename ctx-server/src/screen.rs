@@ -1,13 +1,15 @@
 //! Screen updates for CTX.app: only the rows that changed, as runs of text with one style each.
 
 use crate::tab::Tab;
-use ctx_protocol::{CellStyle, RowUpdate, ScreenUpdate, StyledRun};
+use ctx_protocol::{CellStyle, CursorShape, RowUpdate, ScreenUpdate, StyledRun};
 use ghostty_vt::RenderState;
-use ghostty_vt::render::{CellIterator, Dirty, RowIterator};
+use ghostty_vt::render::{CellIterator, CursorVisualStyle, Dirty, RowIterator};
 use ghostty_vt::screen::CellWide;
 use ghostty_vt::style::Underline;
 
 pub struct Renderer {
+    /// Send every row on the next update (colours changed).
+    pub force_full: bool,
     state: RenderState,
     rows: RowIterator,
     cells: CellIterator,
@@ -22,6 +24,7 @@ impl std::fmt::Debug for Renderer {
 impl Renderer {
     pub fn new() -> Option<Renderer> {
         Some(Renderer {
+            force_full: false,
             state: RenderState::new().ok()?,
             rows: RowIterator::new().ok()?,
             cells: CellIterator::new().ok()?,
@@ -43,8 +46,13 @@ pub fn update(tab: &mut Tab, full: bool) -> Option<ScreenUpdate> {
     };
     let number = tab.number;
     let full_screen = tab.term.full_screen();
+    let mouse_tracking = tab.term.mouse_tracking();
+    let at_prompt = tab.at_prompt && tab.running.is_empty();
+    let history_first = tab.cold.dropped_lines;
+    let history_end = history_first + tab.cold.len() as u64;
     let term = tab.term.ghostty()?;
     let r = tab.render.as_mut()?;
+    let full = full || std::mem::take(&mut r.force_full);
     let snapshot = r.state.update(term).ok()?;
     let dirty = snapshot.dirty().ok()?;
     if dirty == Dirty::Clean && !full {
@@ -135,8 +143,9 @@ pub fn update(tab: &mut Tab, full: bool) -> Option<ScreenUpdate> {
                     runs.pop();
                 }
             }
+            let wraps = row.raw_row().ok().and_then(|r| r.is_wrapped().ok()).unwrap_or(false);
             let _ = row.set_dirty(false);
-            changed.push(RowUpdate { row: row_y, runs, event: event_rows.contains(&row_y) });
+            changed.push(RowUpdate { row: row_y, runs, event: event_rows.contains(&row_y), wraps });
         }
     }
     let _ = snapshot.set_dirty(Dirty::Clean);
@@ -151,5 +160,16 @@ pub fn update(tab: &mut Tab, full: bool) -> Option<ScreenUpdate> {
         full_screen,
         default_foreground: [colors.foreground.r, colors.foreground.g, colors.foreground.b],
         default_background: [colors.background.r, colors.background.g, colors.background.b],
+        cursor_shape: match cursor.visual_style {
+            CursorVisualStyle::Bar => CursorShape::Bar,
+            CursorVisualStyle::Underline => CursorShape::Underline,
+            CursorVisualStyle::BlockHollow => CursorShape::Hollow,
+            _ => CursorShape::Block,
+        },
+        cursor_blink: cursor.blinking,
+        mouse_tracking,
+        at_prompt,
+        history_first,
+        history_end,
     })
 }
