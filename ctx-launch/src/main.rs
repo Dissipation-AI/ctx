@@ -63,7 +63,8 @@ fn main() {
             ] {
                 libc::signal(sig, libc::SIG_DFL);
             }
-            let empty: libc::sigset_t = 0;
+            let mut empty: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut empty);
             libc::sigprocmask(libc::SIG_SETMASK, &empty, std::ptr::null_mut());
             libc::execv(program.as_ptr(), argv_ptrs.as_ptr());
             let msg = b"ctx-launch: couldn't start the shell\n";

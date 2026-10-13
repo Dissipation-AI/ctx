@@ -1,7 +1,10 @@
-//! macOS system calls: pseudo-terminals, disclaimed spawning, process identity. Everything
-//! platform-specific lives here, so a Linux port only has to replace this module.
+//! System calls: pseudo-terminals, disclaimed spawning, process identity. Everything
+//! platform-specific lives here: macOS first, with Linux equivalents (procfs, `SO_PEERCRED`) where
+//! the calls differ.
 
-use std::ffi::{CStr, CString, OsStr};
+use std::ffi::{CStr, CString};
+#[cfg(target_os = "macos")]
+use std::ffi::OsStr;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
@@ -13,6 +16,15 @@ fn cvt(r: libc::c_int) -> io::Result<libc::c_int> {
 
 /// The per-user temporary folder (`/var/folders/…/T/`), from the OS rather than `$TMPDIR`,
 /// which agents' sandboxes sometimes change.
+#[cfg(target_os = "linux")]
+pub fn user_temp_dir() -> PathBuf {
+    match std::env::var_os("XDG_RUNTIME_DIR") {
+        Some(d) if !d.is_empty() => PathBuf::from(d),
+        _ => std::env::temp_dir(),
+    }
+}
+
+#[cfg(target_os = "macos")]
 pub fn user_temp_dir() -> PathBuf {
     let mut buf = vec![0u8; 1024];
     // SAFETY: buf is valid for its length; confstr writes at most that many bytes.
@@ -104,19 +116,24 @@ pub fn spawn(
     // SAFETY: the attr and file-action objects are initialised before use and destroyed after;
     // all pointers stay alive for the posix_spawn call.
     unsafe {
-        let mut attr: libc::posix_spawnattr_t = std::ptr::null_mut();
+        let mut attr: libc::posix_spawnattr_t = std::mem::zeroed();
         cvt_spawn(libc::posix_spawnattr_init(&mut attr))?;
-        let mut actions: libc::posix_spawn_file_actions_t = std::ptr::null_mut();
+        let mut actions: libc::posix_spawn_file_actions_t = std::mem::zeroed();
         cvt_spawn(libc::posix_spawn_file_actions_init(&mut actions))?;
         let result = (|| {
-            let mut sigs: libc::sigset_t = 0;
+            let mut sigs: libc::sigset_t = std::mem::zeroed();
             libc::sigfillset(&mut sigs);
             libc::posix_spawnattr_setsigdefault(&mut attr, &sigs);
-            let empty: libc::sigset_t = 0;
+            let mut empty: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut empty);
             libc::posix_spawnattr_setsigmask(&mut attr, &empty);
+            #[cfg(target_os = "macos")]
             let flags = libc::POSIX_SPAWN_SETSIGDEF | libc::POSIX_SPAWN_SETSIGMASK | libc::POSIX_SPAWN_CLOEXEC_DEFAULT;
+            // Linux has no close-everything flag; our own descriptors are all close-on-exec.
+            #[cfg(target_os = "linux")]
+            let flags = libc::POSIX_SPAWN_SETSIGDEF | libc::POSIX_SPAWN_SETSIGMASK;
             cvt_spawn(libc::posix_spawnattr_setflags(&mut attr, flags as _))?;
-            if disclaim {
+            if disclaim && cfg!(target_os = "macos") {
                 let f = lookup(c"responsibility_spawnattrs_setdisclaim");
                 if f.is_null() {
                     return Err(io::Error::other("this macOS can't disclaim responsibility"));
@@ -169,7 +186,29 @@ pub fn responsible_pid(pid: i32) -> Option<i32> {
     if r > 0 { Some(r) } else { None }
 }
 
+#[cfg(target_os = "linux")]
+fn peer_cred(fd: RawFd) -> Option<libc::ucred> {
+    let mut cred = libc::ucred { pid: 0, uid: 0, gid: 0 };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: getsockopt with a correctly sized out-buffer.
+    let r = unsafe {
+        libc::getsockopt(fd, libc::SOL_SOCKET, libc::SO_PEERCRED, (&mut cred as *mut libc::ucred).cast(), &mut len)
+    };
+    if r == 0 { Some(cred) } else { None }
+}
+
+#[cfg(target_os = "linux")]
+pub fn peer_pid(fd: RawFd) -> Option<i32> {
+    peer_cred(fd).map(|c| c.pid).filter(|p| *p > 0)
+}
+
+#[cfg(target_os = "linux")]
+pub fn peer_uid(fd: RawFd) -> Option<u32> {
+    peer_cred(fd).map(|c| c.uid)
+}
+
 /// Process id of the other end of a Unix socket.
+#[cfg(target_os = "macos")]
 pub fn peer_pid(fd: RawFd) -> Option<i32> {
     let mut pid: libc::pid_t = 0;
     let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
@@ -181,6 +220,7 @@ pub fn peer_pid(fd: RawFd) -> Option<i32> {
 }
 
 /// User id of the other end of a Unix socket.
+#[cfg(target_os = "macos")]
 pub fn peer_uid(fd: RawFd) -> Option<u32> {
     let mut uid: libc::uid_t = 0;
     let mut gid: libc::gid_t = 0;
@@ -200,11 +240,36 @@ pub struct ProcInfo {
     pub start_us: u64,
 }
 
+#[cfg(target_os = "macos")]
 fn c_chars(buf: &[libc::c_char]) -> String {
     let bytes: Vec<u8> = buf.iter().take_while(|c| **c != 0).map(|c| *c as u8).collect();
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
+#[cfg(target_os = "linux")]
+pub fn proc_info(pid: i32) -> Option<ProcInfo> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // `pid (name) state ppid pgrp …`; the name may itself contain parentheses.
+    let open = stat.find('(')?;
+    let close = stat.rfind(')')?;
+    let comm = stat[open + 1..close].to_string();
+    let rest: Vec<&str> = stat[close + 1..].split_whitespace().collect();
+    // rest[0] is the state (field 3), so field n is rest[n - 3].
+    let ppid = rest.get(1)?.parse().ok()?;
+    let pgid = rest.get(2)?.parse().ok()?;
+    let ticks: u64 = rest.get(19)?.parse().ok()?;
+    // SAFETY: sysconf has no preconditions.
+    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as u64;
+    let start_us = boot_time_secs().max(0) as u64 * 1_000_000 + ticks * 1_000_000 / hz;
+    // `comm` is cut to 15 bytes; the executable's name is the long form.
+    let name = proc_path(pid)
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .filter(|n| n.starts_with(&comm) && n.len() > comm.len())
+        .unwrap_or(comm);
+    Some(ProcInfo { pid, ppid, pgid, name, start_us })
+}
+
+#[cfg(target_os = "macos")]
 pub fn proc_info(pid: i32) -> Option<ProcInfo> {
     // SAFETY: proc_bsdinfo is plain old data; proc_pidinfo fills at most its size.
     unsafe {
@@ -228,7 +293,23 @@ pub fn proc_info(pid: i32) -> Option<ProcInfo> {
     }
 }
 
+#[cfg(target_os = "linux")]
+pub fn proc_path(pid: i32) -> Option<PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/exe")).ok()
+}
+
+#[cfg(target_os = "linux")]
+pub fn proc_args(pid: i32) -> Option<Vec<String>> {
+    let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let raw = raw.strip_suffix(&[0]).unwrap_or(&raw);
+    if raw.is_empty() {
+        return None;
+    }
+    Some(raw.split(|b| *b == 0).map(|p| String::from_utf8_lossy(p).into_owned()).collect())
+}
+
 /// Full path of a process's executable.
+#[cfg(target_os = "macos")]
 pub fn proc_path(pid: i32) -> Option<PathBuf> {
     let mut buf = vec![0u8; 4096];
     // SAFETY: buf is valid for its length.
@@ -241,6 +322,7 @@ pub fn proc_path(pid: i32) -> Option<PathBuf> {
 }
 
 /// Arguments of a process (argv), from `KERN_PROCARGS2`.
+#[cfg(target_os = "macos")]
 pub fn proc_args(pid: i32) -> Option<Vec<String>> {
     let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
     let mut size: libc::size_t = 0;
@@ -287,7 +369,21 @@ pub fn ancestors(pid: i32) -> Vec<ProcInfo> {
     out
 }
 
+/// Resident memory of a process, less what it shares with others (file-backed pages).
+#[cfg(target_os = "linux")]
+pub fn memory_footprint(pid: i32) -> u64 {
+    let Ok(statm) = std::fs::read_to_string(format!("/proc/{pid}/statm")) else { return 0 };
+    let f: Vec<u64> = statm.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+    // SAFETY: sysconf has no preconditions.
+    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(1) as u64;
+    match (f.get(1), f.get(2)) {
+        (Some(rss), Some(shared)) => rss.saturating_sub(*shared) * page,
+        _ => 0,
+    }
+}
+
 /// Physical memory footprint of a process (what Activity Monitor shows as Memory).
+#[cfg(target_os = "macos")]
 pub fn memory_footprint(pid: i32) -> u64 {
     // SAFETY: rusage_info_v2 is plain old data and the flavour matches it.
     unsafe {
@@ -435,6 +531,15 @@ pub fn alive(pid: i32) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
+#[cfg(target_os = "linux")]
+pub fn boot_time_secs() -> i64 {
+    std::fs::read_to_string("/proc/stat")
+        .ok()
+        .and_then(|s| s.lines().find_map(|l| l.strip_prefix("btime ").and_then(|v| v.trim().parse().ok())))
+        .unwrap_or(0)
+}
+
+#[cfg(target_os = "macos")]
 pub fn boot_time_secs() -> i64 {
     let mut tv = libc::timeval { tv_sec: 0, tv_usec: 0 };
     let mut size = std::mem::size_of::<libc::timeval>();
@@ -510,12 +615,21 @@ pub fn default_sigpipe() {
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
 }
 
+#[cfg(target_os = "linux")]
+pub fn release_free_memory() -> usize {
+    // SAFETY: malloc_trim has no preconditions.
+    unsafe { libc::malloc_trim(0) };
+    0
+}
+
+#[cfg(target_os = "macos")]
 unsafe extern "C" {
     fn malloc_zone_pressure_relief(zone: *mut libc::c_void, goal: libc::size_t) -> libc::size_t;
 }
 
 /// Hand memory the allocator holds but doesn't use back to the system (after a flood of output).
 /// Returns the bytes released.
+#[cfg(target_os = "macos")]
 pub fn release_free_memory() -> usize {
     // SAFETY: a null zone means all zones; goal 0 means as much as possible.
     unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), 0) }
