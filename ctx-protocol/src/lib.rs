@@ -367,6 +367,10 @@ pub enum Request {
     Restart {
         without_asking: bool,
     },
+    /// The processes running in a tab (under its shell), for CTX.app's overview.
+    Processes {
+        tab: TabRef,
+    },
     /// What you usually start tabs with (first commands, by folder), for CTX.app's + menu.
     Starters {
         limit: u32,
@@ -452,6 +456,25 @@ pub enum Output {
     TabNumbers(Vec<u64>),
     RanBy(RanBy),
     Starters(StarterList),
+    Processes(ProcessList),
+}
+
+/// The processes in a tab, in tree order: the shell first, then what it runs.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ProcessList {
+    pub tab: u64,
+    pub processes: Vec<ProcessInfo>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ProcessInfo {
+    pub pid: i32,
+    pub ppid: i32,
+    pub name: String,
+    /// The command line, shortened.
+    pub command: String,
+    /// How far below the shell (the shell is 0).
+    pub depth: u32,
 }
 
 /// Commands you usually start a tab with, most used first.
@@ -972,6 +995,7 @@ impl Output {
             Output::History(v) => serde_json::to_value(v),
             Output::TabMatches(v) => serde_json::to_value(v),
             Output::Starters(v) => serde_json::to_value(v),
+            Output::Processes(v) => serde_json::to_value(v),
         }
         .expect("output types always serialise");
         with_schema(expand_events(inner))

@@ -354,6 +354,47 @@ pub fn proc_args(pid: i32) -> Option<Vec<String>> {
     }
 }
 
+/// Every process we can see.
+#[cfg(target_os = "linux")]
+pub fn all_processes() -> Vec<ProcInfo> {
+    let Ok(rd) = std::fs::read_dir("/proc") else { return Vec::new() };
+    rd.flatten().filter_map(|e| e.file_name().to_str().and_then(|n| n.parse::<i32>().ok())).filter_map(proc_info).collect()
+}
+
+/// Every process we can see.
+#[cfg(target_os = "macos")]
+pub fn all_processes() -> Vec<ProcInfo> {
+    // SAFETY: the first call asks for the count; the second fills a buffer with room for it.
+    unsafe {
+        let n = libc::proc_listallpids(std::ptr::null_mut(), 0);
+        if n <= 0 {
+            return Vec::new();
+        }
+        let mut pids = vec![0 as libc::pid_t; n as usize + 64];
+        let got = libc::proc_listallpids(pids.as_mut_ptr().cast(), (pids.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int);
+        pids.truncate(got.max(0) as usize);
+        pids.into_iter().filter(|p| *p > 0).filter_map(proc_info).collect()
+    }
+}
+
+/// The processes under `root` (not `root` itself), in tree order with their depth below it.
+pub fn descendants(root: i32) -> Vec<(ProcInfo, usize)> {
+    let all = all_processes();
+    let mut out = Vec::new();
+    fn walk(all: &[ProcInfo], parent: i32, depth: usize, out: &mut Vec<(ProcInfo, usize)>) {
+        let mut kids: Vec<&ProcInfo> = all.iter().filter(|p| p.ppid == parent && p.pid != parent).collect();
+        kids.sort_by_key(|p| p.start_us);
+        for k in kids {
+            out.push((k.clone(), depth));
+            if depth < 16 {
+                walk(all, k.pid, depth + 1, out);
+            }
+        }
+    }
+    walk(&all, root, 0, &mut out);
+    out
+}
+
 /// The chain of parents from `pid` up to launchd (pid 1 excluded), nearest first.
 pub fn ancestors(pid: i32) -> Vec<ProcInfo> {
     let mut out = Vec::new();

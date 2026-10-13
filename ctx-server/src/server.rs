@@ -1089,6 +1089,7 @@ impl Server {
             Request::ListTabs => ok(Output::Tabs(self.tab_list())),
             Request::ListClosedTabs { limit } => self.list_closed(limit),
             Request::Starters { limit } => self.starters(limit),
+            Request::Processes { tab } => self.processes(key, &tab),
             Request::ListCommands { tab, limit } => self.list_commands(key, &tab, limit),
             Request::ListActivity { filter, limit } => self.list_activity(key, filter, limit),
             Request::Read { tab, what, colors, max_lines } => self.read(key, &tab, what, colors, max_lines),
@@ -1229,6 +1230,26 @@ impl Server {
         counts.sort_by(|a, b| b.count.cmp(&a.count).then(b.last_used.cmp(&a.last_used)));
         counts.truncate(limit as usize);
         ok(Output::Starters(StarterList { starters: counts }))
+    }
+
+    /// What runs in a tab: the shell and everything under it.
+    fn processes(&mut self, key: usize, tab: &TabRef) -> Handled {
+        let n = match self.resolve_any(key, tab) {
+            Ok(n) => n,
+            Err(e) => return Handled::Reply(Response::Error(e)),
+        };
+        let Some(t) = self.tabs.get(&n) else {
+            return ok(Output::Processes(ProcessList { tab: n, processes: Vec::new() }));
+        };
+        let processes = sys::descendants(t.launch_pid)
+            .into_iter()
+            .map(|(p, depth)| {
+                let args = sys::proc_args(p.pid).map(|a| a.join(" ")).unwrap_or_else(|| p.name.clone());
+                let command: String = if args.chars().count() > 160 { args.chars().take(159).collect::<String>() + "…" } else { args };
+                ProcessInfo { pid: p.pid, ppid: p.ppid, name: p.name, command, depth: depth as u32 }
+            })
+            .collect();
+        ok(Output::Processes(ProcessList { tab: n, processes }))
     }
 
     fn list_closed(&self, limit: u32) -> Handled {
