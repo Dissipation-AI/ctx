@@ -314,6 +314,18 @@ impl Index {
         st.query_map([tab as i64], row_to_command)?.collect()
     }
 
+    /// The first two commands you ran in each of the last `tabs` tabs, newest tab first:
+    /// (tab, folder, command, started ms), in order within each tab.
+    pub fn first_commands(&self, tabs: u32) -> Result<Vec<(u64, String, String, i64)>> {
+        let mut st = self.conn.prepare(
+            "SELECT c.tab, c.folder, c.text, c.started_ms FROM commands c
+             WHERE c.ran_by = 'you' AND c.tab IN (SELECT number FROM tabs ORDER BY number DESC LIMIT ?1)
+             AND (SELECT COUNT(*) FROM commands d WHERE d.tab = c.tab AND d.ran_by = 'you' AND d.number < c.number) < 2
+             ORDER BY c.tab DESC, c.number",
+        )?;
+        st.query_map([tabs as i64], |r| Ok((r.get::<_, i64>(0)? as u64, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect()
+    }
+
     /// Tabs that match the narrowing, most recently active first.
     pub fn candidate_tabs(&self, n: &Narrow) -> Result<Vec<TabRow>> {
         let mut sql = format!("SELECT {TAB_COLUMNS} FROM tabs t WHERE 1=1");

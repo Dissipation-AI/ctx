@@ -367,6 +367,10 @@ pub enum Request {
     Restart {
         without_asking: bool,
     },
+    /// What you usually start tabs with (first commands, by folder), for CTX.app's + menu.
+    Starters {
+        limit: u32,
+    },
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -447,6 +451,23 @@ pub enum Output {
     TabMatches(TabMatches),
     TabNumbers(Vec<u64>),
     RanBy(RanBy),
+    Starters(StarterList),
+}
+
+/// Commands you usually start a tab with, most used first.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct StarterList {
+    pub starters: Vec<StarterInfo>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct StarterInfo {
+    pub folder: String,
+    /// The first command (with an environment activation before it joined by `&&`).
+    pub command: String,
+    /// How many tabs started this way.
+    pub count: u64,
+    pub last_used: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -945,6 +966,7 @@ impl Output {
             Output::RanBy(v) => serde_json::to_value(v),
             Output::History(v) => serde_json::to_value(v),
             Output::TabMatches(v) => serde_json::to_value(v),
+            Output::Starters(v) => serde_json::to_value(v),
         }
         .expect("output types always serialise");
         with_schema(expand_events(inner))

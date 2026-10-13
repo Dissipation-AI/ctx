@@ -1088,6 +1088,7 @@ impl Server {
         match req {
             Request::ListTabs => ok(Output::Tabs(self.tab_list())),
             Request::ListClosedTabs { limit } => self.list_closed(limit),
+            Request::Starters { limit } => self.starters(limit),
             Request::ListCommands { tab, limit } => self.list_commands(key, &tab, limit),
             Request::ListActivity { filter, limit } => self.list_activity(key, filter, limit),
             Request::Read { tab, what, colors, max_lines } => self.read(key, &tab, what, colors, max_lines),
@@ -1197,6 +1198,37 @@ impl Server {
                 })
                 .collect(),
         }
+    }
+
+    /// What you usually start tabs with: each tab's first command (with an environment
+    /// activation before it joined on), counted by folder and command, most used first.
+    fn starters(&self, limit: u32) -> Handled {
+        let rows = self.index.first_commands(400).unwrap_or_default();
+        let mut per_tab: Vec<(u64, Vec<(String, String, i64)>)> = Vec::new();
+        for (tab, folder, text, at) in rows {
+            match per_tab.last_mut() {
+                Some((t, v)) if *t == tab => v.push((folder, text, at)),
+                _ => per_tab.push((tab, vec![(folder, text, at)])),
+            }
+        }
+        let mut counts: Vec<StarterInfo> = Vec::new();
+        for (_, cmds) in per_tab {
+            let Some((folder, first, at)) = cmds.first().cloned() else { continue };
+            let command = match cmds.get(1) {
+                Some((_, second, _)) if activates_environment(&first) => format!("{first} && {second}"),
+                _ => first,
+            };
+            if command.trim().is_empty() || is_trivial(&command) {
+                continue;
+            }
+            match counts.iter_mut().find(|s| s.folder == folder && s.command == command) {
+                Some(s) => s.count += 1,
+                None => counts.push(StarterInfo { folder, command, count: 1, last_used: iso_utc(at) }),
+            }
+        }
+        counts.sort_by(|a, b| b.count.cmp(&a.count).then(b.last_used.cmp(&a.last_used)));
+        counts.truncate(limit as usize);
+        ok(Output::Starters(StarterList { starters: counts }))
     }
 
     fn list_closed(&self, limit: u32) -> Handled {
@@ -3575,4 +3607,38 @@ fn redraw_bytes(t: &dyn Terminal) -> Vec<u8> {
 fn set_mode(path: &std::path::Path, mode: u32) {
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+}
+
+/// Commands that set up an environment for the next one (`conda activate x`, `source .venv/bin/activate`).
+fn activates_environment(cmd: &str) -> bool {
+    let c = cmd.trim();
+    c.starts_with("conda activate")
+        || c.starts_with("mamba activate")
+        || c.starts_with("micromamba activate")
+        || c.starts_with("workon ")
+        || c.starts_with("pyenv shell")
+        || c.starts_with("nvm use")
+        || c.starts_with("poetry shell")
+        || c.starts_with("pipenv shell")
+        || (c.starts_with("source ") || c.starts_with(". ")) && c.contains("activate")
+        || c == "nix develop"
+}
+
+/// First commands not worth offering (`clear`, `exit`).
+fn is_trivial(cmd: &str) -> bool {
+    matches!(cmd.trim(), "clear" | "exit" | "reset" | "logout")
+}
+
+#[cfg(test)]
+mod starter_tests {
+    use super::*;
+
+    #[test]
+    fn environment_activations() {
+        assert!(activates_environment("conda activate ml"));
+        assert!(activates_environment("source .venv/bin/activate"));
+        assert!(!activates_environment("source ~/.zshrc"));
+        assert!(!activates_environment("jupyter lab"));
+        assert!(is_trivial("clear") && !is_trivial("ls"));
+    }
 }

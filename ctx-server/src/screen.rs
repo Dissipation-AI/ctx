@@ -10,6 +10,9 @@ use ghostty_vt::style::Underline;
 pub struct Renderer {
     /// Send every row on the next update (colours changed).
     pub force_full: bool,
+    /// The cursor as last sent: moving only the cursor (arrow keys at a prompt) changes no row,
+    /// but still needs an update.
+    last_cursor: Option<(Option<[u16; 2]>, bool, CursorShape, bool)>,
     state: RenderState,
     rows: RowIterator,
     cells: CellIterator,
@@ -25,6 +28,7 @@ impl Renderer {
     pub fn new() -> Option<Renderer> {
         Some(Renderer {
             force_full: false,
+            last_cursor: None,
             state: RenderState::new().ok()?,
             rows: RowIterator::new().ok()?,
             cells: CellIterator::new().ok()?,
@@ -55,9 +59,17 @@ pub fn update(tab: &mut Tab, full: bool) -> Option<ScreenUpdate> {
     let full = full || std::mem::take(&mut r.force_full);
     let snapshot = r.state.update(term).ok()?;
     let dirty = snapshot.dirty().ok()?;
-    if dirty == Dirty::Clean && !full {
+    let cursor_now = snapshot.cursor().ok()?;
+    let cursor_key = (
+        cursor_now.viewport.map(|v| [v.x, v.y]),
+        cursor_now.visible,
+        shape_of(cursor_now.visual_style),
+        cursor_now.blinking,
+    );
+    if dirty == Dirty::Clean && !full && r.last_cursor == Some(cursor_key) {
         return None;
     }
+    r.last_cursor = Some(cursor_key);
     let columns = snapshot.cols().ok()?;
     let rows = snapshot.rows().ok()?;
     let colors = snapshot.colors().ok()?;
@@ -160,16 +172,20 @@ pub fn update(tab: &mut Tab, full: bool) -> Option<ScreenUpdate> {
         full_screen,
         default_foreground: [colors.foreground.r, colors.foreground.g, colors.foreground.b],
         default_background: [colors.background.r, colors.background.g, colors.background.b],
-        cursor_shape: match cursor.visual_style {
-            CursorVisualStyle::Bar => CursorShape::Bar,
-            CursorVisualStyle::Underline => CursorShape::Underline,
-            CursorVisualStyle::BlockHollow => CursorShape::Hollow,
-            _ => CursorShape::Block,
-        },
+        cursor_shape: shape_of(cursor.visual_style),
         cursor_blink: cursor.blinking,
         mouse_tracking,
         at_prompt,
         history_first,
         history_end,
     })
+}
+
+fn shape_of(v: CursorVisualStyle) -> CursorShape {
+    match v {
+        CursorVisualStyle::Bar => CursorShape::Bar,
+        CursorVisualStyle::Underline => CursorShape::Underline,
+        CursorVisualStyle::BlockHollow => CursorShape::Hollow,
+        _ => CursorShape::Block,
+    }
 }
