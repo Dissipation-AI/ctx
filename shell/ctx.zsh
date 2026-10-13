@@ -140,6 +140,9 @@ ssh() {
 _ctx_deferred_init() {
     # Launchers made with `ctx make launcher` run by name (login files may have reset PATH).
     [[ -n "$CTX_LAUNCHERS" && ":$PATH:" != *":$CTX_LAUNCHERS:"* ]] && export PATH="$PATH:$CTX_LAUNCHERS"
+    # The line editor may not be loaded yet (macOS's /etc/zshrc loads it with bindkey; other
+    # systems don't), and add-zle-hook-widget quietly does nothing without it.
+    zmodload zsh/zle 2>/dev/null
     autoload -Uz add-zle-hook-widget 2>/dev/null && {
         add-zle-hook-widget line-pre-redraw _ctx_line_redraw
         add-zle-hook-widget line-finish _ctx_line_finish

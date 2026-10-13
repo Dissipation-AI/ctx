@@ -238,27 +238,6 @@ pub fn measure_cells(runs: &mut [StyledRun]) {
     }
 }
 
-#[cfg(test)]
-mod cell_tests {
-    use super::*;
-
-    fn run(t: &str) -> StyledRun {
-        StyledRun { text: t.into(), ..Default::default() }
-    }
-
-    #[test]
-    fn stored_lines_get_the_terminals_cells() {
-        let mut rs = vec![run("ls -la"), run("a中b"), run("👍🏽x"), run("e\u{301}!")];
-        measure_cells(&mut rs);
-        assert!(rs[0].cells.is_empty(), "ASCII needs no cells");
-        assert_eq!(rs[1].cells, vec![[0, 1], [1, 2], [4, 1]]);
-        // An emoji with a skin tone is one cell, two wide.
-        assert_eq!(rs[2].cells, vec![[0, 2], [8, 1]]);
-        // A combining accent stays with its letter.
-        assert_eq!(rs[3].cells, vec![[0, 1], [3, 1]]);
-    }
-}
-
 /// The OSC 8 hyperlinks on a screen row, as column spans (only rows that have any are looked at
 /// cell by cell).
 fn row_links(term: &ghostty_vt::Terminal, y: u16, columns: u16) -> Vec<ctx_protocol::LinkSpan> {
@@ -282,4 +261,25 @@ fn row_links(term: &ghostty_vt::Terminal, y: u16, columns: u16) -> Vec<ctx_proto
         }
     }
     out
+}
+
+#[cfg(test)]
+mod cell_tests {
+    use super::*;
+
+    fn run(t: &str) -> StyledRun {
+        StyledRun { text: t.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn stored_lines_get_the_terminals_cells() {
+        let mut rs = vec![run("ls -la"), run("a中b"), run("👍🏽x"), run("e\u{301}!")];
+        measure_cells(&mut rs);
+        assert!(rs[0].cells.is_empty(), "ASCII needs no cells");
+        assert_eq!(rs[1].cells, vec![[0, 1], [1, 2], [4, 1]]);
+        // An emoji with a skin tone is one cell, two wide.
+        assert_eq!(rs[2].cells, vec![[0, 2], [8, 1]]);
+        // A combining accent stays with its letter.
+        assert_eq!(rs[3].cells, vec![[0, 1], [3, 1]]);
+    }
 }

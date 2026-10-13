@@ -2,9 +2,9 @@
 //! platform-specific lives here: macOS first, with Linux equivalents (procfs, `SO_PEERCRED`) where
 //! the calls differ.
 
-use std::ffi::{CStr, CString};
 #[cfg(target_os = "macos")]
 use std::ffi::OsStr;
+use std::ffi::{CStr, CString};
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
@@ -60,8 +60,9 @@ pub fn open_pty(columns: u16, rows: u16) -> io::Result<(OwnedFd, OwnedFd)> {
     let mut master: libc::c_int = -1;
     let mut slave: libc::c_int = -1;
     let mut ws = libc::winsize { ws_row: rows, ws_col: columns, ws_xpixel: 0, ws_ypixel: 0 };
-    // SAFETY: out-pointers are valid; name and termios may be null.
-    cvt(unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), &mut ws) })?;
+    // SAFETY: out-pointers are valid; name and termios may be null. (The size is a const pointer
+    // on Linux and a mut one on macOS; a raw mut pointer suits both.)
+    cvt(unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), &raw mut ws) })?;
     // SAFETY: openpty returned two fresh descriptors we now own.
     let (m, s) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
     set_cloexec_nonblock(m.as_raw_fd(), true)?;
@@ -358,7 +359,10 @@ pub fn proc_args(pid: i32) -> Option<Vec<String>> {
 #[cfg(target_os = "linux")]
 pub fn all_processes() -> Vec<ProcInfo> {
     let Ok(rd) = std::fs::read_dir("/proc") else { return Vec::new() };
-    rd.flatten().filter_map(|e| e.file_name().to_str().and_then(|n| n.parse::<i32>().ok())).filter_map(proc_info).collect()
+    rd.flatten()
+        .filter_map(|e| e.file_name().to_str().and_then(|n| n.parse::<i32>().ok()))
+        .filter_map(proc_info)
+        .collect()
 }
 
 /// Every process we can see.
@@ -371,7 +375,10 @@ pub fn all_processes() -> Vec<ProcInfo> {
             return Vec::new();
         }
         let mut pids = vec![0 as libc::pid_t; n as usize + 64];
-        let got = libc::proc_listallpids(pids.as_mut_ptr().cast(), (pids.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int);
+        let got = libc::proc_listallpids(
+            pids.as_mut_ptr().cast(),
+            (pids.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int,
+        );
         pids.truncate(got.max(0) as usize);
         pids.into_iter().filter(|p| *p > 0).filter_map(proc_info).collect()
     }

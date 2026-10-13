@@ -1205,7 +1205,9 @@ impl Server {
     /// activation before it joined on), counted by folder and command, most used first.
     fn starters(&self, limit: u32) -> Handled {
         let rows = self.index.first_commands(400).unwrap_or_default();
-        let mut per_tab: Vec<(u64, Vec<(String, String, i64)>)> = Vec::new();
+        // Each tab's first commands: (folder, command, when).
+        type Firsts = Vec<(String, String, i64)>;
+        let mut per_tab: Vec<(u64, Firsts)> = Vec::new();
         for (tab, folder, text, at) in rows {
             match per_tab.last_mut() {
                 Some((t, v)) if *t == tab => v.push((folder, text, at)),
@@ -1245,7 +1247,8 @@ impl Server {
             .into_iter()
             .map(|(p, depth)| {
                 let args = sys::proc_args(p.pid).map(|a| a.join(" ")).unwrap_or_else(|| p.name.clone());
-                let command: String = if args.chars().count() > 160 { args.chars().take(159).collect::<String>() + "…" } else { args };
+                let command: String =
+                    if args.chars().count() > 160 { args.chars().take(159).collect::<String>() + "…" } else { args };
                 ProcessInfo { pid: p.pid, ppid: p.ppid, name: p.name, command, depth: depth as u32 }
             })
             .collect();
