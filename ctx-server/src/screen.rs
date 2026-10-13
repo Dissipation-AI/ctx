@@ -165,8 +165,9 @@ pub fn update(tab: &mut Tab, full: bool) -> Option<ScreenUpdate> {
                 drop_plain_cells(r);
             }
             let wraps = row.raw_row().ok().and_then(|r| r.is_wrapped().ok()).unwrap_or(false);
+            let links = row_links(term, row_y, columns);
             let _ = row.set_dirty(false);
-            changed.push(RowUpdate { row: row_y, runs, event: event_rows.contains(&row_y), wraps });
+            changed.push(RowUpdate { row: row_y, runs, event: event_rows.contains(&row_y), wraps, links });
         }
     }
     let _ = snapshot.set_dirty(Dirty::Clean);
@@ -256,4 +257,29 @@ mod cell_tests {
         // A combining accent stays with its letter.
         assert_eq!(rs[3].cells, vec![[0, 1], [3, 1]]);
     }
+}
+
+/// The OSC 8 hyperlinks on a screen row, as column spans (only rows that have any are looked at
+/// cell by cell).
+fn row_links(term: &ghostty_vt::Terminal, y: u16, columns: u16) -> Vec<ctx_protocol::LinkSpan> {
+    use ghostty_vt::terminal::{Point, PointCoordinate};
+    let at = |x: u16| Point::Viewport(PointCoordinate { x, y: y as u32 });
+    let has = term.grid_ref(at(0)).ok().and_then(|g| g.row().ok()).is_some_and(|r| r.has_hyperlink().unwrap_or(false));
+    if !has {
+        return Vec::new();
+    }
+    let mut out: Vec<ctx_protocol::LinkSpan> = Vec::new();
+    let mut buf = vec![0u8; 2048];
+    for x in 0..columns {
+        let Ok(g) = term.grid_ref(at(x)) else { continue };
+        let uri = match g.hyperlink_uri(&mut buf) {
+            Ok(n) if n > 0 => String::from_utf8_lossy(&buf[..n]).into_owned(),
+            _ => continue,
+        };
+        match out.last_mut() {
+            Some(l) if l.end == x && l.uri == uri => l.end = x + 1,
+            _ => out.push(ctx_protocol::LinkSpan { start: x, end: x + 1, uri }),
+        }
+    }
+    out
 }

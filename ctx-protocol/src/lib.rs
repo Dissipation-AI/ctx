@@ -907,6 +907,16 @@ pub struct RowUpdate {
     pub event: bool,
     /// The row soft-wraps into the next one (copying joins them).
     pub wraps: bool,
+    /// Hyperlinks a program made (OSC 8) on this row.
+    pub links: Vec<LinkSpan>,
+}
+
+/// An OSC 8 hyperlink: columns `start..end` of a row open `uri`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct LinkSpan {
+    pub start: u16,
+    pub end: u16,
+    pub uri: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
