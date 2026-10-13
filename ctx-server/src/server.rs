@@ -1088,6 +1088,8 @@ impl Server {
         match req {
             Request::ListTabs => ok(Output::Tabs(self.tab_list())),
             Request::ListClosedTabs { limit } => self.list_closed(limit),
+            Request::Starters { limit } => self.starters(limit),
+            Request::Processes { tab } => self.processes(key, &tab),
             Request::ListCommands { tab, limit } => self.list_commands(key, &tab, limit),
             Request::ListActivity { filter, limit } => self.list_activity(key, filter, limit),
             Request::Read { tab, what, colors, max_lines } => self.read(key, &tab, what, colors, max_lines),
@@ -1197,6 +1199,60 @@ impl Server {
                 })
                 .collect(),
         }
+    }
+
+    /// What you usually start tabs with: each tab's first command (with an environment
+    /// activation before it joined on), counted by folder and command, most used first.
+    fn starters(&self, limit: u32) -> Handled {
+        let rows = self.index.first_commands(400).unwrap_or_default();
+        // Each tab's first commands: (folder, command, when).
+        type Firsts = Vec<(String, String, i64)>;
+        let mut per_tab: Vec<(u64, Firsts)> = Vec::new();
+        for (tab, folder, text, at) in rows {
+            match per_tab.last_mut() {
+                Some((t, v)) if *t == tab => v.push((folder, text, at)),
+                _ => per_tab.push((tab, vec![(folder, text, at)])),
+            }
+        }
+        let mut counts: Vec<StarterInfo> = Vec::new();
+        for (_, cmds) in per_tab {
+            let Some((folder, first, at)) = cmds.first().cloned() else { continue };
+            let command = match cmds.get(1) {
+                Some((_, second, _)) if activates_environment(&first) => format!("{first} && {second}"),
+                _ => first,
+            };
+            if command.trim().is_empty() || is_trivial(&command) {
+                continue;
+            }
+            match counts.iter_mut().find(|s| s.folder == folder && s.command == command) {
+                Some(s) => s.count += 1,
+                None => counts.push(StarterInfo { folder, command, count: 1, last_used: iso_utc(at) }),
+            }
+        }
+        counts.sort_by(|a, b| b.count.cmp(&a.count).then(b.last_used.cmp(&a.last_used)));
+        counts.truncate(limit as usize);
+        ok(Output::Starters(StarterList { starters: counts }))
+    }
+
+    /// What runs in a tab: the shell and everything under it.
+    fn processes(&mut self, key: usize, tab: &TabRef) -> Handled {
+        let n = match self.resolve_any(key, tab) {
+            Ok(n) => n,
+            Err(e) => return Handled::Reply(Response::Error(e)),
+        };
+        let Some(t) = self.tabs.get(&n) else {
+            return ok(Output::Processes(ProcessList { tab: n, processes: Vec::new() }));
+        };
+        let processes = sys::descendants(t.launch_pid)
+            .into_iter()
+            .map(|(p, depth)| {
+                let args = sys::proc_args(p.pid).map(|a| a.join(" ")).unwrap_or_else(|| p.name.clone());
+                let command: String =
+                    if args.chars().count() > 160 { args.chars().take(159).collect::<String>() + "…" } else { args };
+                ProcessInfo { pid: p.pid, ppid: p.ppid, name: p.name, command, depth: depth as u32 }
+            })
+            .collect();
+        ok(Output::Processes(ProcessList { tab: n, processes }))
     }
 
     fn list_closed(&self, limit: u32) -> Handled {
@@ -2872,8 +2928,16 @@ impl Server {
             .range((from - first) as usize, (upto - first) as usize)
             .into_iter()
             .map(|l| match ctx_store::record::split_event_line(&l) {
-                Some((_, text)) => HistoryLine { runs: ctx_protocol::sgr::runs(text, &palette), event: true },
-                None => HistoryLine { runs: ctx_protocol::sgr::runs(&l, &palette), event: false },
+                Some((_, text)) => {
+                    let mut runs = ctx_protocol::sgr::runs(text, &palette);
+                    crate::screen::measure_cells(&mut runs);
+                    HistoryLine { runs, event: true }
+                }
+                None => {
+                    let mut runs = ctx_protocol::sgr::runs(&l, &palette);
+                    crate::screen::measure_cells(&mut runs);
+                    HistoryLine { runs, event: false }
+                }
             })
             .collect();
         ok(Output::History(HistoryLines { tab: n, first, end, from, lines }))
@@ -3575,4 +3639,38 @@ fn redraw_bytes(t: &dyn Terminal) -> Vec<u8> {
 fn set_mode(path: &std::path::Path, mode: u32) {
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+}
+
+/// Commands that set up an environment for the next one (`conda activate x`, `source .venv/bin/activate`).
+fn activates_environment(cmd: &str) -> bool {
+    let c = cmd.trim();
+    c.starts_with("conda activate")
+        || c.starts_with("mamba activate")
+        || c.starts_with("micromamba activate")
+        || c.starts_with("workon ")
+        || c.starts_with("pyenv shell")
+        || c.starts_with("nvm use")
+        || c.starts_with("poetry shell")
+        || c.starts_with("pipenv shell")
+        || (c.starts_with("source ") || c.starts_with(". ")) && c.contains("activate")
+        || c == "nix develop"
+}
+
+/// First commands not worth offering (`clear`, `exit`).
+fn is_trivial(cmd: &str) -> bool {
+    matches!(cmd.trim(), "clear" | "exit" | "reset" | "logout")
+}
+
+#[cfg(test)]
+mod starter_tests {
+    use super::*;
+
+    #[test]
+    fn environment_activations() {
+        assert!(activates_environment("conda activate ml"));
+        assert!(activates_environment("source .venv/bin/activate"));
+        assert!(!activates_environment("source ~/.zshrc"));
+        assert!(!activates_environment("jupyter lab"));
+        assert!(is_trivial("clear") && !is_trivial("ls"));
+    }
 }

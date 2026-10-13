@@ -52,7 +52,7 @@ pub fn runs(text: &str, palette: &[[u8; 3]; 256]) -> Vec<StyledRun> {
         }
         match out.last_mut() {
             Some(last) if last.style == style => last.text.push_str(s),
-            _ => out.push(StyledRun { text: s.to_string(), style }),
+            _ => out.push(StyledRun { text: s.to_string(), style, cells: Vec::new() }),
         }
     };
     let mut start = 0usize;

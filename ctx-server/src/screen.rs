@@ -10,6 +10,9 @@ use ghostty_vt::style::Underline;
 pub struct Renderer {
     /// Send every row on the next update (colours changed).
     pub force_full: bool,
+    /// The cursor as last sent: moving only the cursor (arrow keys at a prompt) changes no row,
+    /// but still needs an update.
+    last_cursor: Option<(Option<[u16; 2]>, bool, CursorShape, bool)>,
     state: RenderState,
     rows: RowIterator,
     cells: CellIterator,
@@ -25,6 +28,7 @@ impl Renderer {
     pub fn new() -> Option<Renderer> {
         Some(Renderer {
             force_full: false,
+            last_cursor: None,
             state: RenderState::new().ok()?,
             rows: RowIterator::new().ok()?,
             cells: CellIterator::new().ok()?,
@@ -55,9 +59,17 @@ pub fn update(tab: &mut Tab, full: bool) -> Option<ScreenUpdate> {
     let full = full || std::mem::take(&mut r.force_full);
     let snapshot = r.state.update(term).ok()?;
     let dirty = snapshot.dirty().ok()?;
-    if dirty == Dirty::Clean && !full {
+    let cursor_now = snapshot.cursor().ok()?;
+    let cursor_key = (
+        cursor_now.viewport.map(|v| [v.x, v.y]),
+        cursor_now.visible,
+        shape_of(cursor_now.visual_style),
+        cursor_now.blinking,
+    );
+    if dirty == Dirty::Clean && !full && r.last_cursor == Some(cursor_key) {
         return None;
     }
+    r.last_cursor = Some(cursor_key);
     let columns = snapshot.cols().ok()?;
     let rows = snapshot.rows().ok()?;
     let colors = snapshot.colors().ok()?;
@@ -127,9 +139,14 @@ pub fn update(tab: &mut Tab, full: bool) -> Option<ScreenUpdate> {
                     }
                     style.foreground = cell.fg_color().ok().flatten().map(|c| [c.r, c.g, c.b]);
                     style.background = cell.bg_color().ok().flatten().map(|c| [c.r, c.g, c.b]);
+                    let width: u16 = if matches!(wide, Some(CellWide::Wide)) { 2 } else { 1 };
                     match runs.last_mut() {
-                        Some(last) if last.style == style => last.text.push_str(&text),
-                        _ => runs.push(StyledRun { text, style }),
+                        Some(last) if last.style == style => {
+                            let at = last.text.len() as u16;
+                            last.text.push_str(&text);
+                            last.cells.push([at, width]);
+                        }
+                        _ => runs.push(StyledRun { text, style, cells: vec![[0, width]] }),
                     }
                 }
             }
@@ -139,13 +156,18 @@ pub fn update(tab: &mut Tab, full: bool) -> Option<ScreenUpdate> {
             {
                 let trimmed = last.text.trim_end().len();
                 last.text.truncate(trimmed);
+                last.cells.retain(|c| (c[0] as usize) < trimmed);
                 if last.text.is_empty() {
                     runs.pop();
                 }
             }
+            for r in &mut runs {
+                drop_plain_cells(r);
+            }
             let wraps = row.raw_row().ok().and_then(|r| r.is_wrapped().ok()).unwrap_or(false);
+            let links = row_links(term, row_y, columns);
             let _ = row.set_dirty(false);
-            changed.push(RowUpdate { row: row_y, runs, event: event_rows.contains(&row_y), wraps });
+            changed.push(RowUpdate { row: row_y, runs, event: event_rows.contains(&row_y), wraps, links });
         }
     }
     let _ = snapshot.set_dirty(Dirty::Clean);
@@ -160,16 +182,104 @@ pub fn update(tab: &mut Tab, full: bool) -> Option<ScreenUpdate> {
         full_screen,
         default_foreground: [colors.foreground.r, colors.foreground.g, colors.foreground.b],
         default_background: [colors.background.r, colors.background.g, colors.background.b],
-        cursor_shape: match cursor.visual_style {
-            CursorVisualStyle::Bar => CursorShape::Bar,
-            CursorVisualStyle::Underline => CursorShape::Underline,
-            CursorVisualStyle::BlockHollow => CursorShape::Hollow,
-            _ => CursorShape::Block,
-        },
+        cursor_shape: shape_of(cursor.visual_style),
         cursor_blink: cursor.blinking,
         mouse_tracking,
         at_prompt,
         history_first,
         history_end,
     })
+}
+
+fn shape_of(v: CursorVisualStyle) -> CursorShape {
+    match v {
+        CursorVisualStyle::Bar => CursorShape::Bar,
+        CursorVisualStyle::Underline => CursorShape::Underline,
+        CursorVisualStyle::BlockHollow => CursorShape::Hollow,
+        _ => CursorShape::Block,
+    }
+}
+
+/// Plain runs (every character one cell of the run's width, as ASCII always is) don't need their
+/// cells spelled out.
+fn drop_plain_cells(r: &mut StyledRun) {
+    let w = if r.style.flags & 256 != 0 { 2 } else { 1 };
+    let plain = r.text.is_ascii() && r.cells.len() == r.text.len() && r.cells.iter().all(|c| c[1] == w);
+    if plain {
+        r.cells.clear();
+    }
+}
+
+/// The cells of runs made from stored text (scrollback lines), worked out with the terminal's
+/// own grapheme and width rules, so they line up exactly as the screen did.
+pub fn measure_cells(runs: &mut [StyledRun]) {
+    for r in runs.iter_mut() {
+        if r.text.is_ascii() {
+            r.cells.clear();
+            continue;
+        }
+        let chars: Vec<(usize, char)> = r.text.char_indices().collect();
+        let only: Vec<char> = chars.iter().map(|c| c.1).collect();
+        let mut cells = Vec::new();
+        let mut i = 0;
+        while i < only.len() {
+            let (consumed, width) = ghostty_vt::unicode::grapheme_width(&only[i..]);
+            if consumed == 0 {
+                break;
+            }
+            // A zero-width cluster joins the cell before it.
+            if width > 0 || cells.is_empty() {
+                cells.push([chars[i].0 as u16, width.max(1) as u16]);
+            }
+            i += consumed;
+        }
+        r.cells = cells;
+        drop_plain_cells(r);
+    }
+}
+
+/// The OSC 8 hyperlinks on a screen row, as column spans (only rows that have any are looked at
+/// cell by cell).
+fn row_links(term: &ghostty_vt::Terminal, y: u16, columns: u16) -> Vec<ctx_protocol::LinkSpan> {
+    use ghostty_vt::terminal::{Point, PointCoordinate};
+    let at = |x: u16| Point::Viewport(PointCoordinate { x, y: y as u32 });
+    let has = term.grid_ref(at(0)).ok().and_then(|g| g.row().ok()).is_some_and(|r| r.has_hyperlink().unwrap_or(false));
+    if !has {
+        return Vec::new();
+    }
+    let mut out: Vec<ctx_protocol::LinkSpan> = Vec::new();
+    let mut buf = vec![0u8; 2048];
+    for x in 0..columns {
+        let Ok(g) = term.grid_ref(at(x)) else { continue };
+        let uri = match g.hyperlink_uri(&mut buf) {
+            Ok(n) if n > 0 => String::from_utf8_lossy(&buf[..n]).into_owned(),
+            _ => continue,
+        };
+        match out.last_mut() {
+            Some(l) if l.end == x && l.uri == uri => l.end = x + 1,
+            _ => out.push(ctx_protocol::LinkSpan { start: x, end: x + 1, uri }),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod cell_tests {
+    use super::*;
+
+    fn run(t: &str) -> StyledRun {
+        StyledRun { text: t.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn stored_lines_get_the_terminals_cells() {
+        let mut rs = vec![run("ls -la"), run("a中b"), run("👍🏽x"), run("e\u{301}!")];
+        measure_cells(&mut rs);
+        assert!(rs[0].cells.is_empty(), "ASCII needs no cells");
+        assert_eq!(rs[1].cells, vec![[0, 1], [1, 2], [4, 1]]);
+        // An emoji with a skin tone is one cell, two wide.
+        assert_eq!(rs[2].cells, vec![[0, 2], [8, 1]]);
+        // A combining accent stays with its letter.
+        assert_eq!(rs[3].cells, vec![[0, 1], [3, 1]]);
+    }
 }

@@ -424,7 +424,7 @@ Fields: `schema` (number), `version` (text), `protocol` (number), `pid` (number)
 {
   "schema": 1,
   "version": "0.1.0",
-  "protocol": 2,
+  "protocol": 3,
   "pid": 81200,
   "uptime_seconds": 3600,
   "socket": "/var/folders/xx/T/ctx-501/server.sock",
@@ -444,7 +444,7 @@ Fields: `schema` (number), `version` (text), `protocol` (number), `pid` (number)
 ```
 schema: 1
 version: "0.1.0"
-protocol: 2
+protocol: 3
 pid: 81200
 uptime_seconds: 3600
 socket: /var/folders/xx/T/ctx-501/server.sock

@@ -312,6 +312,16 @@ pub fn render(o: &Output, st: &Style) -> Printed {
             }
         }
         Output::TabMatches(m) => p.line(format!("{} found", thousands(m.matches.len() as u64))),
+        Output::Processes(list) => {
+            for pr in &list.processes {
+                p.line(format!("{}{} (pid {})", "  ".repeat(pr.depth as usize), pr.command, pr.pid));
+            }
+        }
+        Output::Starters(list) => {
+            for s in &list.starters {
+                p.line(format!("{} at {} ({} tabs)", s.command, st.folder(&s.folder), s.count));
+            }
+        }
     }
     p
 }

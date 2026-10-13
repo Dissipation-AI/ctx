@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 
 /// Bumped whenever a message changes shape. Client and server must match exactly.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 /// Version of the `as json` / `as toon` schema. Printed as `"schema": 1`.
 pub const SCHEMA_VERSION: u32 = 1;
 /// Largest message either side accepts (a whole `read everything` of a big tab fits).
@@ -367,6 +367,14 @@ pub enum Request {
     Restart {
         without_asking: bool,
     },
+    /// The processes running in a tab (under its shell), for CTX.app's overview.
+    Processes {
+        tab: TabRef,
+    },
+    /// What you usually start tabs with (first commands, by folder), for CTX.app's + menu.
+    Starters {
+        limit: u32,
+    },
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -447,6 +455,42 @@ pub enum Output {
     TabMatches(TabMatches),
     TabNumbers(Vec<u64>),
     RanBy(RanBy),
+    Starters(StarterList),
+    Processes(ProcessList),
+}
+
+/// The processes in a tab, in tree order: the shell first, then what it runs.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ProcessList {
+    pub tab: u64,
+    pub processes: Vec<ProcessInfo>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ProcessInfo {
+    pub pid: i32,
+    pub ppid: i32,
+    pub name: String,
+    /// The command line, shortened.
+    pub command: String,
+    /// How far below the shell (the shell is 0).
+    pub depth: u32,
+}
+
+/// Commands you usually start a tab with, most used first.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct StarterList {
+    pub starters: Vec<StarterInfo>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct StarterInfo {
+    pub folder: String,
+    /// The first command (with an environment activation before it joined by `&&`).
+    pub command: String,
+    /// How many tabs started this way.
+    pub count: u64,
+    pub last_used: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -863,12 +907,27 @@ pub struct RowUpdate {
     pub event: bool,
     /// The row soft-wraps into the next one (copying joins them).
     pub wraps: bool,
+    /// Hyperlinks a program made (OSC 8) on this row.
+    pub links: Vec<LinkSpan>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+/// An OSC 8 hyperlink: columns `start..end` of a row open `uri`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct LinkSpan {
+    pub start: u16,
+    pub end: u16,
+    pub uri: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct StyledRun {
     pub text: String,
     pub style: CellStyle,
+    /// The terminal's grid for this run: for each cell, where its text starts (a byte offset
+    /// into `text`) and how many columns it takes. Empty when every character is one cell of
+    /// width 1 (or 2 when `style` is wide), as plain ASCII always is. Viewers place text by
+    /// this, never by their own Unicode width tables.
+    pub cells: Vec<[u16; 2]>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -945,6 +1004,8 @@ impl Output {
             Output::RanBy(v) => serde_json::to_value(v),
             Output::History(v) => serde_json::to_value(v),
             Output::TabMatches(v) => serde_json::to_value(v),
+            Output::Starters(v) => serde_json::to_value(v),
+            Output::Processes(v) => serde_json::to_value(v),
         }
         .expect("output types always serialise");
         with_schema(expand_events(inner))
