@@ -139,9 +139,14 @@ pub fn update(tab: &mut Tab, full: bool) -> Option<ScreenUpdate> {
                     }
                     style.foreground = cell.fg_color().ok().flatten().map(|c| [c.r, c.g, c.b]);
                     style.background = cell.bg_color().ok().flatten().map(|c| [c.r, c.g, c.b]);
+                    let width: u16 = if matches!(wide, Some(CellWide::Wide)) { 2 } else { 1 };
                     match runs.last_mut() {
-                        Some(last) if last.style == style => last.text.push_str(&text),
-                        _ => runs.push(StyledRun { text, style }),
+                        Some(last) if last.style == style => {
+                            let at = last.text.len() as u16;
+                            last.text.push_str(&text);
+                            last.cells.push([at, width]);
+                        }
+                        _ => runs.push(StyledRun { text, style, cells: vec![[0, width]] }),
                     }
                 }
             }
@@ -151,9 +156,13 @@ pub fn update(tab: &mut Tab, full: bool) -> Option<ScreenUpdate> {
             {
                 let trimmed = last.text.trim_end().len();
                 last.text.truncate(trimmed);
+                last.cells.retain(|c| (c[0] as usize) < trimmed);
                 if last.text.is_empty() {
                     runs.pop();
                 }
+            }
+            for r in &mut runs {
+                drop_plain_cells(r);
             }
             let wraps = row.raw_row().ok().and_then(|r| r.is_wrapped().ok()).unwrap_or(false);
             let _ = row.set_dirty(false);
@@ -187,5 +196,64 @@ fn shape_of(v: CursorVisualStyle) -> CursorShape {
         CursorVisualStyle::Underline => CursorShape::Underline,
         CursorVisualStyle::BlockHollow => CursorShape::Hollow,
         _ => CursorShape::Block,
+    }
+}
+
+/// Plain runs (every character one cell of the run's width, as ASCII always is) don't need their
+/// cells spelled out.
+fn drop_plain_cells(r: &mut StyledRun) {
+    let w = if r.style.flags & 256 != 0 { 2 } else { 1 };
+    let plain = r.text.is_ascii() && r.cells.len() == r.text.len() && r.cells.iter().all(|c| c[1] == w);
+    if plain {
+        r.cells.clear();
+    }
+}
+
+/// The cells of runs made from stored text (scrollback lines), worked out with the terminal's
+/// own grapheme and width rules, so they line up exactly as the screen did.
+pub fn measure_cells(runs: &mut [StyledRun]) {
+    for r in runs.iter_mut() {
+        if r.text.is_ascii() {
+            r.cells.clear();
+            continue;
+        }
+        let chars: Vec<(usize, char)> = r.text.char_indices().collect();
+        let only: Vec<char> = chars.iter().map(|c| c.1).collect();
+        let mut cells = Vec::new();
+        let mut i = 0;
+        while i < only.len() {
+            let (consumed, width) = ghostty_vt::unicode::grapheme_width(&only[i..]);
+            if consumed == 0 {
+                break;
+            }
+            // A zero-width cluster joins the cell before it.
+            if width > 0 || cells.is_empty() {
+                cells.push([chars[i].0 as u16, width.max(1) as u16]);
+            }
+            i += consumed;
+        }
+        r.cells = cells;
+        drop_plain_cells(r);
+    }
+}
+
+#[cfg(test)]
+mod cell_tests {
+    use super::*;
+
+    fn run(t: &str) -> StyledRun {
+        StyledRun { text: t.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn stored_lines_get_the_terminals_cells() {
+        let mut rs = vec![run("ls -la"), run("a中b"), run("👍🏽x"), run("e\u{301}!")];
+        measure_cells(&mut rs);
+        assert!(rs[0].cells.is_empty(), "ASCII needs no cells");
+        assert_eq!(rs[1].cells, vec![[0, 1], [1, 2], [4, 1]]);
+        // An emoji with a skin tone is one cell, two wide.
+        assert_eq!(rs[2].cells, vec![[0, 2], [8, 1]]);
+        // A combining accent stays with its letter.
+        assert_eq!(rs[3].cells, vec![[0, 1], [3, 1]]);
     }
 }

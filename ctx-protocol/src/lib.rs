@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 
 /// Bumped whenever a message changes shape. Client and server must match exactly.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 /// Version of the `as json` / `as toon` schema. Printed as `"schema": 1`.
 pub const SCHEMA_VERSION: u32 = 1;
 /// Largest message either side accepts (a whole `read everything` of a big tab fits).
@@ -886,10 +886,15 @@ pub struct RowUpdate {
     pub wraps: bool,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct StyledRun {
     pub text: String,
     pub style: CellStyle,
+    /// The terminal's grid for this run: for each cell, where its text starts (a byte offset
+    /// into `text`) and how many columns it takes. Empty when every character is one cell of
+    /// width 1 (or 2 when `style` is wide), as plain ASCII always is. Viewers place text by
+    /// this, never by their own Unicode width tables.
+    pub cells: Vec<[u16; 2]>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]

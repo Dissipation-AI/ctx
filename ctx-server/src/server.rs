@@ -2904,8 +2904,16 @@ impl Server {
             .range((from - first) as usize, (upto - first) as usize)
             .into_iter()
             .map(|l| match ctx_store::record::split_event_line(&l) {
-                Some((_, text)) => HistoryLine { runs: ctx_protocol::sgr::runs(text, &palette), event: true },
-                None => HistoryLine { runs: ctx_protocol::sgr::runs(&l, &palette), event: false },
+                Some((_, text)) => {
+                    let mut runs = ctx_protocol::sgr::runs(text, &palette);
+                    crate::screen::measure_cells(&mut runs);
+                    HistoryLine { runs, event: true }
+                }
+                None => {
+                    let mut runs = ctx_protocol::sgr::runs(&l, &palette);
+                    crate::screen::measure_cells(&mut runs);
+                    HistoryLine { runs, event: false }
+                }
             })
             .collect();
         ok(Output::History(HistoryLines { tab: n, first, end, from, lines }))
