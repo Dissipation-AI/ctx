@@ -224,12 +224,16 @@ ctx attach [to "<tab>"]
 
 ### `install`
 
-Write ctx's instruction block into the file an agent reads at startup.
+Route an agent's shell tool through ctx tabs (hooks), or write ctx's instruction block.
 
 ```
-ctx install instructions [for claude|codex|gemini|agents] [at <folder>] [as json|toon]
+ctx install hooks|instructions [for claude|codex|gemini|antigravity|cursor|pi|opencode|agents] [at <folder>] [as json|toon]
 ```
 
+- `ctx install hooks for claude`: Installs ctx's Claude Code plugin for you (`claude plugin install`): Bash runs in a tab per session.
+- `ctx install hooks for antigravity`: Installs ctx's Antigravity plugin (`agy plugin install`): run_command runs in a tab per conversation.
+- `ctx install hooks for codex`: Also cursor, pi and opencode, each through its own plugin registry (Cursor: its hooks.json).
+- `ctx install hooks for claude at ~/code/site`: Only for that project (Claude's local scope).
 - `ctx install instructions for claude`: Writes to ~/.claude/CLAUDE.md, between ctx's markers.
 - `ctx install instructions for codex`: Writes to ~/.codex/AGENTS.md.
 - `ctx install instructions for gemini`: Writes to ~/.gemini/GEMINI.md.
@@ -237,12 +241,13 @@ ctx install instructions [for claude|codex|gemini|agents] [at <folder>] [as json
 
 ### `remove`
 
-Remove ctx's instruction block, or delete a launcher.
+Remove ctx's hooks or instruction block, or delete a launcher.
 
 ```
-ctx remove instructions|launcher [for claude|codex|gemini|agents] [at <folder>] [as json|toon]
+ctx remove hooks|instructions|launcher [for claude|codex|gemini|antigravity|cursor|pi|opencode|agents] [at <folder>] [as json|toon]
 ```
 
+- `ctx remove hooks for antigravity`: Uninstall ctx's plugin; the agent's shell is its own again.
 - `ctx remove instructions for claude`: Remove the block; nothing outside ctx's markers is touched.
 - `ctx remove launcher "sysadmin"`: Delete a launcher, and remind you to remove its entry in System Settings.
 
@@ -321,7 +326,7 @@ Keys: enter, escape, tab, backspace, delete, space, up, down, left, right, home,
 
 Tab and window names must contain a letter and can't be exactly one of these words:
 
-`a`, `about`, `activity`, `agents`, `ago`, `all`, `allowing`, `an`, `any`, `arguments`, `as`, `ask`, `asking`, `at`, `attach`, `by`, `clear`, `close`, `closed`, `colors`, `command`, `commands`, `day`, `days`, `everything`, `find`, `for`, `forget`, `help`, `hour`, `hours`, `idle`, `in`, `install`, `instructions`, `into`, `is`, `json`, `last`, `launcher`, `launchers`, `line`, `lines`, `list`, `make`, `mcp`, `me`, `minute`, `minutes`, `month`, `months`, `move`, `named`, `open`, `position`, `press`, `quiet`, `read`, `rebuild`, `remove`, `rename`, `reopen`, `restart`, `results`, `run`, `screen`, `second`, `seconds`, `server`, `show`, `shows`, `signed`, `since`, `status`, `tab`, `tabs`, `the`, `then`, `this`, `to`, `today`, `toon`, `type`, `until`, `up`, `wait`, `waiting`, `week`, `weeks`, `window`, `with`, `within`, `without`, `yesterday`
+`a`, `about`, `activity`, `agents`, `ago`, `all`, `allowing`, `an`, `antigravity`, `any`, `arguments`, `as`, `ask`, `asking`, `at`, `attach`, `by`, `clear`, `close`, `closed`, `colors`, `command`, `commands`, `cursor`, `day`, `days`, `everything`, `find`, `for`, `forget`, `help`, `hooks`, `hour`, `hours`, `idle`, `in`, `install`, `instructions`, `into`, `is`, `json`, `last`, `launcher`, `launchers`, `line`, `lines`, `list`, `make`, `mcp`, `me`, `minute`, `minutes`, `month`, `months`, `move`, `named`, `open`, `opencode`, `pi`, `position`, `press`, `quiet`, `read`, `rebuild`, `remove`, `rename`, `reopen`, `restart`, `results`, `run`, `screen`, `second`, `seconds`, `server`, `show`, `shows`, `signed`, `since`, `status`, `tab`, `tabs`, `the`, `then`, `this`, `to`, `today`, `toon`, `type`, `until`, `up`, `wait`, `waiting`, `week`, `weeks`, `window`, `with`, `within`, `without`, `yesterday`
 
 ## Exit status
 

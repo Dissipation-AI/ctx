@@ -2,7 +2,7 @@
 //! `ctx mcp` returns it to the agent.
 
 use crate::client::{self, Connection};
-use crate::{ask, instructions, launchers};
+use crate::{ask, instructions, integrations, launchers};
 use ctx_cli::parse::{self, Command, Format, Sentence};
 use ctx_cli::render::{self, Style};
 use ctx_cli::{grammar, help};
@@ -61,9 +61,13 @@ pub fn run(args: &[String], caller: Caller) -> Out {
     if caller == Caller::Cli && args.len() == 2 && args[0] == "launcher-check" {
         return launchers::check(&args[1]);
     }
-    // A Claude Code PreToolUse hook (integrations/claude); not a sentence.
-    if caller == Caller::Cli && args.len() == 2 && args[0] == "hook" && args[1] == "claude" {
-        return crate::hook::claude();
+    // An agent's pre-tool hook (integrations/<agent>); not a sentence.
+    if caller == Caller::Cli
+        && args.len() == 2
+        && args[0] == "hook"
+        && let Some(out) = crate::hook::run(&args[1])
+    {
+        return out;
     }
     // Used by the zsh completion; not a sentence.
     if caller == Caller::Cli && args.len() == 2 && args[0] == "completion-words" && args[1] == "tabs" {
@@ -260,6 +264,8 @@ fn execute(s: Sentence, caller: Caller) -> Out {
         }
         Command::InstallInstructions { agent, folder } => instructions::install(&agent, folder.as_deref(), format),
         Command::RemoveInstructions { agent, folder } => instructions::remove(&agent, folder.as_deref(), format),
+        Command::InstallHooks { agent, folder } => integrations::install(&agent, folder.as_deref(), format),
+        Command::RemoveHooks { agent, folder } => integrations::remove(&agent, folder.as_deref(), format),
         Command::MakeLauncher { name, program, folder, any_arguments, signed_by } => {
             launchers::make(&name, &program, &folder, any_arguments, signed_by.as_deref(), format)
         }

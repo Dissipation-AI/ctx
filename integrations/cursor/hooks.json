@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "hooks": {
+    "preToolUse": [{ "command": "ctx hook cursor", "matcher": "Shell", "timeout": 10 }]
+  }
+}

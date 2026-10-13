@@ -1,0 +1,5 @@
+{
+  "name": "ctx",
+  "interface": { "displayName": "ctx" },
+  "plugins": [{ "name": "ctx", "source": "./codex" }]
+}

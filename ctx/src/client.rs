@@ -42,6 +42,13 @@ impl Connection {
         loop {
             let stream = match UnixStream::connect(&socket) {
                 Ok(s) => s,
+                // A sandbox (an agent's, say) that blocks the socket: the server may well be running.
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                    return Err(NoServer(format!(
+                        "Can't reach the ctx server: connecting to {} was denied. If this runs in a sandbox, run it outside.",
+                        socket.display()
+                    )));
+                }
                 Err(_) => {
                     start_server(&paths)?;
                     wait_for_socket(&socket, Duration::from_secs(5)).map_err(|_| {

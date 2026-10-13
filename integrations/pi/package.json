@@ -1,0 +1,7 @@
+{
+  "name": "ctx-pi",
+  "version": "0.1.0",
+  "description": "Run pi's bash commands in persistent, named ctx tabs that a person can watch, search and reopen.",
+  "private": true,
+  "pi": { "extensions": ["./ctx.ts"] }
+}

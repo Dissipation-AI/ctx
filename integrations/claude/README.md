@@ -12,4 +12,6 @@ A plugin that makes ctx Claude Code's shell:
 
 **Not on by default.** SPEC.md, "Evaluation", gates this: it ships only once `evals/agents` shows it
 is no worse on task success and no more than ~10% worse on time and tokens than Claude's own
-shell. Try it with `claude --plugin-dir ctx/integrations/claude`.
+shell. Try it with `claude --plugin-dir ctx/integrations/claude`, or install it with
+`ctx install hooks for claude` (`claude plugin install` from `integrations/`, which is a
+marketplace; add `at <folder>` for one project, in Claude's local scope).

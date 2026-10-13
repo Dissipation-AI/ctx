@@ -6,6 +6,7 @@ mod client;
 mod exec;
 mod hook;
 mod instructions;
+mod integrations;
 mod launchers;
 
 use std::io::Write;

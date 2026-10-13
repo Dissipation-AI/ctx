@@ -1,0 +1,10 @@
+{
+  "ctx": {
+    "PreToolUse": [
+      {
+        "matcher": "run_command",
+        "hooks": [{ "type": "command", "command": "ctx hook antigravity", "timeout": 10 }]
+      }
+    ]
+  }
+}

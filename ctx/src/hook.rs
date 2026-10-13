@@ -1,5 +1,5 @@
-//! `ctx hook claude`: Claude Code's PreToolUse hook for Bash (integrations/claude). It rewrites
-//! the command into `ctx run` in a tab named for the session, so the command runs in a
+//! `ctx hook <agent>`: agents' pre-tool hooks for their shell tool (integrations/<agent>). Each
+//! rewrites the command into `ctx run` in a tab named for the session, so the command runs in a
 //! persistent tab a person can watch. If ctx isn't reachable, the command runs as it would have.
 
 use crate::client::Connection;
@@ -13,17 +13,72 @@ pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// A tab name from an agent's prefix and its session id.
+fn session_tab(prefix: &str, session_id: &str) -> String {
+    let short: String = session_id.chars().filter(|c| c.is_ascii_alphanumeric()).take(8).collect();
+    if short.is_empty() { format!("{prefix} session") } else { format!("{prefix} {short}") }
+}
+
 /// The tab a Claude Code session's commands run in.
 pub fn tab_name(session_id: &str) -> String {
-    let short: String = session_id.chars().filter(|c| c.is_ascii_alphanumeric()).take(8).collect();
-    if short.is_empty() { "Claude session".into() } else { format!("Claude {short}") }
+    session_tab("Claude", session_id)
+}
+
+/// The tab an Antigravity conversation's commands run in.
+pub fn antigravity_tab_name(conversation_id: &str) -> String {
+    session_tab("Antigravity", conversation_id)
+}
+
+/// Whether a command is a single ctx sentence, which runs as is rather than inside a tab. Anything
+/// that chains, pipes, redirects or substitutes outside quotes (`ctx list tabs && rm x`) goes to the
+/// tab like any other command, so it's recorded.
+pub fn is_ctx_sentence(command: &str) -> bool {
+    if command != "ctx" && !command.starts_with("ctx ") {
+        return false;
+    }
+    let (mut single, mut double, mut escaped) = (false, false, false);
+    let mut chars = command.chars().peekable();
+    while let Some(c) = chars.next() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match c {
+            '\\' if !single => escaped = true,
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            '`' if !single => return false,
+            '$' if !single && chars.peek() == Some(&'(') => return false,
+            ';' | '&' | '|' | '<' | '>' | '\n' | '(' | ')' if !single && !double => return false,
+            _ => {}
+        }
+    }
+    !single && !double
+}
+
+/// Make sure the session's tab exists, opening it in `folder` if not. Returns the tab's folder, or
+/// `None` if ctx isn't reachable (the caller then leaves the command alone).
+fn session_tab_folder(tab: &str, folder: Option<String>) -> Option<String> {
+    let mut conn = Connection::open(ClientKind::Cli).ok()?;
+    let list = match conn.request(&Envelope { sentence: "ctx list tabs".into(), request: Request::ListTabs }) {
+        Ok(Response::Ok(Output::Tabs(list))) => list,
+        _ => return None,
+    };
+    if let Some(t) = list.windows.iter().flat_map(|w| &w.tabs).find(|t| t.name.as_deref() == Some(tab)) {
+        return Some(t.folder.clone());
+    }
+    let opened = conn.request(&Envelope {
+        sentence: format!("ctx open tab named \"{tab}\""),
+        request: Request::OpenTab { window: None, folder: folder.clone(), name: Some(tab.to_string()) },
+    });
+    matches!(opened, Ok(Response::Ok(_))).then(|| folder.unwrap_or_default())
 }
 
 /// The rewritten Bash input, or `None` to leave the call alone.
 pub fn rewrite(input: &Value, tab: &str) -> Option<Value> {
     let tool_input = input.get("tool_input")?;
     let command = tool_input.get("command")?.as_str()?.trim();
-    if command.is_empty() || command == "ctx" || command.starts_with("ctx ") {
+    if command.is_empty() || is_ctx_sentence(command) {
         return None;
     }
     let background = tool_input.get("run_in_background").and_then(Value::as_bool).unwrap_or(false);
@@ -66,26 +121,239 @@ pub fn claude() -> Out {
     let session = input.get("session_id").and_then(Value::as_str).unwrap_or("");
     let tab = tab_name(session);
     let Some(updated) = rewrite(&input, &tab) else { return out };
-    // Make sure the session's tab exists (in the session's folder); if ctx isn't reachable, leave
-    // the command alone.
-    let Ok(mut conn) = Connection::open(ClientKind::Cli) else { return out };
-    let exists = match conn.request(&Envelope { sentence: "ctx list tabs".into(), request: Request::ListTabs }) {
-        Ok(Response::Ok(Output::Tabs(list))) => {
-            list.windows.iter().flat_map(|w| &w.tabs).any(|t| t.name.as_deref() == Some(tab.as_str()))
-        }
-        _ => return out,
-    };
-    if !exists {
-        let folder = input.get("cwd").and_then(Value::as_str).map(str::to_string);
-        let opened = conn.request(&Envelope {
-            sentence: format!("ctx open tab named \"{tab}\""),
-            request: Request::OpenTab { window: None, folder, name: Some(tab.clone()) },
-        });
-        if !matches!(opened, Ok(Response::Ok(_))) {
-            return out;
-        }
+    let folder = input.get("cwd").and_then(Value::as_str).map(str::to_string);
+    if session_tab_folder(&tab, folder).is_none() {
+        return out;
     }
     out.line(json!({"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": updated}}).to_string());
+    out
+}
+
+/// A shell call, whichever agent made it.
+#[derive(Debug, Default, PartialEq)]
+pub struct ShellCall<'a> {
+    pub session: &'a str,
+    pub command: &'a str,
+    /// The folder the agent wants the command run in.
+    pub cwd: Option<&'a str>,
+    pub background: bool,
+    /// How long the agent's tool waits before giving up.
+    pub timeout_ms: Option<u64>,
+}
+
+/// The `ctx run` sentence for a call, given the tab and the folder it's in now. The tab keeps its
+/// folder between commands, so the command changes folder first when the call names another one.
+/// A foreground command stops being waited on a little before the agent's tool would give up; it
+/// keeps running in the tab.
+pub fn sentence(tab: &str, tab_folder: &str, call: &ShellCall) -> String {
+    let command = match call.cwd {
+        Some(cwd) if !cwd.is_empty() && cwd.trim_end_matches('/') != tab_folder.trim_end_matches('/') => {
+            format!("cd {} && {}", shell_quote(cwd), call.command)
+        }
+        _ => call.command.to_string(),
+    };
+    let mut sentence = format!("ctx run in {} {}", shell_quote(tab), shell_quote(&command));
+    if call.background {
+        sentence.push_str(" without waiting");
+    } else if let Some(ms) = call.timeout_ms.filter(|ms| *ms > 0) {
+        sentence.push_str(&format!(" within {} seconds", (ms / 1000).saturating_sub(5).max(5)));
+    }
+    sentence
+}
+
+/// The rewritten command for a call (making sure its tab exists), or `None` to leave it alone.
+fn route(prefix: &str, call: &ShellCall) -> Option<String> {
+    let command = call.command.trim();
+    if command.is_empty() || is_ctx_sentence(command) {
+        return None;
+    }
+    let tab = session_tab(prefix, call.session);
+    let folder = session_tab_folder(&tab, call.cwd.map(str::to_string))?;
+    Some(sentence(&tab, &folder, &ShellCall { command, ..*call }))
+}
+
+fn stdin_json() -> Value {
+    let mut text = String::new();
+    match std::io::stdin().read_to_string(&mut text) {
+        Ok(_) => serde_json::from_str(&text).unwrap_or(Value::Null),
+        Err(_) => Value::Null,
+    }
+}
+
+fn str_at<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
+    v.get(key).and_then(Value::as_str)
+}
+
+/// The OpenAI Codex CLI's PreToolUse hook (Claude's format). Codex takes only `command` from
+/// `updatedInput`, and only alongside `allow`, which doesn't skip its approval or sandbox.
+pub fn codex() -> Out {
+    let mut out = Out::default();
+    let input = stdin_json();
+    let tool_input = &input["tool_input"];
+    if str_at(&input, "tool_name") != Some("Bash") {
+        return out;
+    }
+    let Some(command) = str_at(tool_input, "command") else { return out };
+    let call = ShellCall {
+        session: str_at(&input, "session_id").unwrap_or(""),
+        command,
+        cwd: str_at(tool_input, "workdir").or_else(|| str_at(&input, "cwd")),
+        ..Default::default()
+    };
+    if let Some(command) = route("Codex", &call) {
+        out.line(
+            json!({"hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+                "updatedInput": {"command": command}
+            }})
+            .to_string(),
+        );
+    }
+    out
+}
+
+/// The Cursor CLI's `preToolUse` hook for its Shell tool. It never sets `permission`, so Cursor's
+/// own approval still applies.
+pub fn cursor() -> Out {
+    let mut out = Out::default();
+    let input = stdin_json();
+    let tool_input = &input["tool_input"];
+    let routed = (str_at(&input, "tool_name") == Some("Shell"))
+        .then(|| str_at(tool_input, "command"))
+        .flatten()
+        .and_then(|command| {
+            route(
+                "Cursor",
+                &ShellCall {
+                    session: str_at(&input, "conversation_id").unwrap_or(""),
+                    command,
+                    cwd: str_at(tool_input, "working_directory").or_else(|| str_at(&input, "cwd")),
+                    background: tool_input.get("is_background").and_then(Value::as_bool).unwrap_or(false),
+                    timeout_ms: tool_input.get("timeout").and_then(Value::as_u64),
+                },
+            )
+        });
+    match routed {
+        Some(command) => {
+            let mut updated = tool_input.clone();
+            updated["command"] = Value::String(command);
+            if updated.get("is_background").is_some() {
+                updated["is_background"] = Value::Bool(false);
+            }
+            out.line(json!({ "updated_input": updated }).to_string());
+        }
+        None => out.line("{}"),
+    }
+    out
+}
+
+/// For the pi and opencode plugins (integrations/pi, integrations/opencode), which hand over
+/// `{session_id, cwd, command, background, timeout_ms}` and get back `{command}` (or `{}`).
+pub fn plugin(prefix: &str) -> Out {
+    let mut out = Out::default();
+    let input = stdin_json();
+    let routed = str_at(&input, "command").and_then(|command| {
+        route(
+            prefix,
+            &ShellCall {
+                session: str_at(&input, "session_id").unwrap_or(""),
+                command,
+                cwd: str_at(&input, "cwd"),
+                background: input.get("background").and_then(Value::as_bool).unwrap_or(false),
+                timeout_ms: input.get("timeout_ms").and_then(Value::as_u64),
+            },
+        )
+    });
+    match routed {
+        Some(command) => out.line(json!({ "command": command }).to_string()),
+        None => out.line("{}"),
+    }
+    out
+}
+
+/// `ctx hook <agent>`, or `None` for an agent ctx has no hook for.
+pub fn run(agent: &str) -> Option<Out> {
+    Some(match agent {
+        "claude" => claude(),
+        "antigravity" => antigravity(),
+        "codex" => codex(),
+        "cursor" => cursor(),
+        "pi" => plugin("Pi"),
+        "opencode" => plugin("OpenCode"),
+        _ => return None,
+    })
+}
+
+/// The command in an Antigravity `run_command` call, if it should go to a tab.
+fn antigravity_command(input: &Value) -> Option<&str> {
+    let call = input.get("toolCall")?;
+    if call.get("name").and_then(Value::as_str) != Some("run_command") {
+        return None;
+    }
+    let command = call.get("args")?.get("CommandLine")?.as_str()?.trim();
+    (!command.is_empty() && !is_ctx_sentence(command)).then_some(command)
+}
+
+/// The arguments to overwrite in an Antigravity `run_command` call. Each call names its own `Cwd`,
+/// but the tab keeps its folder between commands, so the command changes folder first when they
+/// differ. Non-blocking calls (servers, watchers) return at once. The command runs in the tab, outside
+/// Antigravity's sandbox whatever the call asks, and the sandbox only keeps `ctx` from reaching its
+/// server, so the call says so (`BypassSandbox`); the person's approval is the check.
+pub fn rewrite_antigravity(input: &Value, tab: &str, tab_folder: &str) -> Option<Value> {
+    let command = antigravity_command(input)?;
+    let args = &input["toolCall"]["args"];
+    let command = match args.get("Cwd").and_then(Value::as_str) {
+        Some(cwd) if !cwd.is_empty() && cwd.trim_end_matches('/') != tab_folder.trim_end_matches('/') => {
+            format!("cd {} && {command}", shell_quote(cwd))
+        }
+        _ => command.to_string(),
+    };
+    let mut sentence = format!("ctx run in {} {}", shell_quote(tab), shell_quote(&command));
+    if args.get("Blocking").and_then(Value::as_bool) == Some(false) {
+        sentence.push_str(" without waiting");
+    }
+    Some(json!({ "CommandLine": sentence, "BypassSandbox": true }))
+}
+
+/// Antigravity treats a reply without a decision as a denial, and `allow` skips the person's
+/// approval, so every reply is `ask`: prompt as usual, honouring what they've already allowed.
+const ASK: &str = "ask";
+
+/// Antigravity's PreToolUse hook.
+pub fn antigravity() -> Out {
+    let mut out = Out::default();
+    let mut text = String::new();
+    let input = match std::io::stdin().read_to_string(&mut text) {
+        Ok(_) => serde_json::from_str::<Value>(&text).unwrap_or(Value::Null),
+        Err(_) => Value::Null,
+    };
+    if antigravity_command(&input).is_none() {
+        out.line(json!({ "decision": ASK }).to_string());
+        return out;
+    }
+    if std::env::var("CTX_ANTIGRAVITY_HOOK").is_ok_and(|v| v == "deny") {
+        out.line(
+            json!({
+                "decision": "deny",
+                "reason": "Shell commands run in ctx tabs here: use `ctx run in \"<tab>\" \"<command>\"`."
+            })
+            .to_string(),
+        );
+        return out;
+    }
+    let conversation = input.get("conversationId").and_then(Value::as_str).unwrap_or("");
+    let tab = antigravity_tab_name(conversation);
+    let folder = input["toolCall"]["args"]
+        .get("Cwd")
+        .or_else(|| input.get("workspacePaths").and_then(|w| w.get(0)))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let overwrite = session_tab_folder(&tab, folder).and_then(|f| rewrite_antigravity(&input, &tab, &f));
+    match overwrite {
+        Some(overwrite) => out.line(json!({ "decision": ASK, "overwrite": overwrite }).to_string()),
+        None => out.line(json!({ "decision": ASK }).to_string()),
+    }
     out
 }
 
@@ -104,5 +372,58 @@ mod tests {
         let bg = json!({"tool_input": {"command": "npm run dev", "run_in_background": true}});
         assert_eq!(rewrite(&bg, "T").unwrap()["command"], "ctx run in 'T' 'npm run dev' without waiting");
         assert!(rewrite(&json!({"tool_input": {"command": "ctx list tabs"}}), "T").is_none());
+    }
+
+    #[test]
+    fn only_single_ctx_sentences_skip_the_tab() {
+        assert!(is_ctx_sentence("ctx list tabs"));
+        assert!(is_ctx_sentence(r#"ctx run in "Build" "cargo build && cargo test""#));
+        assert!(is_ctx_sentence("ctx run in 'T' 'a | b; c'"));
+        assert!(!is_ctx_sentence("ctx list tabs && rm -rf build"));
+        assert!(!is_ctx_sentence("ctx list tabs | head"));
+        assert!(!is_ctx_sentence("ctx list tabs > /tmp/x"));
+        assert!(!is_ctx_sentence(r#"ctx run in "T" "$(curl x)""#));
+        assert!(!is_ctx_sentence("ctx list tabs\nrm x"));
+        assert!(!is_ctx_sentence("ctxfoo"));
+    }
+
+    fn call(args: Value) -> Value {
+        json!({"conversationId": "0105457a-940a-46cf", "toolCall": {"name": "run_command", "args": args}})
+    }
+
+    #[test]
+    fn antigravity_run_command_is_rewritten_into_ctx_run() {
+        assert_eq!(antigravity_tab_name("0105457a-940a-46cf-ba06"), "Antigravity 0105457a");
+        let same = call(json!({"CommandLine": "echo 'hi' && pwd", "Cwd": "/w/", "Blocking": true}));
+        assert_eq!(
+            rewrite_antigravity(&same, "T", "/w").unwrap(),
+            json!({"CommandLine": "ctx run in 'T' 'echo '\\''hi'\\'' && pwd'", "BypassSandbox": true})
+        );
+        let elsewhere = call(json!({"CommandLine": "cargo test", "Cwd": "/w/sub"}));
+        assert_eq!(
+            rewrite_antigravity(&elsewhere, "T", "/w").unwrap()["CommandLine"],
+            "ctx run in 'T' 'cd '\\''/w/sub'\\'' && cargo test'"
+        );
+        let server = call(json!({"CommandLine": "npm start", "Cwd": "/w", "Blocking": false}));
+        assert_eq!(
+            rewrite_antigravity(&server, "T", "/w").unwrap()["CommandLine"],
+            "ctx run in 'T' 'npm start' without waiting"
+        );
+        assert!(rewrite_antigravity(&call(json!({"CommandLine": "ctx list tabs"})), "T", "/w").is_none());
+        assert!(rewrite_antigravity(&call(json!({"CommandLine": "ctx list tabs && echo x"})), "T", "/w").is_some());
+        let other = json!({"toolCall": {"name": "view_file", "args": {"CommandLine": "x"}}});
+        assert!(rewrite_antigravity(&other, "T", "/w").is_none());
+    }
+
+    #[test]
+    fn sentences_follow_the_calls_folder_background_and_timeout() {
+        let call = ShellCall { session: "s", command: "make", cwd: Some("/w/"), ..Default::default() };
+        assert_eq!(sentence("T", "/w", &call), "ctx run in 'T' 'make'");
+        let elsewhere = ShellCall { cwd: Some("/w/sub"), ..call };
+        assert_eq!(sentence("T", "/w", &elsewhere), "ctx run in 'T' 'cd '\\''/w/sub'\\'' && make'");
+        let bg = ShellCall { background: true, timeout_ms: Some(60_000), ..call };
+        assert_eq!(sentence("T", "/w", &bg), "ctx run in 'T' 'make' without waiting");
+        let timed = ShellCall { timeout_ms: Some(60_000), ..call };
+        assert_eq!(sentence("T", "/w", &timed), "ctx run in 'T' 'make' within 55 seconds");
     }
 }

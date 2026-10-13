@@ -61,7 +61,7 @@ impl Kind {
             Kind::Keys => "<key> [then <key>…]",
             Kind::Format => "json|toon",
             Kind::Who => "me|<agent>",
-            Kind::Agent => "claude|codex|gemini|agents",
+            Kind::Agent => "claude|codex|gemini|antigravity|cursor|pi|opencode|agents",
             Kind::Name => "\"<name>\"",
             Kind::Condition => "\"<tab>\" is idle|shows \"<text>\"|is quiet for <duration>",
             Kind::TabOrAllTabs => "\"<tab>\" or all tabs",
@@ -532,15 +532,28 @@ pub const VERBS: &[Verb] = &[
     Verb {
         name: "install",
         group: Group::Agents,
-        summary: "Write ctx's instruction block into the file an agent reads at startup.",
-        object: Object::Noun(&["instructions"]),
+        summary: "Route an agent's shell tool through ctx tabs (hooks), or write ctx's instruction block.",
+        object: Object::Noun(&["hooks", "instructions"]),
         order: &[
             O,
             Ph(ph(P::For, &["for"], Kind::Agent, "which agent")),
-            Ph(ph(P::At, &["at"], Kind::Folder, "a project folder (with `for agents`)")),
+            Ph(ph(P::At, &["at"], Kind::Folder, "a project folder (hooks for one project, or `for agents`)")),
             Ph(AS),
         ],
         examples: &[
+            (
+                "ctx install hooks for claude",
+                "Installs ctx's Claude Code plugin for you (`claude plugin install`): Bash runs in a tab per session.",
+            ),
+            (
+                "ctx install hooks for antigravity",
+                "Installs ctx's Antigravity plugin (`agy plugin install`): run_command runs in a tab per conversation.",
+            ),
+            (
+                "ctx install hooks for codex",
+                "Also cursor, pi and opencode, each through its own plugin registry (Cursor: its hooks.json).",
+            ),
+            ("ctx install hooks for claude at ~/code/site", "Only for that project (Claude's local scope)."),
             ("ctx install instructions for claude", "Writes to ~/.claude/CLAUDE.md, between ctx's markers."),
             ("ctx install instructions for codex", "Writes to ~/.codex/AGENTS.md."),
             ("ctx install instructions for gemini", "Writes to ~/.gemini/GEMINI.md."),
@@ -554,15 +567,16 @@ pub const VERBS: &[Verb] = &[
     Verb {
         name: "remove",
         group: Group::Agents,
-        summary: "Remove ctx's instruction block, or delete a launcher.",
-        object: Object::Noun(&["instructions", "launcher"]),
+        summary: "Remove ctx's hooks or instruction block, or delete a launcher.",
+        object: Object::Noun(&["hooks", "instructions", "launcher"]),
         order: &[
             O,
             Ph(ph(P::For, &["for"], Kind::Agent, "which agent")),
-            Ph(ph(P::At, &["at"], Kind::Folder, "a project folder (with `for agents`)")),
+            Ph(ph(P::At, &["at"], Kind::Folder, "a project folder (hooks for one project, or `for agents`)")),
             Ph(AS),
         ],
         examples: &[
+            ("ctx remove hooks for antigravity", "Uninstall ctx's plugin; the agent's shell is its own again."),
             ("ctx remove instructions for claude", "Remove the block; nothing outside ctx's markers is touched."),
             (
                 "ctx remove launcher \"sysadmin\"",
@@ -673,6 +687,7 @@ pub const AFTER_FILLER: &[&str] = &[
     "launcher",
     "launchers",
     "instructions",
+    "hooks",
     "screen",
     "output",
 ];
@@ -682,8 +697,22 @@ pub const SELECTOR_WORDS: &[&str] = &["last", "everything", "command", "commands
 pub const CONDITION_WORDS: &[&str] = &["is", "idle", "shows", "quiet"];
 pub const TIME_UNITS: &[&str] =
     &["second", "seconds", "minute", "minutes", "hour", "hours", "day", "days", "week", "weeks", "month", "months"];
-pub const OTHER_WORDS: &[&str] =
-    &["this", "all", "me", "ago", "yesterday", "today", "json", "toon", "results", "agents"];
+pub const OTHER_WORDS: &[&str] = &[
+    "this",
+    "all",
+    "me",
+    "ago",
+    "yesterday",
+    "today",
+    "json",
+    "toon",
+    "results",
+    "agents",
+    "antigravity",
+    "cursor",
+    "pi",
+    "opencode",
+];
 
 pub fn verb(name: &str) -> Option<&'static Verb> {
     VERBS.iter().find(|v| v.name == name)

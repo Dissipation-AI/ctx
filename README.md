@@ -37,7 +37,7 @@ lines ([docs/events.md](docs/events.md)). What was measured and decided while bu
 | `ctx-launch` | Starts each tab's shell under its own macOS identity |
 | `launchers/` | The reviewed template for `ctx make launcher` |
 | `shell/` | zsh and bash integration, the ssh bootstrap, zsh completion |
-| `integrations/` | Claude Code plugin, Codex and Gemini setups (off until evaluated) |
+| `integrations/` | Hooks for Claude Code, Antigravity, Codex, Cursor, pi and opencode (`ctx install hooks for …`); the Gemini CLI extension |
 | `evals/agents/` | The agent evaluation that gates those integrations |
 | `scripts/budgets.sh` | Memory, latency and size budgets |
 
@@ -66,6 +66,33 @@ ctx server &            # normally launchd starts it
 ctx open tab named "Try"
 ctx run in "Try" "echo hello"
 ```
+
+## Using it with coding agents
+
+ctx can sit between an agent and its shell tool: a hook rewrites each shell command into
+`ctx run` in a tab named for the session, so the agent's terminal persists and every command is
+recorded. The agent isn't told; no instruction file (CLAUDE.md, GEMINI.md, AGENTS.md) changes.
+It installs through each agent's own plugin registry:
+
+```sh
+ctx install hooks for claude                 # for you; or antigravity, codex, cursor, pi, opencode
+ctx install hooks for codex at ~/code/site   # for one project only
+ctx remove hooks for claude                  # undo (also with `at`)
+```
+
+| Agent | For you | `at <folder>` |
+|---|---|---|
+| Claude Code | `claude plugin install` (user scope) | Claude's local scope |
+| Antigravity | `agy plugin install` | the project's `.agents/plugins.json` |
+| Codex | `codex plugin add` (trust it once in `/hooks`) | the project's `.codex/hooks.json` |
+| Cursor CLI | `~/.cursor/hooks.json` (it has no plugin installer) | the project's `.cursor/hooks.json` |
+| pi | `pi install` | `pi install -l` |
+| opencode | `opencode plugin --global` | `opencode plugin` in the project |
+
+New sessions pick it up. The installed hooks call this `ctx` by its full path, and the ctx server
+must be running (launchd starts it). Agents that sandbox their shell (Antigravity, Codex, Cursor
+with its sandbox on) block `ctx` from its server, so those commands run outside the sandbox with
+your approval as the check. Each `integrations/<agent>/README.md` has the details.
 
 ## Licence
 

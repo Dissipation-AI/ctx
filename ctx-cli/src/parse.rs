@@ -63,6 +63,11 @@ pub enum Value {
     Read(ReadWhat),
 }
 
+/// Every agent a sentence can name (`agents` is any agent, at a project folder).
+pub const AGENTS: &[&str] = &["claude", "codex", "gemini", "antigravity", "cursor", "pi", "opencode", "agents"];
+/// The agents ctx has hooks for (`ctx install hooks for …`).
+pub const HOOK_AGENTS: &[&str] = &["claude", "antigravity", "codex", "cursor", "pi", "opencode"];
+
 /// What a sentence asks for.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
@@ -74,6 +79,15 @@ pub enum Command {
         folder: Option<String>,
     },
     RemoveInstructions {
+        agent: String,
+        folder: Option<String>,
+    },
+    /// Install ctx's plugin through the agent's own plugin registry: for you, or at a project.
+    InstallHooks {
+        agent: String,
+        folder: Option<String>,
+    },
+    RemoveHooks {
         agent: String,
         folder: Option<String>,
     },
@@ -282,7 +296,7 @@ fn describe(kind: Kind) -> &'static str {
         Kind::Key | Kind::Keys => "a key, such as enter or ctrl-c",
         Kind::Format => "json or toon",
         Kind::Who => "me or an agent's name, such as claude",
-        Kind::Agent => "claude, codex, gemini or agents",
+        Kind::Agent => "an agent, such as claude, codex or antigravity",
         Kind::Name => "a name in quotes",
         Kind::Condition => "a tab and what to wait for, such as \"Dev server\" is idle",
         Kind::TabOrAllTabs => "a tab, or all tabs",
@@ -352,11 +366,12 @@ fn parse_value(kind: Kind, tokens: &[Token], ctx: &Context, p: &Phrase) -> Resul
         }
         Kind::Agent => {
             let agent = first.lower();
-            if ["claude", "codex", "gemini", "agents"].contains(&agent.as_str()) {
+            if AGENTS.contains(&agent.as_str()) {
                 Ok((Value::Agent(agent.clone()), 1, agent))
             } else {
                 Err(ParseError::new(format!(
-                    "ctx has instructions for claude, codex, gemini, or agents at a project folder, not \"{}\".",
+                    "ctx knows {}, or agents at a project folder, not \"{}\".",
+                    AGENTS[..AGENTS.len() - 1].join(", "),
                     first.text
                 )))
             }
@@ -993,6 +1008,29 @@ fn to_command(parts: &Parts) -> Result<Command, ParseError> {
         }
         "show" => Command::Server(Request::Show { tab: object_tab(parts) }),
         "attach" => Command::Attach { tab: tab_phrase(parts, P::To) },
+        "install" | "remove" if noun(parts) == "hooks" => {
+            let agent = match parts.phrases.get(&P::For) {
+                Some((Value::Agent(a), _)) if HOOK_AGENTS.contains(&a.as_str()) => a.clone(),
+                Some((Value::Agent(a), _)) => {
+                    return Err(ParseError::new(format!(
+                        "ctx has hooks for {}, not {a}. For {a}, `ctx {verb} instructions for {a}`.",
+                        HOOK_AGENTS.join(", ")
+                    )));
+                }
+                _ => {
+                    return Err(ParseError::new(format!(
+                        "Hooks for which agent? `ctx {verb} hooks for claude` (or {}).",
+                        HOOK_AGENTS[1..].join(", ")
+                    )));
+                }
+            };
+            let folder = folder_phrase(parts);
+            if verb == "install" {
+                Command::InstallHooks { agent, folder }
+            } else {
+                Command::RemoveHooks { agent, folder }
+            }
+        }
         "install" | "remove" if noun(parts) == "instructions" || verb == "install" => {
             let agent = match parts.phrases.get(&P::For) {
                 Some((Value::Agent(a), _)) => a.clone(),
@@ -1002,6 +1040,16 @@ fn to_command(parts: &Parts) -> Result<Command, ParseError> {
                     )));
                 }
             };
+            if agent == "antigravity" {
+                return Err(ParseError::new(format!(
+                    "Antigravity reads Gemini's instructions: `ctx {verb} instructions for gemini`."
+                )));
+            }
+            if !["claude", "codex", "gemini", "agents"].contains(&agent.as_str()) {
+                return Err(ParseError::new(format!(
+                    "ctx has instructions for claude, codex, gemini, or agents at a project folder. For {agent}, `ctx {verb} hooks for {agent}`."
+                )));
+            }
             let folder = folder_phrase(parts);
             if agent == "agents" && folder.is_none() {
                 return Err(ParseError::new(format!(
@@ -1512,6 +1560,20 @@ mod tests {
             p("install instructions for agents at ~/code/site").command,
             Command::InstallInstructions { agent: "agents".into(), folder: Some("/Users/c/code/site".into()) }
         );
+        assert_eq!(
+            p("install hooks for claude").command,
+            Command::InstallHooks { agent: "claude".into(), folder: None }
+        );
+        assert_eq!(
+            p("remove hooks for antigravity at ~/code/site").command,
+            Command::RemoveHooks { agent: "antigravity".into(), folder: Some("/Users/c/code/site".into()) }
+        );
+        assert_eq!(
+            p("install hooks for opencode").command,
+            Command::InstallHooks { agent: "opencode".into(), folder: None }
+        );
+        assert!(err("install hooks for gemini").message.contains("claude, antigravity, codex"));
+        assert!(err("install hooks").message.contains("which agent"));
         assert_eq!(
             p(r#"make launcher named "sysadmin" for ~/.local/bin/claude at ~/Agents/sys-admin"#).command,
             Command::MakeLauncher {

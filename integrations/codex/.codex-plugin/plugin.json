@@ -1,0 +1,5 @@
+{
+  "name": "ctx",
+  "version": "0.1.0",
+  "description": "Run Codex's shell commands in persistent, named ctx tabs that a person can watch, search and reopen."
+}

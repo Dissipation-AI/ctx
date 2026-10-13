@@ -1,0 +1,8 @@
+{
+  "name": "ctx-opencode",
+  "version": "0.1.0",
+  "description": "Run opencode's bash commands in persistent, named ctx tabs that a person can watch, search and reopen.",
+  "private": true,
+  "type": "module",
+  "main": "./index.js"
+}
