@@ -132,6 +132,8 @@ fn activity_log_records_who_did_what() {
     let s = Server::start("activity");
     s.ctx(&["open", "tab", "named", "Logged", "at", "/tmp"]).ok();
     s.ctx(&["type", "secret-looking text", "into", "Logged"]).ok();
+    // Typed text is logged once it shows on screen.
+    screen_shows(&s, "Logged", "secret-looking text");
     let o = s.ctx(&["list", "activity", "in", "Logged", "as", "json"]).ok().stdout.clone();
     let v: serde_json::Value = serde_json::from_str(&o).unwrap();
     let entries = v["entries"].as_array().unwrap();
@@ -408,6 +410,75 @@ fn dont_save_env_keeps_values_out_and_says_so_on_reopen() {
     let o = s.ctx(&["reopen", "tab", "1"]).ok().stdout.clone();
     assert!(o.contains("Not restored (dont_save_env): MY_TOKEN."), "{o}");
     assert_eq!(s.ctx(&["run", "in", "tab", "1", "echo \"[$MY_TOKEN] $PLAIN\""]).ok().stdout, "[] visible\n");
+}
+
+#[test]
+fn passwords_typed_by_agents_are_never_saved() {
+    let s = Server::start("passwords");
+    s.ctx(&["open", "tab", "named", "Login", "at", "/tmp"]).ok();
+    // A password prompt: line input with echo off, as sudo and ssh set it. (The prompt is built
+    // so it only shows once `read` is waiting.)
+    s.ctx(&[
+        "run",
+        "in",
+        "Login",
+        "read -s \"pw?$(printf Pass%s word): \"; echo; echo \"got ${#pw}\"",
+        "without",
+        "waiting",
+    ])
+    .ok();
+    screen_shows(&s, "Login", "Password:");
+    s.ctx(&["type", "hunter2", "into", "Login", "then", "press", "enter"]).ok();
+    screen_shows(&s, "Login", "got 7");
+    // A field that reads keystrokes without showing them (a TUI drawing `***`, a remote sudo).
+    s.ctx(&[
+        "run",
+        "in",
+        "Login",
+        "stty raw -echo; head -c 8 >/dev/null; stty sane; echo raw-done",
+        "without",
+        "waiting",
+    ])
+    .ok();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    s.ctx(&["type", "swordfsh", "into", "Login"]).ok();
+    screen_shows(&s, "Login", "raw-done");
+    // Text that shows on screen is logged in full.
+    s.ctx(&["run", "in", "Login", "cat", "without", "waiting"]).ok();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    s.ctx(&["type", "plain words", "into", "Login", "then", "press", "enter"]).ok();
+    screen_shows(&s, "Login", "plain words");
+    s.ctx(&["press", "ctrl-c", "in", "Login"]).ok();
+    std::thread::sleep(std::time::Duration::from_millis(2500)); // unseen text is hidden after 2 s
+
+    let o = s.ctx(&["list", "activity", "in", "Login", "as", "json"]).ok().stdout.clone();
+    let v: serde_json::Value = serde_json::from_str(&o).unwrap();
+    let entries = v["entries"].as_array().unwrap();
+    let hidden: Vec<&str> =
+        entries.iter().filter(|e| e["typed_hidden"] == true).map(|e| e["sentence"].as_str().unwrap()).collect();
+    assert_eq!(hidden.len(), 2, "{o}");
+    assert!(hidden.contains(&"ctx type [hidden] into tab 1 then press enter"), "{o}");
+    assert!(hidden.contains(&"ctx type [hidden] into tab 1"), "{o}");
+    assert!(entries.iter().any(|e| e["typed"] == "plain words"), "{o}");
+    s.ctx(&["close", "Login", "without", "asking"]).ok();
+    // Nowhere on disk: not the activity log, not the tab's record.
+    let log = std::fs::read_to_string(s.path("data/activity.log")).unwrap();
+    let h = ctx_store_history(&s.path("data/tabs/1.ctxlog"));
+    for secret in ["hunter2", "swordfsh"] {
+        assert!(!o.contains(secret) && !log.contains(secret) && !h.contains(secret), "{secret} was saved");
+    }
+    assert!(log.contains("plain words"));
+}
+
+/// Wait (up to 5 s) until the tab's screen shows `text`, which may be there already.
+fn screen_shows(s: &Server, tab: &str, text: &str) {
+    for _ in 0..50 {
+        if s.ctx(&["read", "screen", "in", tab]).stdout.contains(text) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    panic!("{text:?} didn't appear in {tab}: {}", s.ctx(&["read", "screen", "in", tab]).stdout);
 }
 
 /// Every record of a tab, decoded, as text (for checking what was saved).

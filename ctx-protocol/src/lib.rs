@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 
 /// Bumped whenever a message changes shape. Client and server must match exactly.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 /// Version of the `as json` / `as toon` schema. Printed as `"schema": 1`.
 pub const SCHEMA_VERSION: u32 = 1;
 /// Largest message either side accepts (a whole `read everything` of a big tab fits).
@@ -601,6 +601,10 @@ pub struct ActivityEntry {
     pub tab: Option<u64>,
     /// Text typed into a tab, in full.
     pub typed: Option<String>,
+    /// Text was typed but kept out of the log: it went to a password prompt, or never appeared
+    /// on screen. `typed` is then empty and the sentence says `[hidden]`.
+    #[serde(default)]
+    pub typed_hidden: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -825,6 +829,9 @@ pub struct ScreenUpdate {
     pub mouse_tracking: bool,
     /// The shell is showing its prompt (no command running): multi-line paste gets a preview.
     pub at_prompt: bool,
+    /// The program in front is reading a password (echo off): CTX.app turns on Secure Keyboard
+    /// Entry while this tab has focus.
+    pub password_input: bool,
     /// Scrollback above the screen: lines numbered `history_first .. history_end`.
     pub history_first: u64,
     pub history_end: u64,

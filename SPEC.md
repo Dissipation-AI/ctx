@@ -342,7 +342,8 @@ search filters.
 
 - Every request from a client that isn't CTX.app is logged: time, client (process name, pid, and
   the nearest recognisable ancestor, e.g. `claude (pid 5512) in tab 2`), verb, target tab. Typed
-  text is logged in full. Read requests are logged too, without the returned content.
+  text is logged in full, except a password (see Passwords). Read requests are logged too,
+  without the returned content.
 - The server resolves the client from the socket peer credentials (`LOCAL_PEERPID`,
   `LOCAL_PEERCRED`) and walks its parent chain to the nearest recognisable program (`claude`,
   `codex`, `gemini`, `agy`, CTX.app, a shell in tab 41…). It records name, pid and process start
@@ -453,6 +454,36 @@ mode 0600 in your user's Application Support folder (encrypted at rest by FileVa
 `dont_save_env` keep matching variable names out of the record entirely. They aren't restored,
 and `reopen` lists them as "not restored". Reads of saved tabs by agents are logged like any other
 read.
+
+A secret a program prints (a token you `cat`) is saved like any other output. Rotating it is the
+answer, not ctx. Redacting tokens and API keys from saved records is a later feature
+(Phases, 13).
+
+### Passwords
+
+A password is never recorded: not in a tab's record, not in the activity log, not in CTX.app.
+
+- **Keystrokes are never logged**, from CTX.app or an attached terminal. Records hold what the
+  screen shows, and a password prompt shows nothing.
+- **The server knows when a password is being read.** A program reading a password (`sudo`, `ssh`,
+  `getpass`, `read -s`) turns echo off and reads a line. The server checks the terminal's mode
+  after output and once a second, and puts it in screen updates. A line editor (zsh, readline)
+  or a full-screen program reads keystroke by keystroke, so it doesn't count.
+- **CTX.app turns on Secure Keyboard Entry** (`EnableSecureEventInput`) while it is active and
+  the tab you're typing into is reading a password, and off again as soon as either stops. While
+  it's on, no other process (an event tap, a key logger, a text expander) sees keystrokes. It
+  isn't left on all the time, because that breaks text expanders and password-manager typing
+  everywhere else.
+- **Text an agent types is logged once it shows on screen.** `ctx type` text that goes to a
+  password prompt is logged as `[hidden]` at once. Other typed text is logged when it appears on
+  screen, and as `[hidden]` if it hasn't within 2 seconds. That covers prompts the terminal mode
+  can't show: a remote `sudo` inside ssh, or a full-screen field that draws `***`. The entry keeps
+  who, when and which tab, with `"typed_hidden": true` and the sentence
+  `ctx type [hidden] into tab 3 then press enter`. Keys typed into a full-screen program that
+  don't show (vim's normal mode) are hidden too, which is the safe side.
+- Limits: Secure Keyboard Entry follows the local terminal mode, so a password prompt on the far
+  side of ssh doesn't turn it on (the ssh login prompt itself does, since ssh reads it locally).
+  An attached `ctx` in another terminal relies on that terminal's own Secure Keyboard Entry.
 
 ## Agents
 
@@ -1090,6 +1121,9 @@ The sentence parser is hand-written (see Command reference → Implementation no
 11. `ctx ask`, with an eval set of tabs + questions + expected evidence lines.
 12. Agent evaluation suite, then per-agent tool replacement (`integrations/`), shipped per agent
     only once it passes the evaluation bar.
+13. Later: redaction of saved records. Tokens and API keys in output are replaced with
+    `[redacted]` in records, `read` and `find`, using the shared `redact` crate that `ask` already
+    uses.
 
 ## Testing
 
@@ -1129,6 +1163,9 @@ CI: GitHub Actions on macOS (Apple Silicon) runners: `cargo fmt --check`, `cargo
 warnings`, `cargo test`, `cargo deny check`, memory and binary-size budgets.
 
 ## Open questions
+
+- Secure Keyboard Entry for a password prompt on the far side of ssh: the remote integration could
+  report the remote terminal's echo mode.
 
 - Should `ctx type` into a tab where a command is running (rather than the prompt) ask for
   confirmation when the caller is an agent? Default: no, but it's logged and badged.
