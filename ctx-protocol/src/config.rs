@@ -131,7 +131,7 @@ impl Default for Config {
             shell: String::new(),
             scrollback_mb_per_tab: 8.0,
             scrollback_mb_total: 200.0,
-            keep_tabs_when_app_quits: false,
+            keep_tabs_when_app_quits: true,
             log_reads: true,
             keep_closed_tabs_days: 365,
             saved_total_gb: 5.0,
@@ -227,7 +227,7 @@ mod tests {
 shell = "/bin/zsh"
 scrollback_mb_per_tab = 8
 scrollback_mb_total = 200
-keep_tabs_when_app_quits = false
+keep_tabs_when_app_quits = true
 log_reads = true
 keep_closed_tabs_days = 365
 saved_total_gb = 5
