@@ -765,8 +765,9 @@ at the prompt, not run, so reconnecting is one Enter.
   isn't running. The CLI must **never** start the server as its own child process, because the
   server would then inherit the calling terminal's macOS permissions (see Permissions).
 - The server keeps running when CTX.app quits or crashes, so tabs survive a GUI crash and can be
-  reattached. Quitting CTX.app normally closes all tabs (with Terminal.app's "processes are running"
-  confirmation), unless `keep_tabs_when_app_quits = true` in config.
+  reattached. The GUI is detached from the tabs: quitting CTX.app leaves them running, and the next
+  launch shows them again. With `keep_tabs_when_app_quits = false` in config, quitting closes all
+  tabs instead (with Terminal.app's "processes are running" confirmation).
 - The CLI is a short-lived client: connect, send one request, print, exit.
 
 ### Inside the server
@@ -985,7 +986,7 @@ of a tab's foreground process.
 shell = "/bin/zsh"                 # default: your login shell
 scrollback_mb_per_tab = 8
 scrollback_mb_total = 200
-keep_tabs_when_app_quits = false
+keep_tabs_when_app_quits = true    # false: quitting CTX.app closes every tab
 log_reads = true                   # log agent read requests in the activity log
 
 # saved tabs
