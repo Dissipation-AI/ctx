@@ -388,7 +388,7 @@ note: null
 
 The activity log, newest first. `client` is verified from the OS; `declared_name` is what the client claimed.
 
-Fields: `schema` (number), `entries` (list), `entries[].at` (text), `entries[].client` (text), `entries[].program` (text), `entries[].pid` (number), `entries[].declared_name` (text), `entries[].sentence` (text), `entries[].tab` (number), `entries[].typed` (text).
+Fields: `schema` (number), `entries` (list), `entries[].at` (text), `entries[].client` (text), `entries[].program` (text), `entries[].pid` (number), `entries[].declared_name` (text), `entries[].sentence` (text), `entries[].tab` (number), `entries[].typed` (text), `entries[].typed_hidden` (boolean).
 
 ```json
 {
@@ -402,7 +402,8 @@ Fields: `schema` (number), `entries` (list), `entries[].at` (text), `entries[].c
       "declared_name": "Claude - auth refactor",
       "sentence": "ctx run in \"Dev server\" \"npm test\"",
       "tab": 43,
-      "typed": "npm test"
+      "typed": "npm test",
+      "typed_hidden": false
     }
   ]
 }
@@ -410,8 +411,8 @@ Fields: `schema` (number), `entries` (list), `entries[].at` (text), `entries[].c
 
 ```
 schema: 1
-entries[1]{at,client,program,pid,declared_name,sentence,tab,typed}:
-  "2026-10-10T17:53:02Z",claude (pid 5512) in tab 2,claude,5512,Claude - auth refactor,"ctx run in \"Dev server\" \"npm test\"",43,npm test
+entries[1]{at,client,program,pid,declared_name,sentence,tab,typed,typed_hidden}:
+  "2026-10-10T17:53:02Z",claude (pid 5512) in tab 2,claude,5512,Claude - auth refactor,"ctx run in \"Dev server\" \"npm test\"",43,npm test,false
 ```
 
 ## `ctx status`
@@ -424,7 +425,7 @@ Fields: `schema` (number), `version` (text), `protocol` (number), `pid` (number)
 {
   "schema": 1,
   "version": "0.1.0",
-  "protocol": 3,
+  "protocol": 4,
   "pid": 81200,
   "uptime_seconds": 3600,
   "socket": "/var/folders/xx/T/ctx-501/server.sock",
@@ -444,7 +445,7 @@ Fields: `schema` (number), `version` (text), `protocol` (number), `pid` (number)
 ```
 schema: 1
 version: "0.1.0"
-protocol: 3
+protocol: 4
 pid: 81200
 uptime_seconds: 3600
 socket: /var/folders/xx/T/ctx-501/server.sock

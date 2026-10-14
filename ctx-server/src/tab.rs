@@ -221,6 +221,8 @@ pub struct Tab {
     /// Enter held back until the remote has echoed what was typed: (Enter's bytes, the typed
     /// text, since when).
     pub pending_enter: Option<(Vec<u8>, String, std::time::Instant)>,
+    /// The program in front is reading a password (echo off, line input).
+    pub password_input: bool,
     /// Bumped on every chunk of output.
     pub output_seq: u64,
     pub ended: bool,
@@ -822,6 +824,35 @@ impl Tab {
     pub fn cursor_line(&self) -> String {
         let (_, cy) = self.term.cursor();
         self.term.screen(false).get(cy as usize).cloned().unwrap_or_default().trim_end().to_string()
+    }
+
+    /// Re-read whether the program in front is reading a password; true if that changed.
+    pub fn refresh_password_input(&mut self) -> bool {
+        let now = crate::sys::password_input(self.fd());
+        std::mem::replace(&mut self.password_input, now) != now
+    }
+
+    /// Whether `needle` has appeared on screen since absolute row `from` (anywhere on the screen
+    /// for a full-screen program), joining rows that wrap.
+    pub fn shows_since(&self, from: u64, needle: &str) -> bool {
+        let top = self.term.active_top();
+        let (_, cy) = self.term.cursor();
+        let (from, to) = if self.term.full_screen() {
+            (top, top + self.rows as u64)
+        } else {
+            (from.min(top + cy as u64), top + cy as u64 + 1)
+        };
+        let mut text = String::new();
+        for y in from..to {
+            let row = self.term.row(y, false);
+            if self.term.row_wraps(y) {
+                text.push_str(&row);
+            } else {
+                text.push_str(row.trim_end());
+                text.push('\n');
+            }
+        }
+        text.contains(needle)
     }
 
     pub fn in_ssh(&self) -> bool {

@@ -176,7 +176,26 @@ pub struct Server {
     current_id: Option<u64>,
     /// When free memory was last handed back.
     relieved_at: i64,
+    /// `ctx type` log lines waiting to see the text on screen before it's logged.
+    unconfirmed: Vec<Unconfirmed>,
 }
+
+/// Text an agent typed, logged once it shows on screen. Text that never shows (a password
+/// prompt, a field that draws `***`, a remote `sudo` over ssh) is logged as `[hidden]`.
+struct Unconfirmed {
+    line: LogLine,
+    /// The same line with the text left out.
+    hidden: LogLine,
+    tab: u64,
+    /// The longest line of the typed text, looked for on screen.
+    needle: String,
+    /// Absolute row of the cursor when it was typed.
+    from_row: u64,
+    at: Instant,
+}
+
+/// How long typed text has to appear on screen before it's logged as hidden.
+const ECHO_WAIT: Duration = Duration::from_secs(2);
 
 /// Run the server until it's told to stop. Returns an error message if it can't start.
 pub fn run() -> Result<(), String> {
@@ -282,6 +301,7 @@ impl Server {
             starting: Vec::new(),
             current_id: None,
             relieved_at: 0,
+            unconfirmed: Vec::new(),
         };
         server.recover();
         Ok(server)
@@ -411,7 +431,10 @@ impl Server {
         if !self.dirty.is_empty() {
             t = t.min(Duration::from_millis(8));
         }
-        if self.tabs.values().any(|x| x.pending_enter.is_some()) || !self.starting.is_empty() {
+        if self.tabs.values().any(|x| x.pending_enter.is_some())
+            || !self.starting.is_empty()
+            || !self.unconfirmed.is_empty()
+        {
             t = t.min(Duration::from_millis(50));
         }
         t.max(Duration::from_millis(1))
@@ -469,6 +492,11 @@ impl Server {
         for n in held {
             self.release_enter(n, true);
         }
+        self.confirm_typed(None);
+        // Echo can come back on without any output (a prompt cancelled by a signal).
+        let changed: Vec<u64> =
+            self.tabs.values_mut().filter_map(|t| t.refresh_password_input().then_some(t.number)).collect();
+        self.dirty.extend(changed);
         let now = Instant::now();
         let ms = now_ms();
         // Waiters: time limits and quiet periods.
@@ -831,24 +859,7 @@ impl Server {
             _ => None,
         };
         let ms = now_ms();
-        if tab.is_some() {
-            let entry = ActivityEntry {
-                at: iso_utc(ms),
-                client: c.identity.describe(),
-                program: c.identity.program.clone(),
-                pid: c.identity.pid,
-                declared_name: c.identity.declared.clone(),
-                sentence: env.sentence.clone(),
-                tab,
-                typed: typed.clone(),
-            };
-            self.push_activity(entry);
-        }
-        let Some(c) = self.clients.get(&key) else { return };
-        if is_read && !self.config.log_reads {
-            return;
-        }
-        let line = LogLine {
+        let mut line = LogLine {
             at: iso_utc(ms),
             at_ms: ms,
             client: c.identity.describe(),
@@ -860,13 +871,71 @@ impl Server {
             sentence: env.sentence.clone(),
             tab,
             typed,
+            typed_hidden: false,
         };
-        self.activity.append(&line);
-        if let Some(t) = tab
-            && let Some(tab) = self.tabs.get(&t)
+        // Text typed at a password prompt is never logged. Other typed text is logged once it
+        // shows on screen, so a prompt the terminal can't see (inside ssh, a `***` field) is
+        // covered too.
+        if let Some(n) = tab
+            && let Some(t) = self.tabs.get_mut(&n)
         {
-            let _ = tab;
+            let typed = match &env.request {
+                Request::Type { text, then_press, .. } => Some((text, then_press.as_deref())),
+                Request::Run { command, .. } => Some((command, None)),
+                _ => None,
+            };
+            if let Some((text, then_press)) = typed {
+                let mut hidden = line.clone();
+                hide_typed(&mut hidden, n, &env.request, then_press);
+                let needle = text.lines().map(str::trim).max_by_key(|l| l.len()).unwrap_or("").to_string();
+                t.refresh_password_input();
+                if t.password_input {
+                    line = hidden;
+                } else if matches!(env.request, Request::Type { .. }) && !needle.is_empty() {
+                    let (_, cy) = t.term.cursor();
+                    let from_row = t.term.active_top() + cy as u64;
+                    self.unconfirmed.push(Unconfirmed { line, hidden, tab: n, needle, from_row, at: Instant::now() });
+                    return;
+                }
+            }
+        }
+        self.write_log(line, !(is_read && !self.config.log_reads));
+    }
+
+    /// Add a line to the activity log (and tell CTX.app, for a tab).
+    fn write_log(&mut self, line: LogLine, to_file: bool) {
+        if line.tab.is_some() {
+            self.push_activity(line.entry());
+        }
+        if !to_file {
+            return;
+        }
+        if let Some(t) = line.tab {
             self.dirty.insert(t);
+        }
+        self.activity.append(&line);
+    }
+
+    /// Log typed text that has shown on screen in tab `n`, or has waited too long and is hidden.
+    fn confirm_typed(&mut self, n: Option<u64>) {
+        if self.unconfirmed.is_empty() {
+            return;
+        }
+        let mut done = Vec::new();
+        for (i, u) in self.unconfirmed.iter().enumerate() {
+            if n.is_some_and(|n| n != u.tab) {
+                continue;
+            }
+            let tab = self.tabs.get(&u.tab);
+            if tab.is_some_and(|t| t.shows_since(u.from_row, &u.needle)) {
+                done.push((i, false));
+            } else if tab.is_none() || u.at.elapsed() >= ECHO_WAIT {
+                done.push((i, true));
+            }
+        }
+        for (i, hide) in done.into_iter().rev() {
+            let u = self.unconfirmed.remove(i);
+            self.write_log(if hide { u.hidden } else { u.line }, true);
         }
     }
 
@@ -1637,6 +1706,7 @@ impl Server {
             remote_location: None,
             remote_marks: false,
             pending_enter: None,
+            password_input: false,
             output_seq: 0,
             ended: false,
             shell_name,
@@ -3076,7 +3146,9 @@ impl Server {
         let fx = {
             let Some(t) = self.tabs.get_mut(&n) else { return };
             let cx = Ctx { index: &self.index, config: &self.config, tz, now_ms: ms };
-            t.process_output(data, &cx)
+            let fx = t.process_output(data, &cx);
+            t.refresh_password_input();
+            fx
         };
         // Attached terminals get the raw output (minus ctx's private reports).
         let attached: Vec<usize> =
@@ -3106,6 +3178,7 @@ impl Server {
         self.enforce_memory(n);
         self.check_waiters(n, &fx);
         self.release_enter(n, false);
+        self.confirm_typed(Some(n));
         if fx.prompt {
             self.replay_starting(false);
         }
@@ -3524,6 +3597,19 @@ fn capital(s: &str) -> String {
 }
 
 /// How to name a tab in a suggested sentence.
+/// Keep typed text out of a log line: it went to a password prompt.
+fn hide_typed(line: &mut LogLine, n: u64, r: &Request, then_press: Option<&str>) {
+    line.typed = None;
+    line.typed_hidden = true;
+    line.sentence = match r {
+        Request::Run { .. } => format!("ctx run in tab {n} [hidden]"),
+        _ => match then_press {
+            Some(k) => format!("ctx type [hidden] into tab {n} then press {k}"),
+            None => format!("ctx type [hidden] into tab {n}"),
+        },
+    };
+}
+
 fn tab_ref_words(t: &Tab) -> String {
     match &t.name {
         Some(n) => quote(n),
