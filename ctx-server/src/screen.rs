@@ -12,7 +12,7 @@ pub struct Renderer {
     pub force_full: bool,
     /// The cursor as last sent: moving only the cursor (arrow keys at a prompt) changes no row,
     /// but still needs an update.
-    last_cursor: Option<(Option<[u16; 2]>, bool, CursorShape, bool)>,
+    last_cursor: Option<CursorKey>,
     state: RenderState,
     rows: RowIterator,
     cells: CellIterator,
@@ -37,6 +37,9 @@ impl Renderer {
 }
 
 /// The rows of `tab` that changed since the last update (all rows when `full`).
+/// Cursor position, visibility, shape, blink, and whether a password is being read.
+type CursorKey = (Option<[u16; 2]>, bool, CursorShape, bool, bool);
+
 pub fn update(tab: &mut Tab, full: bool) -> Option<ScreenUpdate> {
     if tab.render.is_none() {
         tab.render = Renderer::new();
@@ -52,6 +55,7 @@ pub fn update(tab: &mut Tab, full: bool) -> Option<ScreenUpdate> {
     let full_screen = tab.term.full_screen();
     let mouse_tracking = tab.term.mouse_tracking();
     let at_prompt = tab.at_prompt && tab.running.is_empty();
+    let password_input = tab.password_input;
     let history_first = tab.cold.dropped_lines;
     let history_end = history_first + tab.cold.len() as u64;
     let term = tab.term.ghostty()?;
@@ -65,6 +69,7 @@ pub fn update(tab: &mut Tab, full: bool) -> Option<ScreenUpdate> {
         cursor_now.visible,
         shape_of(cursor_now.visual_style),
         cursor_now.blinking,
+        password_input,
     );
     if dirty == Dirty::Clean && !full && r.last_cursor == Some(cursor_key) {
         return None;
@@ -186,6 +191,7 @@ pub fn update(tab: &mut Tab, full: bool) -> Option<ScreenUpdate> {
         cursor_blink: cursor.blinking,
         mouse_tracking,
         at_prompt,
+        password_input,
         history_first,
         history_end,
     })

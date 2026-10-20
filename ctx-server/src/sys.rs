@@ -83,6 +83,18 @@ pub fn foreground_pgid(master: RawFd) -> Option<i32> {
     if pg > 0 { Some(pg) } else { None }
 }
 
+/// The program in front is reading a password: line input with echo off (what `getpass`, `sudo`,
+/// `ssh` and `read -s` set). A line editor (zsh, readline) or a full-screen program reads
+/// keystroke by keystroke instead, so it doesn't count.
+pub fn password_input(master: RawFd) -> bool {
+    // SAFETY: tcgetattr on our master descriptor into a zeroed termios.
+    let mut t: libc::termios = unsafe { std::mem::zeroed() };
+    if unsafe { libc::tcgetattr(master, &mut t) } != 0 {
+        return false;
+    }
+    t.c_lflag & libc::ECHO == 0 && t.c_lflag & libc::ICANON != 0
+}
+
 type DisclaimFn = unsafe extern "C" fn(*mut libc::posix_spawnattr_t, libc::c_int) -> libc::c_int;
 type ResponsibleFn = unsafe extern "C" fn(libc::pid_t) -> libc::pid_t;
 

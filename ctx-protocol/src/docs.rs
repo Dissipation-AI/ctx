@@ -186,6 +186,7 @@ pub fn examples() -> Vec<(&'static str, &'static str, Output)> {
                     sentence: "ctx run in \"Dev server\" \"npm test\"".into(),
                     tab: Some(43),
                     typed: Some("npm test".into()),
+                    typed_hidden: false,
                 }],
             }),
         ),

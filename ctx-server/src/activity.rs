@@ -159,6 +159,8 @@ pub struct LogLine {
     pub sentence: String,
     pub tab: Option<u64>,
     pub typed: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub typed_hidden: bool,
 }
 
 impl LogLine {
@@ -172,6 +174,7 @@ impl LogLine {
             sentence: self.sentence.clone(),
             tab: self.tab,
             typed: self.typed.clone(),
+            typed_hidden: self.typed_hidden,
         }
     }
 }
@@ -266,6 +269,7 @@ mod tests {
                 sentence: format!("ctx list tabs {i}"),
                 tab: Some(i as u64),
                 typed: None,
+                typed_hidden: false,
             });
         }
         let got = log.read(10, &|l| l.program == "claude");
