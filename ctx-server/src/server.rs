@@ -244,16 +244,9 @@ impl Server {
         let index = Index::open(&paths.index()).map_err(|e| format!("couldn't open the index: {e}"))?;
         let activity = ActivityLog::open(&paths.activity_log());
 
-        // Shell integration files.
+        write_shell_files(&paths.runtime).map_err(|e| format!("couldn't write the shell integration files: {e}"))?;
         let zdotdir = paths.runtime.join("zsh");
-        std::fs::create_dir_all(&zdotdir).map_err(|e| e.to_string())?;
-        std::fs::write(zdotdir.join(".zshenv"), ZSHENV).map_err(|e| e.to_string())?;
         let integration = paths.runtime.join("ctx.zsh");
-        std::fs::write(&integration, CTX_ZSH).map_err(|e| e.to_string())?;
-        std::fs::write(paths.runtime.join("_ctx"), ZSH_COMPLETION).map_err(|e| e.to_string())?;
-        // bash tabs: the login files, then the same marks as the remote bash integration.
-        std::fs::write(paths.runtime.join("ctx.bashrc"), format!("{LOCAL_BASHRC}\n{REMOTE_BASH}"))
-            .map_err(|e| e.to_string())?;
 
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ctx"));
         let launch_path = exe.parent().map(|d| d.join("ctx-launch")).unwrap_or_else(|| PathBuf::from("ctx-launch"));
@@ -1535,6 +1528,11 @@ impl Server {
         let is_zsh = shell_name == "zsh";
         let folder = if std::path::Path::new(folder).is_dir() { folder.to_string() } else { sys::home() };
 
+        // macOS's temp cleanup deletes these after a few days; without them a zsh tab skips the
+        // user's startup files, so put them back before every tab.
+        if let Err(e) = write_shell_files(&self.paths.runtime) {
+            eprintln!("ctx server: couldn't write the shell integration files: {e}");
+        }
         let mut env = self.shell_env(number, window, is_zsh);
         let mut not_restored = Vec::new();
         if let Some(r) = &reopen {
@@ -3636,6 +3634,26 @@ fn redraw_bytes(t: &dyn Terminal) -> Vec<u8> {
     out
 }
 
+/// Writes the shell integration files into the runtime dir, skipping any that are already current.
+fn write_shell_files(runtime: &std::path::Path) -> io::Result<()> {
+    let zdotdir = runtime.join("zsh");
+    std::fs::create_dir_all(&zdotdir)?;
+    set_mode(runtime, 0o700);
+    // bash tabs: the login files, then the same marks as the remote bash integration.
+    let bashrc = format!("{LOCAL_BASHRC}\n{REMOTE_BASH}");
+    for (path, text) in [
+        (zdotdir.join(".zshenv"), ZSHENV),
+        (runtime.join("ctx.zsh"), CTX_ZSH),
+        (runtime.join("_ctx"), ZSH_COMPLETION),
+        (runtime.join("ctx.bashrc"), bashrc.as_str()),
+    ] {
+        if std::fs::read(&path).ok().as_deref() != Some(text.as_bytes()) {
+            std::fs::write(&path, text)?;
+        }
+    }
+    Ok(())
+}
+
 fn set_mode(path: &std::path::Path, mode: u32) {
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
@@ -3672,5 +3690,25 @@ mod starter_tests {
         assert!(!activates_environment("source ~/.zshrc"));
         assert!(!activates_environment("jupyter lab"));
         assert!(is_trivial("clear") && !is_trivial("ls"));
+    }
+
+    #[test]
+    fn shell_files_come_back_after_cleanup() {
+        let runtime = std::env::temp_dir().join(format!("ctx-shell-files-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&runtime);
+        write_shell_files(&runtime).unwrap();
+        // What macOS's dirhelper leaves behind: the zsh dir, emptied.
+        std::fs::remove_file(runtime.join("zsh/.zshenv")).unwrap();
+        std::fs::remove_file(runtime.join("ctx.zsh")).unwrap();
+        std::fs::write(runtime.join("_ctx"), "stale").unwrap();
+        write_shell_files(&runtime).unwrap();
+        assert_eq!(std::fs::read_to_string(runtime.join("zsh/.zshenv")).unwrap(), ZSHENV);
+        assert_eq!(std::fs::read_to_string(runtime.join("ctx.zsh")).unwrap(), CTX_ZSH);
+        assert_eq!(std::fs::read_to_string(runtime.join("_ctx")).unwrap(), ZSH_COMPLETION);
+        // The whole dir gone, as after a manual wipe.
+        std::fs::remove_dir_all(&runtime).unwrap();
+        write_shell_files(&runtime).unwrap();
+        assert!(runtime.join("ctx.bashrc").exists());
+        std::fs::remove_dir_all(&runtime).unwrap();
     }
 }
