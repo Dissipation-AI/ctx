@@ -107,12 +107,13 @@ pub fn claude() -> Out {
     if input.get("tool_name").and_then(Value::as_str) != Some("Bash") {
         return out;
     }
-    if std::env::var("CTX_CLAUDE_HOOK").is_ok_and(|v| v == "deny") {
+    let command = input.pointer("/tool_input/command").and_then(Value::as_str).unwrap_or("").trim();
+    if std::env::var("CTX_CLAUDE_HOOK").is_ok_and(|v| v == "deny") && !is_ctx_sentence(command) {
         out.line(
             json!({"hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": "deny",
-                "permissionDecisionReason": "Shell commands run in ctx tabs here: use the ctx_run tool (or `ctx run in \"<tab>\" \"<command>\"`)."
+                "permissionDecisionReason": "Shell commands run in ctx tabs here: use `ctx run in \"<tab>\" \"<command>\"`."
             }})
             .to_string(),
         );
@@ -170,6 +171,45 @@ fn route(prefix: &str, call: &ShellCall) -> Option<String> {
     let tab = session_tab(prefix, call.session);
     let folder = session_tab_folder(&tab, call.cwd.map(str::to_string))?;
     Some(sentence(&tab, &folder, &ShellCall { command, ..*call }))
+}
+
+/// The tab prefix for an MCP client: the first word of its name, capitalized (`gemini-cli-mcp-client`
+/// → `Gemini`).
+fn client_prefix(client: &str) -> String {
+    let word: String = client.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+    let mut chars = word.chars();
+    match chars.next() {
+        Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+        None => "Agent".into(),
+    }
+}
+
+/// `ctx mcp`'s `shell` tool: the command runs in a tab named for the client and `session` (opened in
+/// `folder` on first use); a single ctx sentence runs as is, as with the hooks.
+pub fn mcp(call: &ctx_mcp::Call, session: &str, folder: &str) -> Out {
+    let command = call.command.trim();
+    let words = if is_ctx_sentence(command) {
+        match ctx_mcp::shell_words(command) {
+            Ok(w) => w[1..].to_vec(),
+            Err(e) => {
+                let mut out = Out::default();
+                out.err(e);
+                out.ctx_error = true;
+                return out.code(2);
+            }
+        }
+    } else {
+        let tab = session_tab(&client_prefix(call.client), session);
+        if session_tab_folder(&tab, Some(folder.to_string())).is_none() {
+            let mut out = Out::default();
+            out.err("ctx's server isn't reachable, so the command didn't run.");
+            out.ctx_error = true;
+            return out.code(1);
+        }
+        let secs = (call.timeout_ms / 1000).max(1);
+        ["run", "in", &tab, command, "within", &secs.to_string(), "seconds"].map(str::to_string).to_vec()
+    };
+    crate::exec::run(&words, crate::exec::Caller::Mcp)
 }
 
 fn stdin_json() -> Value {
@@ -372,6 +412,13 @@ mod tests {
         let bg = json!({"tool_input": {"command": "npm run dev", "run_in_background": true}});
         assert_eq!(rewrite(&bg, "T").unwrap()["command"], "ctx run in 'T' 'npm run dev' without waiting");
         assert!(rewrite(&json!({"tool_input": {"command": "ctx list tabs"}}), "T").is_none());
+    }
+
+    #[test]
+    fn mcp_tabs_are_named_for_the_client() {
+        assert_eq!(client_prefix("gemini-cli-mcp-client"), "Gemini");
+        assert_eq!(client_prefix("claude-ai"), "Claude");
+        assert_eq!(client_prefix(""), "Agent");
     }
 
     #[test]

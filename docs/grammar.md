@@ -259,7 +259,7 @@ Serve ctx to an agent over MCP (stdin and stdout). Started by the agent, not typ
 ctx mcp
 ```
 
-- `ctx mcp`: Run the MCP server that exposes ctx's verbs as tools.
+- `ctx mcp`: Run the MCP server: one `shell` tool whose commands run in a ctx tab.
 
 ## Permissions: scoped launchers
 

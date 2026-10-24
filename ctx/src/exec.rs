@@ -278,8 +278,10 @@ fn execute(s: Sentence, caller: Caller) -> Out {
                 out.err("Already serving MCP.");
                 return out.code(1);
             }
-            out.code(ctx_mcp::serve(&|args: &[String]| {
-                let o = run(args, Caller::Mcp);
+            let folder = context().folder;
+            let session = std::process::id().to_string();
+            out.code(ctx_mcp::serve(&|call: &ctx_mcp::Call| {
+                let o = crate::hook::mcp(call, &session, &folder);
                 ctx_mcp::Result { stdout: o.stdout, stderr: o.stderr, code: o.code, ctx_error: o.ctx_error }
             }))
         }

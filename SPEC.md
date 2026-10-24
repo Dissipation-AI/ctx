@@ -278,7 +278,7 @@ and `ctx list closed tabs` shows ones that have been closed.
   order, and what's left is the object. Ambiguity is an error with a suggested rewrite, never a
   guess.
 - The grammar is data (one table in `ctx-cli/src/grammar.rs`) from which `ctx help`,
-  `ctx/docs/grammar.md`, the MCP tool schemas and the canonical form used in logs are all generated.
+  `ctx/docs/grammar.md` and the canonical form used in logs are all generated.
 - Shell completion for zsh is generated from the same table and completes tab names in quotes.
 
 ## Structured output: `as json` and `as toon`
@@ -301,8 +301,8 @@ Notes on TOON, so it's chosen for the right reasons:
 - The **comprehension claims are thin.** The maintainers report a small accuracy edge over JSON
   (about 76% vs 75%), and an independent preprint found plain JSON still the most accurate when
   models *write* structured output. Models have seen far more JSON in training.
-- So: `as toon` is offered and **advertised to agents** (in `ctx help`, the agent instructions
-  and the MCP tool descriptions), but the default for agents isn't decided until the agent
+- So: `as toon` is offered and **advertised to agents** (in `ctx help` and the agent
+  instructions), but the default for agents isn't decided until the agent
   evaluation (see Agents → Evaluation) compares plain text, JSON and TOON on real tasks.
 - ctx only *emits* TOON and never parses it, so a small encoder written against the TOON spec is
   enough, with no dependency needed.
@@ -583,16 +583,21 @@ block into the files each agent reads at startup:
 Instructions *ask* an agent to use ctx; the deeper step is to make ctx **the** shell tool, so
 agents can't fall back to a throwaway shell. Each agent has its own extension mechanism:
 
-- **Claude Code:** a plugin that bundles the `ctx mcp` server, the instruction block, and a
-  `PreToolUse` hook on `Bash`. The hook either rewrites commands into `ctx run` or, where that isn't
-  supported, denies them with a message pointing at the MCP tool. Alternatively, permission settings
-  deny the built-in `Bash` tool.
-- **OpenAI Codex CLI:** `ctx mcp` registered as an MCP server in its config, plus whatever it offers
-  for disabling or restricting its built-in shell tool.
+- **Claude Code:** a plugin with a `PreToolUse` hook on `Bash`. The hook either rewrites commands
+  into `ctx run` or, where that isn't supported, denies them (all but single ctx sentences) with a
+  message pointing at `ctx run`.
+- **OpenAI Codex CLI:** the same kind of hook, through its plugin registry.
 - **Google Gemini CLI / Antigravity:** an extension bundling the MCP server and the instruction file,
   plus their settings for excluding built-in shell tools.
 - Exact mechanisms change between agent versions, so each is verified when this phase starts,
   not assumed from this spec.
+
+**`ctx mcp` is only for agents whose shell can't be hooked** (decided 2026-10-23). It has one
+tool, `shell` (`command`, optional `timeout`), named like any agent's shell so the agent isn't
+primed to treat it as special. Each command runs in a tab named for the session, as with the
+hooks; everything else ctx does is reached by running `ctx …` in that shell, so there is one way to
+do each thing. The earlier design, a tool per verb (17) plus a catch-all, cost ~3k tokens of schema
+per session and duplicated the CLI.
 
 `ctx` itself stays agent-agnostic: the MCP server and CLI are the same for everyone. The
 per-agent pieces live in `ctx/integrations/<agent>/`.
@@ -606,7 +611,7 @@ pick up a task another agent started). Each agent runs it in configurations:
 
 1. built-in shell (baseline);
 2. built-in shell + ctx instructions;
-3. ctx MCP with the built-in shell disabled;
+3. ctx MCP (`shell`) with the built-in shell disabled;
 4. same as 3, with plain text vs `as json` vs `as toon` outputs.
 
 Measured per run: task success (scripted checks), wall-clock time, tokens in and out, number of
@@ -1085,7 +1090,7 @@ ctx/
   ctx-server/     event loop, PTYs, spawning, emulator wrapper, scrollback store, activity log
   ctx-cli/        sentence grammar table + parser, human and JSON output
   ctx-store/      saved-tab records (.ctxlog), SQLite index, search, retention
-  ctx-mcp/        MCP server exposing the CLI verbs
+  ctx-mcp/        MCP server: one `shell` tool for agents without a hookable shell
   integrations/   per-agent instruction templates, plugins/extensions, hooks
   ctx-ask/        `ask`: narrowing, chunking, model client, citation verification, prompts
   ctx/            the single `ctx` binary (cli + `ctx server`)

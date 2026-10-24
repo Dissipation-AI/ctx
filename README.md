@@ -33,7 +33,7 @@ lines ([docs/events.md](docs/events.md)). What was measured and decided while bu
 | `ctx-server` | Event loop, tabs, libghostty-vt emulation, scrollback store, activity log, CTX.app updates |
 | `ctx-store` | Saved tabs (`.ctxlog` records), SQLite index, search |
 | `ctx-ask` | `ctx ask` (map, reduce, verified evidence) and assist through `bro` |
-| `ctx-mcp` | `ctx mcp`: the verbs as MCP tools |
+| `ctx-mcp` | `ctx mcp`: one `shell` tool, for agents whose shell can't be hooked |
 | `ctx-launch` | Starts each tab's shell under its own macOS identity |
 | `launchers/` | The reviewed template for `ctx make launcher` |
 | `shell/` | zsh and bash integration, the ssh bootstrap, zsh completion |
@@ -93,6 +93,10 @@ New sessions pick it up. The installed hooks call this `ctx` by its full path, a
 must be running (launchd starts it). Agents that sandbox their shell (Antigravity, Codex, Cursor
 with its sandbox on) block `ctx` from its server, so those commands run outside the sandbox with
 your approval as the check. Each `integrations/<agent>/README.md` has the details.
+
+### Agents without a hookable shell: `ctx mcp`
+
+For an agent whose shell tool can't be hooked, `ctx mcp` is an MCP server (stdio) with one tool, `shell`, that stands in for it: `{command, timeout?}` in, output and `[exit status: N]` out. Each command runs in a tab named for the session (`Gemini 48211`: the client's name and the server's process id), opened in the server's folder on first use, so state persists and a person can watch, as with the hooks. A command still running at the timeout (default 120 seconds) keeps running, and the reply says how to wait for it. A single ctx sentence (`ctx list tabs`) runs as is; everything else ctx does, the agent reaches by running `ctx …` in that shell. The server's MCP instructions are the same block `ctx install instructions` writes. Only the Gemini CLI extension uses it today; the hooked agents don't need it.
 
 ## Licence
 

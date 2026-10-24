@@ -2,12 +2,11 @@
 
 A plugin that makes ctx Claude Code's shell:
 
-- `.mcp.json` registers `ctx mcp`, so Claude can use ctx's verbs as tools.
 - `hooks/hooks.json` adds a `PreToolUse` hook on `Bash`: `ctx hook claude` rewrites each command
   into `ctx run in "Claude <session>" '<command>'`, in a tab named for the session (opened in the
   session's folder on first use). Background commands become `… without waiting`; the Bash tool's
-  timeout becomes `within`. With `CTX_CLAUDE_HOOK=deny` it refuses Bash calls instead and points
-  at the MCP tools.
+  timeout becomes `within`. With `CTX_CLAUDE_HOOK=deny` it refuses other Bash calls instead (a single ctx sentence still
+  runs) and points at `ctx run`.
 - The instruction block comes from `ctx install instructions for claude`.
 
 **Not on by default.** SPEC.md, "Evaluation", gates this: it ships only once `evals/agents` shows it

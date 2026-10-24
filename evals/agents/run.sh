@@ -56,7 +56,7 @@ SHIM
     instructions) : > $work/CLAUDE.md; (cd $work && ctx install instructions for agents at $work >/dev/null) ;;
     mcp|mcp-json|mcp-toon)
       : > $work/CLAUDE.md; (cd $work && ctx install instructions for agents at $work >/dev/null)
-      args+=(--mcp-config $root/integrations/claude/.mcp.json --disallowedTools Bash)
+      args+=(--mcp-config '{"mcpServers":{"ctx":{"command":"ctx","args":["mcp"]}}}' --disallowedTools Bash)
       [[ $cfg == mcp-json ]] && args+=(--append-system-prompt "Add as json to ctx sentences when you need structured answers.")
       [[ $cfg == mcp-toon ]] && args+=(--append-system-prompt "Add as toon to ctx sentences when you need structured answers.") ;;
     hook) : > $work/CLAUDE.md; (cd $work && ctx install instructions for agents at $work >/dev/null); args+=(--plugin-dir $root/integrations/claude) ;;
