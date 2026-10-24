@@ -190,6 +190,38 @@ pub fn plist_path() -> PathBuf {
     PathBuf::from(ctx_server::sys::home()).join("Library/LaunchAgents").join(format!("{LABEL}.plist"))
 }
 
+/// The app that runs the server, when there is one: the app this program is bundled in
+/// (`CTX.app/Contents/Resources/bin/ctx`), else the one that last registered the server (CTX.app
+/// writes its path as the first line of `<data>/server-registration`). Its main program.
+fn app_program(exe: &std::path::Path, paths: &Paths) -> Option<PathBuf> {
+    let own = exe.ancestors().find(|a| a.extension().is_some_and(|e| e == "app")).map(PathBuf::from);
+    let registered = || {
+        let s = std::fs::read_to_string(paths.data.join("server-registration")).ok()?;
+        Some(PathBuf::from(s.lines().next()?))
+    };
+    let app = own.or_else(registered)?;
+    let info = app.join("Contents/Info.plist");
+    let name = std::process::Command::new("/usr/bin/plutil")
+        .args(["-extract", "CFBundleExecutable", "raw", "-o", "-"])
+        .arg(&info)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let program = app.join("Contents/MacOS").join(String::from_utf8_lossy(&name.stdout).trim());
+    program.exists().then_some(program)
+}
+
+/// Have the app register and start the server (`CTX --start-server`), so launchd keeps one
+/// registration for it whoever starts it: two with the same label make macOS refuse one at login.
+fn start_through_app(program: &std::path::Path) -> Result<(), NoServer> {
+    let out = std::process::Command::new(program)
+        .arg("--start-server")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| NoServer(format!("Couldn't run {}: {e}", program.display())))?;
+    if out.status.success() { Ok(()) } else { Err(NoServer(String::from_utf8_lossy(&out.stderr).trim().to_string())) }
+}
+
 /// Start the server as a LaunchAgent (never as our own child: it would inherit this terminal's
 /// macOS permissions).
 fn start_server(paths: &Paths) -> Result<(), NoServer> {
@@ -201,6 +233,9 @@ fn start_server(paths: &Paths) -> Result<(), NoServer> {
     }
     let exe = std::env::current_exe().map_err(|e| NoServer(format!("Couldn't find the ctx program: {e}")))?;
     let exe = exe.canonicalize().unwrap_or(exe);
+    if let Some(app) = app_program(&exe, paths) {
+        return start_through_app(&app);
+    }
     let _ = std::fs::create_dir_all(&paths.data);
     let plist_file = plist_path();
     let wanted = plist(&exe, &paths.server_log());

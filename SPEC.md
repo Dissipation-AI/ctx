@@ -808,8 +808,11 @@ at the prompt, not run, so reconnecting is one Enter.
 ### Processes
 
 - **One server per user**, started by launchd as a LaunchAgent (`com.ctx.server`). CTX.app
-  registers it with `SMAppService.agent`; the CLI registers it with `launchctl bootstrap` if it
-  isn't running. The CLI must **never** start the server as its own child process, because the
+  registers it with `SMAppService.agent`. When the server isn't running, the CLI starts it through
+  CTX.app if there is one (the app it's bundled in, else the one named on the first line of
+  `<data>/server-registration`, which the app writes): `CTX --start-server`. Two registrations
+  with one label make macOS refuse one at login. Without the app, the CLI registers it with
+  `launchctl bootstrap`. The CLI must **never** start the server as its own child process, because the
   server would then inherit the calling terminal's macOS permissions (see Permissions).
 - The server keeps running when CTX.app quits or crashes, so tabs survive a GUI crash and can be
   reattached. The GUI is detached from the tabs: quitting CTX.app leaves them running, and the next
