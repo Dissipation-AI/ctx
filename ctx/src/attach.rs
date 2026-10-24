@@ -105,11 +105,16 @@ pub fn attach(mut conn: Connection, sentence: String, tab: TabRef) -> i32 {
     let mut stdin = std::io::stdin();
     let mut buf = [0u8; 4096];
     let stdin_fd = stdin.as_raw_fd();
-    let _ = stdin_fd;
     let mut detached = false;
     loop {
         if output.is_finished() {
             break;
+        }
+        // Wait for a key without blocking forever, so a tab that ends is noticed at once.
+        let mut pfd = libc::pollfd { fd: stdin_fd, events: libc::POLLIN, revents: 0 };
+        // SAFETY: one valid pollfd.
+        if unsafe { libc::poll(&mut pfd, 1, 100) } == 0 {
+            continue;
         }
         let n = match stdin.read(&mut buf) {
             Ok(0) | Err(_) => break,
