@@ -9,6 +9,7 @@
 //! are whole English words. Postcard isn't self-describing, so no field is ever skipped when
 //! serialising: absent values are `None` and print as `null` in JSON.
 
+pub mod agents;
 pub mod config;
 pub mod docs;
 pub mod sgr;
@@ -19,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 
 /// Bumped whenever a message changes shape. Client and server must match exactly.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 /// Version of the `as json` / `as toon` schema. Printed as `"schema": 1`.
 pub const SCHEMA_VERSION: u32 = 1;
 /// Largest message either side accepts (a whole `read everything` of a big tab fits).
@@ -134,6 +135,8 @@ pub enum ClientKind {
     Mcp,
     /// A generated scoped launcher asking who started it.
     Launcher,
+    /// An agent integration's hook (`ctx hook claude`), running a tool call in a tab.
+    Hook,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -513,6 +516,8 @@ pub struct TabInfo {
     pub window: u64,
     /// `you`, or an agent such as `claude (pid 5512)`.
     pub opened_by: String,
+    /// The agent the tab belongs to (`config.toml`'s `[agents.<name>]`); `None`: it's yours.
+    pub owner: Option<String>,
     /// The title a program set (OSC 0/2), shown second to the name.
     pub title: Option<String>,
     /// `idle`, `busy` or `typing` (someone has typed at the prompt without pressing Enter).

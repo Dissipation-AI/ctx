@@ -8,7 +8,7 @@ use std::ffi::{CStr, CString};
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn cvt(r: libc::c_int) -> io::Result<libc::c_int> {
     if r < 0 { Err(io::Error::last_os_error()) } else { Ok(r) }
@@ -240,6 +240,53 @@ pub fn peer_uid(fd: RawFd) -> Option<u32> {
     // SAFETY: getpeereid with valid out-pointers.
     let r = unsafe { libc::getpeereid(fd, &mut uid, &mut gid) };
     if r == 0 { Some(uid) } else { None }
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn sandbox_check(pid: libc::pid_t, operation: *const libc::c_char, filter: libc::c_int, ...) -> libc::c_int;
+}
+
+/// Whether a process runs in a Seatbelt sandbox.
+#[cfg(target_os = "macos")]
+pub fn sandboxed(pid: i32) -> bool {
+    // SAFETY: a null operation asks only whether the process is sandboxed.
+    unsafe { sandbox_check(pid, std::ptr::null(), 0) == 1 }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn sandboxed(_pid: i32) -> bool {
+    false
+}
+
+/// Whether a sandboxed process may read `path` (its profile decides; the file needn't exist).
+#[cfg(target_os = "macos")]
+pub fn sandbox_allows_read(pid: i32, path: &Path) -> bool {
+    const SANDBOX_FILTER_PATH: libc::c_int = 1;
+    const SANDBOX_CHECK_NO_REPORT: libc::c_int = 0x4000_0000;
+    let Ok(p) = CString::new(path.as_os_str().as_encoded_bytes()) else { return false };
+    // SAFETY: valid C strings for the operation and the path filter argument.
+    unsafe {
+        sandbox_check(pid, c"file-read-data".as_ptr(), SANDBOX_FILTER_PATH | SANDBOX_CHECK_NO_REPORT, p.as_ptr()) == 0
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn sandbox_allows_read(_pid: i32, _path: &Path) -> bool {
+    false
+}
+
+/// A macOS account's user id and home folder.
+pub fn account(name: &str) -> Option<(u32, PathBuf)> {
+    let n = CString::new(name).ok()?;
+    // SAFETY: getpwnam returns a pointer to static storage or null; read it at once.
+    unsafe {
+        let pw = libc::getpwnam(n.as_ptr());
+        if pw.is_null() {
+            return None;
+        }
+        Some(((*pw).pw_uid, PathBuf::from(CStr::from_ptr((*pw).pw_dir).to_string_lossy().into_owned())))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

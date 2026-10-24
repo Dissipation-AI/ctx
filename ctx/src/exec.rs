@@ -69,6 +69,10 @@ pub fn run(args: &[String], caller: Caller) -> Out {
     {
         return out;
     }
+    // What an agent program's name runs in your tabs (see shim.rs); not a sentence.
+    if caller == Caller::Cli && args.first().is_some_and(|a| a == "shim") {
+        return crate::shim::run(&args[1..]);
+    }
     // Used by the zsh completion; not a sentence.
     if caller == Caller::Cli && args.len() == 2 && args[0] == "completion-words" && args[1] == "tabs" {
         return completion_tabs();

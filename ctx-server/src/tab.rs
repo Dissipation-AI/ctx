@@ -165,6 +165,8 @@ pub struct Tab {
     /// `user@host`
     pub location: String,
     pub opened_by: String,
+    /// The agent the tab belongs to (`None`: you). Its shell runs under that agent's profile.
+    pub owner: Option<String>,
     pub opened_ms: i64,
     pub master: OwnedFd,
     pub launch_pid: i32,

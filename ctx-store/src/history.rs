@@ -31,6 +31,8 @@ pub struct History {
     pub folder: String,
     pub window: u64,
     pub opened_by: String,
+    /// The agent the tab belongs to; `None`: you.
+    pub owner: Option<String>,
     pub opened_ms: i64,
     pub closed_ms: Option<i64>,
     /// `closed` or `interrupted`, when it ended.
@@ -151,6 +153,7 @@ impl History {
                 self.columns = columns;
                 self.rows = rows;
             }
+            Record::Owner { owner } => self.owner = Some(owner),
             Record::EnvHidden { names, .. } => {
                 for n in names {
                     if !self.hidden_env.contains(&n) {

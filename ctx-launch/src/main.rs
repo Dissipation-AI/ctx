@@ -8,7 +8,11 @@
 //! shell's parent (so the shell keeps this process as its responsible process), holds no
 //! terminal, and exits with the shell's exit status.
 //!
-//! Usage (by the server only): `ctx-launch <folder> <program> <argv0> [arguments…]`
+//! An agent's tab starts with `--sandbox <profile file>`: the Seatbelt profile is applied before
+//! anything else runs, so the shell and everything it starts stay inside it. If it can't be
+//! applied the shell doesn't start.
+//!
+//! Usage (by the server only): `ctx-launch [--sandbox <file>] <folder> <program> <argv0> [arguments…]`
 
 use std::ffi::{CString, OsStr};
 use std::os::unix::ffi::OsStrExt;
@@ -22,8 +26,34 @@ fn fail(msg: &str) -> ! {
     std::process::exit(127);
 }
 
+unsafe extern "C" {
+    fn sandbox_init(profile: *const libc::c_char, flags: u64, errorbuf: *mut *mut libc::c_char) -> libc::c_int;
+}
+
+/// Apply a Seatbelt profile (its text) to this process and everything it starts.
+fn apply_sandbox(file: &OsStr) {
+    let text = std::fs::read(file).unwrap_or_else(|e| fail(&format!("couldn't read the agent's sandbox: {e}")));
+    let profile = CString::new(text).unwrap_or_else(|_| fail("the agent's sandbox has a NUL byte"));
+    let mut err: *mut libc::c_char = std::ptr::null_mut();
+    // SAFETY: a valid C string and an out-pointer for the error message.
+    let r = unsafe { sandbox_init(profile.as_ptr(), 0, &mut err) };
+    if r != 0 {
+        let msg = if err.is_null() {
+            "unknown error".to_string()
+        } else {
+            // SAFETY: sandbox_init sets a C string on failure.
+            unsafe { std::ffi::CStr::from_ptr(err).to_string_lossy().into_owned() }
+        };
+        fail(&format!("couldn't apply the agent's sandbox, so the shell didn't start: {msg}"));
+    }
+}
+
 fn main() {
-    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let mut args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    if args.len() >= 2 && args[0] == "--sandbox" {
+        apply_sandbox(&args[1]);
+        args.drain(..2);
+    }
     if args.len() < 3 {
         fail("usage: ctx-launch <folder> <program> <argv0> [arguments…] (started by the ctx server)");
     }

@@ -4,6 +4,7 @@
 //! and for trying ctx without touching your real tabs.
 
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
@@ -110,9 +111,61 @@ pub struct Config {
 
     pub ask: AskConfig,
 
+    /// Agents: the principals other than you, `[agents.<name>]`. See `agents.rs`.
+    pub agents: BTreeMap<String, Agent>,
+    /// The agent an agent program becomes outside every agent's `folders`. Empty: it runs as you.
+    pub default_agent: String,
+    /// Programs that are agents. Started in a ctx tab, each runs as the agent for its folder.
+    pub agent_programs: Vec<String>,
+
     /// CTX.app's own settings. The server ignores them; the app reads them.
     pub app: toml::Table,
 }
+
+/// One agent's profile.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Agent {
+    /// Folders it works in: an agent program started inside one is this agent.
+    pub folders: Vec<String>,
+    /// The scoped launcher (`ctx make launcher`) that starts it.
+    pub launcher: String,
+    /// The macOS account it runs as (through the ctx helper). Empty: it runs as you.
+    pub account: String,
+    /// Whether it runs in a Seatbelt sandbox built from `read`, `write` and `deny`.
+    pub sandbox: bool,
+    /// In your home (closed otherwise): what it may read, read and write, and never touch.
+    /// Outside your home everything stays readable and only temporary folders are writable.
+    pub read: Vec<String>,
+    pub write: Vec<String>,
+    pub deny: Vec<String>,
+    pub network: bool,
+    /// Whose tabs it may see (list, read, find) and drive (run, type, press, close), besides its
+    /// own: `you`, agent names, or `*`.
+    pub see_tabs_of: Vec<String>,
+    pub drive_tabs_of: Vec<String>,
+}
+
+impl Default for Agent {
+    fn default() -> Self {
+        Agent {
+            folders: Vec::new(),
+            launcher: String::new(),
+            account: String::new(),
+            sandbox: true,
+            read: Vec::new(),
+            write: Vec::new(),
+            deny: Vec::new(),
+            network: true,
+            see_tabs_of: Vec::new(),
+            drive_tabs_of: Vec::new(),
+        }
+    }
+}
+
+/// Programs ctx treats as agents unless `agent_programs` says otherwise.
+pub const AGENT_PROGRAMS: &[&str] =
+    &["claude", "codex", "gemini", "agy", "antigravity", "cursor-agent", "aider", "opencode", "goose"];
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
@@ -146,6 +199,9 @@ impl Default for Config {
             assist: true,
             assist_command: "bro".into(),
             ask: AskConfig::default(),
+            agents: BTreeMap::new(),
+            default_agent: String::new(),
+            agent_programs: AGENT_PROGRAMS.iter().map(|s| s.to_string()).collect(),
             app: toml::Table::new(),
         }
     }
@@ -179,6 +235,17 @@ impl Config {
         let c: Config = toml::from_str(text).map_err(|e| e.to_string())?;
         if !["ask", "always", "never"].contains(&c.reopen_on_launch.as_str()) {
             return Err("reopen_on_launch must be \"ask\", \"always\" or \"never\"".into());
+        }
+        for name in c.agents.keys() {
+            if name.is_empty()
+                || name == crate::agents::YOU
+                || !name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+            {
+                return Err(format!("agents.{name}: an agent's name uses letters, digits, - and _, and isn't \"you\""));
+            }
+        }
+        if !c.default_agent.is_empty() && !c.agents.contains_key(&c.default_agent) {
+            return Err(format!("default_agent = \"{}\", but there's no [agents.{0}]", c.default_agent));
         }
         Ok(c)
     }

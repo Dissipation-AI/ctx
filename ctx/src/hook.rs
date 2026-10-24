@@ -59,7 +59,7 @@ pub fn is_ctx_sentence(command: &str) -> bool {
 /// Make sure the session's tab exists, opening it in `folder` if not. Returns the tab's folder, or
 /// `None` if ctx isn't reachable (the caller then leaves the command alone).
 fn session_tab_folder(tab: &str, folder: Option<String>) -> Option<String> {
-    let mut conn = Connection::open(ClientKind::Cli).ok()?;
+    let mut conn = Connection::open(ClientKind::Hook).ok()?;
     let list = match conn.request(&Envelope { sentence: "ctx list tabs".into(), request: Request::ListTabs }) {
         Ok(Response::Ok(Output::Tabs(list))) => list,
         _ => return None,

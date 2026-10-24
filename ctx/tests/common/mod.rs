@@ -95,6 +95,11 @@ impl Server {
     }
 
     pub fn ctx_in(&self, args: &[&str], stdin: Option<&str>) -> Out {
+        self.ctx_with(&[], args, stdin)
+    }
+
+    /// `ctx` with extra environment variables.
+    pub fn ctx_with(&self, env: &[(&str, &str)], args: &[&str], stdin: Option<&str>) -> Out {
         let mut cmd = Command::new(ctx_bin());
         cmd.args(args)
             .current_dir(&self.home)
@@ -102,6 +107,7 @@ impl Server {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         self.envs(&mut cmd);
+        cmd.envs(env.iter().copied());
         let mut child = cmd.spawn().expect("run ctx");
         if let Some(input) = stdin {
             use std::io::Write;

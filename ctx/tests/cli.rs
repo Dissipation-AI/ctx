@@ -400,6 +400,63 @@ fn ctx_app_subscription_gets_screens_and_sends_input() {
 }
 
 #[test]
+fn agents_see_and_drive_only_their_own_tabs_and_run_sandboxed() {
+    let s = Server::start("agents");
+    std::fs::create_dir_all(s.home.join("Secret")).unwrap();
+    std::fs::write(s.home.join("Secret/key"), "hunter2").unwrap();
+    std::fs::create_dir_all(s.home.join("Work")).unwrap();
+    std::fs::write(
+        s.dir.join("config.toml"),
+        "shell = \"/bin/zsh\"\nagent_programs = [\"fakeagent\"]\n[agents.dev]\nfolders = [\"~/Work\"]\nwrite = [\"~/Work\"]\n",
+    )
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2500)); // the server rereads its config
+    s.ctx(&["open", "tab", "named", "Mine", "at", "/tmp"]).ok();
+    let dev = |args: &[&str]| s.ctx_with(&[("CTX_AGENT_NAME", "dev")], args, None);
+
+    // Your tab doesn't exist for the agent.
+    assert!(!dev(&["list", "tabs"]).ok().stdout.contains("Mine"));
+    let o = dev(&["run", "in", "Mine", "echo hi"]);
+    assert_eq!(o.code, 1);
+    assert!(o.stderr.contains("There's no tab named \"Mine\""), "{}", o.stderr);
+
+    // Its own tab runs in its sandbox: your home is closed except what it was given.
+    let work = s.home.join("Work").display().to_string();
+    dev(&["open", "tab", "named", "Dev work", "at", &work]).ok();
+    let o = dev(&["run", "in", "Dev work", "cat ~/Secret/key"]);
+    assert!(o.stdout.contains("Operation not permitted") && !o.stdout.contains("hunter2"), "{}", o.stdout);
+    assert_eq!(dev(&["run", "in", "Dev work", "echo made > ~/Work/out && cat ~/Work/out"]).ok().stdout, "made\n");
+
+    // Inside the sandbox ctx knows it's the agent, whatever the process says about itself.
+    let ctx = common::ctx_bin().display().to_string();
+    let o = dev(&["run", "in", "Dev work", &format!("env -u CTX_AGENT_NAME '{ctx}' list tabs")]).ok().stdout.clone();
+    assert!(o.contains("Dev work") && !o.contains("Mine"), "{o}");
+    let o = dev(&["run", "in", "Dev work", &format!("env -u CTX_AGENT_NAME '{ctx}' run in tab 1 'echo escaped'")]);
+    assert!(o.stdout.contains("There is no tab 1"), "{}", o.stdout);
+
+    // You see everything, with its owner, and can drive the agent's tab.
+    let o = s.ctx(&["list", "tabs"]).ok().stdout.clone();
+    assert!(o.contains("Mine") && o.contains("\"Dev work\"") && o.contains("belongs to the agent \"dev\""), "{o}");
+    assert_eq!(s.ctx(&["run", "in", "Dev work", "echo yours"]).ok().stdout, "yours\n");
+    // An agent program started in your tab runs as the agent for its folder.
+    std::fs::create_dir_all(s.home.join("bin")).unwrap();
+    let fake = s.home.join("bin/fakeagent");
+    std::fs::write(&fake, "#!/bin/sh\necho \"agent=$CTX_AGENT\"; cat ~/Secret/key\n").unwrap();
+    std::process::Command::new("chmod").arg("755").arg(&fake).status().unwrap();
+    s.ctx(&["run", "in", "Mine", "export PATH=~/bin:$PATH"]).ok();
+    let o = s.ctx(&["run", "in", "Mine", "cd ~/Work && fakeagent"]).stdout;
+    assert!(o.contains("agent=dev") && o.contains("Operation not permitted") && !o.contains("hunter2"), "{o}");
+    let o = s.ctx(&["run", "in", "Mine", "cd /tmp && fakeagent"]).ok().stdout.clone();
+    assert!(o.starts_with("agent=\nhunter2"), "outside every agent's folders it runs as you: {o}");
+
+    // The log names the agent.
+    let o = s.ctx(&["list", "activity", "by", "dev", "as", "json"]).ok().stdout.clone();
+    let v: serde_json::Value = serde_json::from_str(&o).unwrap();
+    let clients: Vec<&str> = v["entries"].as_array().unwrap().iter().map(|e| e["client"].as_str().unwrap()).collect();
+    assert!(!clients.is_empty() && clients.iter().all(|c| c.starts_with("dev: ")), "{clients:?}");
+}
+
+#[test]
 fn dont_save_env_keeps_values_out_and_says_so_on_reopen() {
     let s = Server::start("hidden-env");
     std::fs::write(s.dir.join("config.toml"), "shell = \"/bin/zsh\"\ndont_save_env = [\"*_TOKEN\"]\n").unwrap();
