@@ -59,7 +59,7 @@ pub fn is_ctx_sentence(command: &str) -> bool {
 /// The session's tab, opened in `folder` if there isn't one: its name and folder, or `None` if ctx
 /// isn't reachable (the caller then leaves the command alone). The tab is the agent's own: when a
 /// tab of that name belongs to someone else (the session started before the agent was configured,
-/// or was resumed), the agent's is named `<tab> (<agent>)`.
+/// or was resumed), the agent's is named `<tab> <agent>`.
 fn session_tab_folder(tab: &str, folder: Option<String>) -> Option<(String, String)> {
     let mut conn = Connection::open(ClientKind::Hook).ok()?;
     let list = match conn.request(&Envelope { sentence: "ctx list tabs".into(), request: Request::ListTabs }) {
@@ -70,7 +70,15 @@ fn session_tab_folder(tab: &str, folder: Option<String>) -> Option<(String, Stri
     let named = |name: &str| tabs.iter().filter(|t| t.name.as_deref() == Some(name)).copied().collect::<Vec<_>>();
     // You may drive every tab; an agent its own.
     let mine = |t: &&TabInfo| list.caller.is_none() || t.owner == list.caller;
-    let own = format!("{tab} ({})", list.caller.as_deref().unwrap_or(ctx_protocol::agents::YOU));
+    // Tab names take letters, digits, spaces, - and _.
+    let who: String = list
+        .caller
+        .as_deref()
+        .unwrap_or(ctx_protocol::agents::YOU)
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '-' })
+        .collect();
+    let own = format!("{tab} {who}");
     for name in [tab, own.as_str()] {
         if let Some(t) = named(name).into_iter().find(mine) {
             return Some((name.to_string(), t.folder.clone()));

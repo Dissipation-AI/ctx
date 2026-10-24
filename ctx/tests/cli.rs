@@ -473,9 +473,9 @@ fn an_agents_hook_never_reuses_a_tab_it_cant_drive() {
     };
     let dev = [("CTX_AGENT_NAME", "dev")];
     let sentence = hook(&dev);
-    assert!(sentence.starts_with("ctx run in 'Claude abc12345 (dev)' "), "{sentence}");
+    assert!(sentence.starts_with("ctx run in 'Claude abc12345 dev' "), "{sentence}");
     let o = s.ctx(&["list", "tabs"]).ok().stdout.clone();
-    assert!(o.contains("\"Claude abc12345 (dev)\"") && o.contains("belongs to the agent \"dev\""), "{o}");
+    assert!(o.contains("\"Claude abc12345 dev\"") && o.contains("belongs to the agent \"dev\""), "{o}");
     // The next call reuses it, and you keep yours.
     assert_eq!(hook(&dev), sentence);
     assert!(hook(&[]).starts_with("ctx run in 'Claude abc12345' "));
