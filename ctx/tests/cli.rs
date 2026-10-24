@@ -158,20 +158,24 @@ fn instructions_install_update_and_remove() {
 }
 
 #[test]
-fn mcp_runs_the_same_sentences() {
+fn mcp_shell_runs_in_the_sessions_tab() {
     let s = Server::start("mcp");
-    s.ctx(&["open", "tab", "named", "Agent tab", "at", "/tmp"]).ok();
     let input = [
-        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#,
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","clientInfo":{"name":"test-client"}}}"#,
         r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
-        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ctx_run","arguments":{"tab":"Agent tab","command":"echo via mcp; false"}}}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"shell","arguments":{"command":"export KEPT=1; echo via mcp; false"}}}"#,
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"shell","arguments":{"command":"echo $KEPT"}}}"#,
+        r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"shell","arguments":{"command":"ctx list tabs"}}}"#,
     ]
     .join("\n");
     let o = s.ctx_in(&["mcp"], Some(&(input + "\n")));
     let replies: Vec<serde_json::Value> = o.stdout.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
-    assert_eq!(replies.len(), 2);
+    assert_eq!(replies.len(), 4);
     assert_eq!(replies[1]["result"]["content"][0]["text"], "via mcp\n[exit status: 1]");
     assert_eq!(replies[1]["result"]["isError"], false);
+    assert_eq!(replies[2]["result"]["content"][0]["text"], "1\n[exit status: 0]");
+    // A ctx sentence runs as is, and sees the session's tab.
+    assert!(replies[3]["result"]["content"][0]["text"].as_str().unwrap().contains("\"Test "), "{}", replies[3]);
 }
 
 #[test]

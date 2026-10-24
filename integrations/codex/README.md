@@ -19,6 +19,5 @@ it: open `/hooks` and trust ctx's. `ctx remove hooks for codex` undoes either.
 denied"); Codex then asks to run the command outside the sandbox, and you approve it. The command
 runs in the ctx tab either way, so your approval is the check, not the sandbox.
 
-`config.toml` is separate: it registers `ctx mcp` as an MCP server, for the ctx tools rather than
-the hook. `ctx install instructions for codex` writes the instruction block to `~/.codex/AGENTS.md`;
+`ctx install instructions for codex` writes the instruction block to `~/.codex/AGENTS.md`;
 the hook doesn't need it.

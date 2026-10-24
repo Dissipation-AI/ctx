@@ -15,7 +15,7 @@ decides success):
 | pick-up-task | continue work another agent started (in a ctx tab, when ctx is there) |
 
 Configurations: `baseline` (the agent's own shell), `instructions` (+ ctx's instruction block),
-`mcp` (ctx's MCP tools, built-in shell off), `mcp-json` / `mcp-toon` (same, asking for structured
+`mcp` (ctx's MCP `shell` tool, built-in shell off), `mcp-json` / `mcp-toon` (same, asking for structured
 answers), `hook` (the Claude Code plugin's hook that routes Bash through `ctx run`).
 
 Measured per run: task success, wall-clock time, input and output tokens, turns, ctx calls, and

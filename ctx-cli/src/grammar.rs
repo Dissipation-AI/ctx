@@ -591,7 +591,7 @@ pub const VERBS: &[Verb] = &[
         summary: "Serve ctx to an agent over MCP (stdin and stdout). Started by the agent, not typed.",
         object: Object::None,
         order: &[],
-        examples: &[("ctx mcp", "Run the MCP server that exposes ctx's verbs as tools.")],
+        examples: &[("ctx mcp", "Run the MCP server: one `shell` tool whose commands run in a ctx tab.")],
         hidden: false,
     },
     Verb {

@@ -24,7 +24,6 @@ macro_rules! files {
 const FILES: &[(&str, &str)] = files![
     ".claude-plugin/marketplace.json",
     "claude/.claude-plugin/plugin.json",
-    "claude/.mcp.json",
     "claude/hooks/hooks.json",
     "antigravity/plugin.json",
     "antigravity/hooks.json",
@@ -378,7 +377,6 @@ mod tests {
             "'/a b/ctx' hook antigravity"
         );
         assert_eq!(staged_json("claude/hooks/hooks.json")["hooks"]["PreToolUse"][0]["hooks"][0]["command"], "/a b/ctx");
-        assert_eq!(staged_json("claude/.mcp.json")["mcpServers"]["ctx"]["command"], "/a b/ctx");
         assert_eq!(
             staged_json("codex/hooks/hooks.json")["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
             "'/a b/ctx' hook codex"
