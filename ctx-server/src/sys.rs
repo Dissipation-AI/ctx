@@ -328,6 +328,20 @@ pub fn helper_spawn(req: &ctx_protocol::helper::SpawnRequest, tty: RawFd) -> Res
     }
 }
 
+/// A function in Security.framework, which stays loaded once opened.
+#[cfg(target_os = "macos")]
+fn security_symbol(name: &std::ffi::CStr) -> Option<*mut libc::c_void> {
+    // SAFETY: dlopen and dlsym with NUL-terminated strings; a null result is checked.
+    unsafe {
+        let lib = libc::dlopen(c"/System/Library/Frameworks/Security.framework/Security".as_ptr(), libc::RTLD_LAZY);
+        if lib.is_null() {
+            return None;
+        }
+        let p = libc::dlsym(lib, name.as_ptr());
+        (!p.is_null()).then_some(p)
+    }
+}
+
 /// An administrator's approval (`system.privilege.admin`): macOS asks for an admin's password or
 /// Touch ID. Returns the approval's 32-byte external form, for the ctx helper.
 #[cfg(target_os = "macos")]
@@ -344,19 +358,30 @@ pub fn admin_approval() -> Result<Vec<u8>, String> {
         count: u32,
         items: *mut Item,
     }
-    #[link(name = "Security", kind = "framework")]
-    unsafe extern "C" {
-        fn AuthorizationCreate(r: *const Rights, e: *const libc::c_void, f: u32, a: *mut *mut libc::c_void) -> i32;
-        fn AuthorizationCopyRights(
-            a: *mut libc::c_void,
-            r: *const Rights,
-            e: *const libc::c_void,
-            f: u32,
-            o: *mut *mut Rights,
-        ) -> i32;
-        fn AuthorizationMakeExternalForm(a: *mut libc::c_void, ext: *mut [u8; 32]) -> i32;
-        fn AuthorizationFree(a: *mut libc::c_void, f: u32) -> i32;
-    }
+    // Security.framework is opened here, not linked: linking it makes every `ctx` command load it
+    // (and CoreFoundation) at launch, about a millisecond, for a call only the sysadmin launch makes.
+    type Create = unsafe extern "C" fn(*const Rights, *const libc::c_void, u32, *mut *mut libc::c_void) -> i32;
+    type CopyRights =
+        unsafe extern "C" fn(*mut libc::c_void, *const Rights, *const libc::c_void, u32, *mut *mut Rights) -> i32;
+    type MakeExternalForm = unsafe extern "C" fn(*mut libc::c_void, *mut [u8; 32]) -> i32;
+    type Free = unsafe extern "C" fn(*mut libc::c_void, u32) -> i32;
+    // SAFETY: each symbol is cast to its documented C signature (Authorization.h).
+    let (create, copy_rights, make_external_form, free) = match (
+        security_symbol(c"AuthorizationCreate"),
+        security_symbol(c"AuthorizationCopyRights"),
+        security_symbol(c"AuthorizationMakeExternalForm"),
+        security_symbol(c"AuthorizationFree"),
+    ) {
+        (Some(a), Some(b), Some(c), Some(d)) => unsafe {
+            (
+                std::mem::transmute::<*mut libc::c_void, Create>(a),
+                std::mem::transmute::<*mut libc::c_void, CopyRights>(b),
+                std::mem::transmute::<*mut libc::c_void, MakeExternalForm>(c),
+                std::mem::transmute::<*mut libc::c_void, Free>(d),
+            )
+        },
+        _ => return Err("couldn't load macOS's Security framework to ask for an administrator's approval".into()),
+    };
     const INTERACTION_ALLOWED: u32 = 1;
     const EXTEND_RIGHTS: u32 = 1 << 1;
     const PRE_AUTHORIZE: u32 = 1 << 4;
@@ -364,16 +389,16 @@ pub fn admin_approval() -> Result<Vec<u8>, String> {
     // SAFETY: Authorization calls with valid pointers; the reference is freed (rights kept, so the
     // external form stays usable) before returning.
     unsafe {
-        if AuthorizationCreate(std::ptr::null(), std::ptr::null(), 0, &mut a) != 0 {
+        if create(std::ptr::null(), std::ptr::null(), 0, &mut a) != 0 {
             return Err("couldn't ask macOS for an administrator's approval".into());
         }
         let mut item =
             Item { name: c"system.privilege.admin".as_ptr(), value_length: 0, value: std::ptr::null_mut(), flags: 0 };
         let rights = Rights { count: 1, items: &mut item };
         let flags = INTERACTION_ALLOWED | EXTEND_RIGHTS | PRE_AUTHORIZE;
-        let r = AuthorizationCopyRights(a, &rights, std::ptr::null(), flags, std::ptr::null_mut());
+        let r = copy_rights(a, &rights, std::ptr::null(), flags, std::ptr::null_mut());
         if r != 0 {
-            AuthorizationFree(a, 0);
+            free(a, 0);
             return Err(if r == -60006 {
                 "an administrator didn't approve it".into()
             } else {
@@ -381,8 +406,8 @@ pub fn admin_approval() -> Result<Vec<u8>, String> {
             });
         }
         let mut ext = [0u8; 32];
-        let r = AuthorizationMakeExternalForm(a, &mut ext);
-        AuthorizationFree(a, 0);
+        let r = make_external_form(a, &mut ext);
+        free(a, 0);
         if r != 0 {
             return Err(format!("couldn't pass the approval on (error {r})"));
         }
@@ -846,4 +871,16 @@ unsafe extern "C" {
 pub fn release_free_memory() -> usize {
     // SAFETY: a null zone means all zones; goal 0 means as much as possible.
     unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), 0) }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    #[test]
+    fn the_admin_approval_functions_load() {
+        for name in
+            [c"AuthorizationCreate", c"AuthorizationCopyRights", c"AuthorizationMakeExternalForm", c"AuthorizationFree"]
+        {
+            assert!(super::security_symbol(name).is_some(), "{name:?}");
+        }
+    }
 }
