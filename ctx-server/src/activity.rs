@@ -140,7 +140,6 @@ pub fn identify(
     let mut in_tab = None;
     let mut agent: Option<(String, i32, u64)> = None;
     let mut launcher = None;
-    let mut is_app = false;
     for p in &chain {
         if let Some(t) = tab_of(p.pid) {
             in_tab = Some(t);
@@ -157,9 +156,6 @@ pub fn identify(
             && let Some(name) = rest.components().next()
         {
             launcher = Some(name.as_os_str().to_string_lossy().into_owned());
-        }
-        if p.name == "CTX" || p.name.starts_with("CTX.") {
-            is_app = true;
         }
     }
     let me = chain.first().cloned();
@@ -191,7 +187,8 @@ pub fn identify(
                 in_tab,
                 declared,
                 is_agent,
-                is_app,
+                // Set from the client's hello: only CTX.app's own connections are the app.
+                is_app: false,
                 client_pid,
                 launcher,
                 principal: None,
