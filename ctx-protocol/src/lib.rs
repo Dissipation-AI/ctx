@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 
 /// Bumped whenever a message changes shape. Client and server must match exactly.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 /// Version of the `as json` / `as toon` schema. Printed as `"schema": 1`.
 pub const SCHEMA_VERSION: u32 = 1;
 /// Largest message either side accepts (a whole `read everything` of a big tab fits).
@@ -502,6 +502,8 @@ pub struct StarterInfo {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct TabList {
     pub windows: Vec<WindowInfo>,
+    /// The agent asking (`None`: you), so it can tell its own tabs from ones it only sees.
+    pub caller: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

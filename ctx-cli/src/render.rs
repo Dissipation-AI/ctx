@@ -399,6 +399,7 @@ mod tests {
                     remote_host: None,
                 }],
             }],
+            caller: None,
         });
         let p = render(&o, &st());
         assert_eq!(
