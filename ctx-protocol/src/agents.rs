@@ -135,10 +135,21 @@ pub fn agent_for_launcher<'a>(config: &'a Config, launcher: &str) -> Option<&'a 
 pub fn profile(config: &Config, name: &str) -> Option<Agent> {
     let mut a = config.agents.get(name)?.clone();
     let b = &config.agent_base;
-    for (list, base) in [(&mut a.read, &b.read), (&mut a.write, &b.write), (&mut a.deny, &b.deny)] {
+    for (list, base) in
+        [(&mut a.read, &b.read), (&mut a.write, &b.write), (&mut a.deny, &b.deny), (&mut a.unsandboxed, &b.unsandboxed)]
+    {
         list.extend(base.iter().filter(|p| !list.contains(p)).cloned().collect::<Vec<_>>());
     }
     Some(a)
+}
+
+/// `path` resolved, if it and every folder above it are root's and only root can write them
+/// (so the program can't be swapped for something else).
+fn root_owned(path: &Path) -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    let file = std::fs::canonicalize(path).ok()?;
+    let safe = |p: &Path| std::fs::metadata(p).is_ok_and(|m| m.uid() == 0 && m.mode() & 0o022 == 0);
+    (file.is_file() && file.ancestors().all(safe)).then_some(file)
 }
 
 /// Whether a principal's rule list (`see_tabs_of`, `drive_tabs_of`) covers `owner`.
@@ -241,6 +252,9 @@ pub fn sandbox_profile(name: &str, agent: &Agent, places: &Places) -> String {
     if !agent.network {
         p.push_str("(deny network-outbound (remote ip))\n(deny network-inbound (local ip))\n");
     }
+    for prog in agent.unsandboxed.iter().filter_map(|p| root_owned(Path::new(p))) {
+        p.push_str(&format!("(allow process-exec (literal {}) (with no-sandbox))\n", quote(&prog)));
+    }
 
     // Always, whatever the grants say: ctx's own files stay out of reach (they decide what agents
     // may do, and hold every tab's record), and the ways to start work outside the sandbox are
@@ -297,6 +311,15 @@ mod tests {
         assert_eq!(agent_for_folder(&c, Path::new("/opt"), home), Some("dev"));
         let none = Config::parse("[agents.dev]\nfolders = [\"~/Workspaces\"]\n").unwrap();
         assert_eq!(agent_for_folder(&none, Path::new("/opt"), home), None);
+    }
+
+    #[test]
+    fn only_root_owned_programs_run_outside() {
+        let mine = std::env::current_exe().unwrap();
+        let a = Agent { unsandboxed: vec!["/bin/ps".into(), mine.display().to_string()], ..Agent::default() };
+        let p = sandbox_profile("dev", &a, &places(Path::new("/nonexistent")));
+        assert!(p.contains("(allow process-exec (literal \"/bin/ps\") (with no-sandbox))"), "{p}");
+        assert_eq!(p.matches("no-sandbox").count(), 1, "{p}");
     }
 
     #[test]

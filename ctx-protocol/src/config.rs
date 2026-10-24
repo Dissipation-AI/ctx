@@ -170,6 +170,9 @@ pub struct Agent {
     pub write: Vec<String>,
     pub deny: Vec<String>,
     pub network: bool,
+    /// Programs that run outside the sandbox: setuid tools macOS won't start inside one (`/bin/ps`).
+    /// Only root-owned files count, so an agent can't add its own. Never a shell or `sudo`.
+    pub unsandboxed: Vec<String>,
     /// Whose tabs it may see (list, read, find) and drive (run, type, press, close), besides its
     /// own: `you`, agent names, or `*`.
     pub see_tabs_of: Vec<String>,
@@ -187,6 +190,7 @@ impl Default for Agent {
             write: Vec::new(),
             deny: Vec::new(),
             network: true,
+            unsandboxed: Vec::new(),
             see_tabs_of: Vec::new(),
             drive_tabs_of: Vec::new(),
         }
@@ -199,6 +203,7 @@ pub struct AgentBase {
     pub read: Vec<String>,
     pub write: Vec<String>,
     pub deny: Vec<String>,
+    pub unsandboxed: Vec<String>,
 }
 
 /// Programs ctx treats as agents unless `agent_programs` says otherwise.
