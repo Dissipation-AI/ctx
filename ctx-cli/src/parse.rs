@@ -105,6 +105,7 @@ pub enum Command {
         name: String,
     },
     ListLaunchers,
+    ListAgents,
     Ask {
         question: String,
         about: AskAbout,
@@ -862,6 +863,7 @@ fn to_command(parts: &Parts) -> Result<Command, ParseError> {
                 limit: count(parts, P::UpTo).unwrap_or(50) as u32,
             }),
             "launchers" => Command::ListLaunchers,
+            "agents" => Command::ListAgents,
             _ => unreachable!(),
         },
         "read" => {
@@ -918,7 +920,7 @@ fn to_command(parts: &Parts) -> Result<Command, ParseError> {
                         Some((Value::Window(w), _)) => Some(w.clone()),
                         _ => None,
                     };
-                    Command::Server(Request::OpenTab { window, folder, name })
+                    Command::Server(Request::OpenTab { window, folder, name, agent: None })
                 }
             }
         }
@@ -1415,7 +1417,8 @@ mod tests {
             Request::OpenTab {
                 window: Some(WindowRef::Number(2)),
                 folder: Some("/Users/c/code/site".into()),
-                name: Some("Dev server".into())
+                name: Some("Dev server".into()),
+                agent: None,
             }
         );
         assert_eq!(

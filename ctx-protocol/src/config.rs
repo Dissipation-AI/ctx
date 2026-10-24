@@ -4,6 +4,7 @@
 //! and for trying ctx without touching your real tabs.
 
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
@@ -13,21 +14,42 @@ pub struct Paths {
     /// `<user temp>/ctx-<uid>`: the socket and the shell-integration shim.
     pub runtime: PathBuf,
     pub config: PathBuf,
+    door: PathBuf,
+}
+
+fn short_socket(dir: &std::path::Path, prefix: &str) -> PathBuf {
+    let p = dir.join("server.sock");
+    if p.as_os_str().len() < 100 {
+        return p;
+    }
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in dir.as_os_str().as_encoded_bytes() {
+        h = (h ^ *b as u64).wrapping_mul(0x100000001b3);
+    }
+    PathBuf::from(format!("/tmp/{prefix}-{h:016x}")).join("server.sock")
 }
 
 impl Paths {
     /// The server's socket. Unix socket paths are limited to about 100 bytes, so a long runtime
     /// folder (a deep `CTX_HOME`) gets a short stand-in under `/tmp` named after it.
     pub fn socket(&self) -> PathBuf {
-        let p = self.runtime.join("server.sock");
-        if p.as_os_str().len() < 100 {
-            return p;
-        }
-        let mut h: u64 = 0xcbf29ce484222325;
-        for b in self.runtime.as_os_str().as_encoded_bytes() {
-            h = (h ^ *b as u64).wrapping_mul(0x100000001b3);
-        }
-        PathBuf::from(format!("/tmp/ctx-{h:016x}")).join("server.sock")
+        short_socket(&self.runtime, "ctx")
+    }
+
+    /// The socket a client connects to: `CTX_SOCKET` (set in an agent account's tabs, which can't
+    /// reach yours), else the server's own.
+    pub fn client_socket(&self) -> PathBuf {
+        std::env::var_os("CTX_SOCKET").filter(|s| !s.is_empty()).map(PathBuf::from).unwrap_or_else(|| self.socket())
+    }
+
+    /// The folder agent accounts reach the server through: its socket and a copy of the shell
+    /// integration, in a folder others may pass through but not list.
+    pub fn door(&self) -> PathBuf {
+        self.door.clone()
+    }
+
+    pub fn door_socket(&self) -> PathBuf {
+        short_socket(&self.door, "ctx-door")
     }
     pub fn tabs(&self) -> PathBuf {
         self.data.join("tabs")
@@ -67,7 +89,12 @@ impl Paths {
     pub fn resolve(user_temp: PathBuf, uid: u32, home: &str) -> Paths {
         if let Some(h) = std::env::var_os("CTX_HOME").filter(|h| !h.is_empty()) {
             let h = PathBuf::from(h);
-            return Paths { data: h.join("data"), runtime: h.join("run"), config: h.join("config.toml") };
+            return Paths {
+                data: h.join("data"),
+                runtime: h.join("run"),
+                config: h.join("config.toml"),
+                door: h.join("door"),
+            };
         }
         let config_home = std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
@@ -76,6 +103,7 @@ impl Paths {
             data: PathBuf::from(home).join("Library/Application Support/ctx"),
             runtime: user_temp.join(format!("ctx-{uid}")),
             config: config_home.join("ctx/config.toml"),
+            door: PathBuf::from(format!("/private/tmp/ctx-agents-{uid}")),
         }
     }
 }
@@ -110,9 +138,77 @@ pub struct Config {
 
     pub ask: AskConfig,
 
+    /// Agents: the principals other than you, `[agents.<name>]`. See `agents.rs`.
+    pub agents: BTreeMap<String, Agent>,
+    /// The agent an agent program becomes outside every agent's `folders`. Empty: it runs as you.
+    pub default_agent: String,
+    /// Programs that are agents. Started in a ctx tab, each runs as the agent for its folder.
+    pub agent_programs: Vec<String>,
+    /// `read`, `write` and `deny` entries every agent's sandbox gets too (shell startup files,
+    /// toolchains), so each agent lists only what's its own.
+    pub agent_base: AgentBase,
+
     /// CTX.app's own settings. The server ignores them; the app reads them.
     pub app: toml::Table,
 }
+
+/// One agent's profile.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Agent {
+    /// Folders it works in: an agent program started inside one is this agent.
+    pub folders: Vec<String>,
+    /// The scoped launcher (`ctx make launcher`) that starts it.
+    pub launcher: String,
+    /// The macOS account it runs as (through the ctx helper). Empty: it runs as you.
+    pub account: String,
+    /// Whether it runs in a Seatbelt sandbox built from `read`, `write` and `deny`.
+    pub sandbox: bool,
+    /// In your home (closed otherwise): what it may read, read and write, and never touch.
+    /// Outside your home everything stays readable and only temporary folders are writable.
+    pub read: Vec<String>,
+    pub write: Vec<String>,
+    pub deny: Vec<String>,
+    pub network: bool,
+    /// Programs that run outside the sandbox: setuid tools macOS won't start inside one (`/bin/ps`).
+    /// Only root-owned files count, so an agent can't add its own. Never a shell or `sudo`.
+    pub unsandboxed: Vec<String>,
+    /// Whose tabs it may see (list, read, find) and drive (run, type, press, close), besides its
+    /// own: `you`, agent names, or `*`.
+    pub see_tabs_of: Vec<String>,
+    pub drive_tabs_of: Vec<String>,
+}
+
+impl Default for Agent {
+    fn default() -> Self {
+        Agent {
+            folders: Vec::new(),
+            launcher: String::new(),
+            account: String::new(),
+            sandbox: true,
+            read: Vec::new(),
+            write: Vec::new(),
+            deny: Vec::new(),
+            network: true,
+            unsandboxed: Vec::new(),
+            see_tabs_of: Vec::new(),
+            drive_tabs_of: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct AgentBase {
+    pub read: Vec<String>,
+    pub write: Vec<String>,
+    pub deny: Vec<String>,
+    pub unsandboxed: Vec<String>,
+}
+
+/// Programs ctx treats as agents unless `agent_programs` says otherwise.
+pub const AGENT_PROGRAMS: &[&str] =
+    &["claude", "codex", "gemini", "agy", "antigravity", "cursor-agent", "aider", "opencode", "goose"];
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
@@ -146,6 +242,10 @@ impl Default for Config {
             assist: true,
             assist_command: "bro".into(),
             ask: AskConfig::default(),
+            agents: BTreeMap::new(),
+            default_agent: String::new(),
+            agent_programs: AGENT_PROGRAMS.iter().map(|s| s.to_string()).collect(),
+            agent_base: AgentBase::default(),
             app: toml::Table::new(),
         }
     }
@@ -179,6 +279,17 @@ impl Config {
         let c: Config = toml::from_str(text).map_err(|e| e.to_string())?;
         if !["ask", "always", "never"].contains(&c.reopen_on_launch.as_str()) {
             return Err("reopen_on_launch must be \"ask\", \"always\" or \"never\"".into());
+        }
+        for name in c.agents.keys() {
+            if name.is_empty()
+                || name == crate::agents::YOU
+                || !name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+            {
+                return Err(format!("agents.{name}: an agent's name uses letters, digits, - and _, and isn't \"you\""));
+            }
+        }
+        if !c.default_agent.is_empty() && !c.agents.contains_key(&c.default_agent) {
+            return Err(format!("default_agent = \"{}\", but there's no [agents.{0}]", c.default_agent));
         }
         Ok(c)
     }

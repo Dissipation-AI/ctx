@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS tabs (
     last_active_ms INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS tab_names (tab INTEGER NOT NULL, name TEXT NOT NULL, UNIQUE(tab, name));
+CREATE TABLE IF NOT EXISTS tab_owners (tab INTEGER PRIMARY KEY, owner TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS commands (
     tab INTEGER NOT NULL,
     number INTEGER NOT NULL,
@@ -418,9 +419,26 @@ impl Index {
         st.query_map([], row_to_tab)?.collect()
     }
 
+    /// The agent a tab belongs to (`None`: you).
+    pub fn set_owner(&self, tab: u64, owner: Option<&str>) -> Result<()> {
+        match owner {
+            Some(o) => self.conn.execute(
+                "INSERT INTO tab_owners(tab, owner) VALUES (?1, ?2) ON CONFLICT(tab) DO UPDATE SET owner = ?2",
+                params![tab as i64, o],
+            )?,
+            None => self.conn.execute("DELETE FROM tab_owners WHERE tab = ?1", [tab as i64])?,
+        };
+        Ok(())
+    }
+
+    pub fn owner(&self, tab: u64) -> Result<Option<String>> {
+        self.conn.query_row("SELECT owner FROM tab_owners WHERE tab = ?1", [tab as i64], |r| r.get(0)).optional()
+    }
+
     /// Replace everything known about a tab with what its records say.
     pub fn index_history(&self, h: &History) -> Result<()> {
         self.conn.execute("DELETE FROM commands WHERE tab = ?1", [h.number as i64])?;
+        self.set_owner(h.number, h.owner.as_deref())?;
         self.upsert_tab(&TabRow {
             number: h.number,
             name: h.name.clone(),

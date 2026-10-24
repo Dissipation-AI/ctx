@@ -9,10 +9,6 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-/// Programs ctx recognises as agents when it walks a client's parent chain.
-pub const AGENTS: &[&str] =
-    &["claude", "codex", "gemini", "agy", "antigravity", "cursor-agent", "aider", "opencode", "goose"];
-
 /// A client as the OS reports it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Identity {
@@ -28,24 +24,43 @@ pub struct Identity {
     pub is_app: bool,
     /// The client process itself.
     pub client_pid: i32,
+    /// The scoped launcher it runs under (`ctx make launcher`), if any.
+    pub launcher: Option<String>,
+    /// The agent it is (`[agents.<name>]`), or `unknown agent` for a sandbox ctx didn't make.
+    /// `None`: no agent rule applies, so it has your access.
+    pub principal: Option<String>,
+    /// It's an agent integration's hook running a tool call.
+    pub via_hook: bool,
 }
 
 impl Identity {
-    /// `claude (pid 5512) in tab 2`.
+    /// `dev: claude (pid 5512) in tab 2`.
     pub fn describe(&self) -> String {
-        let mut s = format!("{} (pid {})", self.program, self.pid);
+        let mut s = match &self.principal {
+            Some(p) if p != &self.program => format!("{p}: {} (pid {})", self.program, self.pid),
+            _ => format!("{} (pid {})", self.program, self.pid),
+        };
         if let Some(t) = self.in_tab {
             s.push_str(&format!(" in tab {t}"));
         }
         if let Some(d) = &self.declared {
             s.push_str(&format!(", calling itself \"{d}\""));
         }
+        if self.via_hook {
+            s.push_str(", through its hook");
+        }
         s
     }
 
-    /// What `ran_by` records: `you` for a person, else `claude (pid 5512)`.
+    /// What `ran_by` records: `you` for a person, else the agent and its program, as
+    /// `dev (claude, pid 5512)` (or `claude (pid 5512)` for an agent program no rule names).
     pub fn ran_by(&self) -> String {
-        if self.is_agent { format!("{} (pid {})", self.program, self.pid) } else { "you".into() }
+        match &self.principal {
+            Some(p) if p != &self.program => format!("{p} ({}, pid {})", self.program, self.pid),
+            Some(p) => format!("{p} (pid {})", self.pid),
+            None if self.is_agent => format!("{} (pid {})", self.program, self.pid),
+            None => "you".into(),
+        }
     }
 
     pub fn unknown() -> Identity {
@@ -58,30 +73,33 @@ impl Identity {
             is_agent: false,
             is_app: false,
             client_pid: 0,
+            launcher: None,
+            principal: None,
+            via_hook: false,
         }
     }
 }
 
-fn matches_agent(word: &str) -> Option<&'static str> {
+fn matches_agent(word: &str, programs: &[String]) -> Option<String> {
     let w = word.to_lowercase();
-    AGENTS.iter().copied().find(|a| w == *a || w.starts_with(&format!("{a}-")) || w.starts_with(&format!("{a}.")))
+    programs.iter().find(|a| w == **a || w.starts_with(&format!("{a}-")) || w.starts_with(&format!("{a}."))).cloned()
 }
 
 /// The agent a process is, judged by its name, its argv[0] and its executable's path (Claude
 /// Code's binary is named after its version, e.g. `~/.local/share/claude/versions/2.1.296`).
-fn agent_name(p: &sys::ProcInfo) -> Option<String> {
-    if let Some(a) = matches_agent(&p.name) {
-        return Some(a.to_string());
+fn agent_name(p: &sys::ProcInfo, programs: &[String]) -> Option<String> {
+    if let Some(a) = matches_agent(&p.name, programs) {
+        return Some(a);
     }
     let args = sys::proc_args(p.pid).unwrap_or_default();
     if let Some(arg0) = args.first()
-        && let Some(a) = matches_agent(arg0.rsplit('/').next().unwrap_or(arg0))
+        && let Some(a) = matches_agent(arg0.rsplit('/').next().unwrap_or(arg0), programs)
     {
-        return Some(a.to_string());
+        return Some(a);
     }
     if let Some(path) = sys::proc_path(p.pid) {
         let path = path.display().to_string().to_lowercase();
-        for a in AGENTS {
+        for a in programs {
             if path.contains(&format!("/{a}/versions/")) || path.ends_with(&format!("/{a}")) {
                 return Some(a.to_string());
             }
@@ -92,13 +110,13 @@ fn agent_name(p: &sys::ProcInfo) -> Option<String> {
     if ["node", "bun", "python", "python3", "deno"].contains(&name.as_str()) {
         for a in args.iter().skip(1).take(3) {
             let base = a.rsplit('/').next().unwrap_or(a);
-            if let Some(agent) = matches_agent(base) {
-                return Some(agent.to_string());
+            if let Some(agent) = matches_agent(base, programs) {
+                return Some(agent);
             }
             if a.contains("gemini-cli") {
                 return Some("gemini".into());
             }
-            for ag in AGENTS {
+            for ag in programs {
                 if a.contains(&format!("/{ag}/")) || a.contains(&format!("@{ag}")) {
                     return Some(ag.to_string());
                 }
@@ -109,31 +127,52 @@ fn agent_name(p: &sys::ProcInfo) -> Option<String> {
 }
 
 /// Identify a client from its pid. `tab_of` maps a process id to the tab whose launcher it is
-/// (or whose shell it is).
-pub fn identify(client_pid: i32, declared: Option<String>, tab_of: &dyn Fn(i32) -> Option<u64>) -> Identity {
+/// (or whose shell it is); `programs` are the agent programs; `launchers` is the folder scoped
+/// launchers live in.
+pub fn identify(
+    client_pid: i32,
+    declared: Option<String>,
+    programs: &[String],
+    launchers: &Path,
+    tab_of: &dyn Fn(i32) -> Option<u64>,
+) -> Identity {
     let chain = sys::ancestors(client_pid);
     let mut in_tab = None;
     let mut agent: Option<(String, i32, u64)> = None;
-    let mut is_app = false;
+    let mut launcher = None;
     for p in &chain {
         if let Some(t) = tab_of(p.pid) {
             in_tab = Some(t);
             break;
         }
         if agent.is_none()
-            && let Some(a) = agent_name(p)
+            && let Some(a) = agent_name(p, programs)
         {
             agent = Some((a, p.pid, p.start_us));
         }
-        if p.name == "CTX" || p.name.starts_with("CTX.") {
-            is_app = true;
+        if launcher.is_none()
+            && let Some(path) = sys::proc_path(p.pid)
+            && let Ok(rest) = path.strip_prefix(launchers)
+            && let Some(name) = rest.components().next()
+        {
+            launcher = Some(name.as_os_str().to_string_lossy().into_owned());
         }
     }
     let me = chain.first().cloned();
     match agent {
-        Some((program, pid, start_us)) => {
-            Identity { program, pid, start_us, in_tab, declared, is_agent: true, is_app: false, client_pid }
-        }
+        Some((program, pid, start_us)) => Identity {
+            program,
+            pid,
+            start_us,
+            in_tab,
+            declared,
+            is_agent: true,
+            is_app: false,
+            client_pid,
+            launcher,
+            principal: None,
+            via_hook: false,
+        },
         None => {
             let (program, pid, start_us) = match &me {
                 Some(p) => (p.name.clone(), p.pid, p.start_us),
@@ -141,7 +180,20 @@ pub fn identify(client_pid: i32, declared: Option<String>, tab_of: &dyn Fn(i32) 
             };
             // A declared agent name counts as an agent even without a recognised program.
             let is_agent = declared.is_some();
-            Identity { program, pid, start_us, in_tab, declared, is_agent, is_app, client_pid }
+            Identity {
+                program,
+                pid,
+                start_us,
+                in_tab,
+                declared,
+                is_agent,
+                // Set from the client's hello: only CTX.app's own connections are the app.
+                is_app: false,
+                client_pid,
+                launcher,
+                principal: None,
+                via_hook: false,
+            }
         }
     }
 }
@@ -156,6 +208,9 @@ pub struct LogLine {
     pub start_us: u64,
     pub declared_name: Option<String>,
     pub ran_by: String,
+    /// The agent that asked (`None`: you).
+    #[serde(default)]
+    pub principal: Option<String>,
     pub sentence: String,
     pub tab: Option<u64>,
     pub typed: Option<String>,
@@ -242,13 +297,29 @@ mod tests {
     #[test]
     fn identifies_this_process() {
         let me = std::process::id() as i32;
-        let id = identify(me, None, &|_| None);
+        let programs: Vec<String> = ctx_protocol::config::AGENT_PROGRAMS.iter().map(|s| s.to_string()).collect();
+        let none = Path::new("/nonexistent");
+        let id = identify(me, None, &programs, none, &|_| None);
         assert_eq!(id.client_pid, me);
         assert!(id.pid > 0);
-        let in_tab = identify(me, Some("Claude - x".into()), &|p| if p == me { Some(7) } else { None });
+        let in_tab =
+            identify(me, Some("Claude - x".into()), &programs, none, &|p| if p == me { Some(7) } else { None });
         assert_eq!(in_tab.in_tab, Some(7));
         assert!(in_tab.is_agent, "a declared name makes it an agent");
         assert!(in_tab.describe().contains("calling itself \"Claude - x\""));
+    }
+
+    #[test]
+    fn ran_by_names_the_agent_and_its_program() {
+        let mut id = Identity::unknown();
+        id.program = "claude".into();
+        id.pid = 5512;
+        id.is_agent = true;
+        assert_eq!(id.ran_by(), "claude (pid 5512)");
+        id.principal = Some("dev".into());
+        assert_eq!(id.ran_by(), "dev (claude, pid 5512)");
+        id.via_hook = true;
+        assert_eq!(id.describe(), "dev: claude (pid 5512), through its hook");
     }
 
     #[test]
@@ -266,6 +337,7 @@ mod tests {
                 start_us: 0,
                 declared_name: None,
                 ran_by: "x".into(),
+                principal: None,
                 sentence: format!("ctx list tabs {i}"),
                 tab: Some(i as u64),
                 typed: None,

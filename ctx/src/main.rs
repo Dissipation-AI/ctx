@@ -1,5 +1,6 @@
 //! `ctx`: the CLI (`ctx <sentence>`) and the server (`ctx server`) in one binary.
 
+mod agents;
 mod ask;
 mod attach;
 mod client;
@@ -8,6 +9,7 @@ mod hook;
 mod instructions;
 mod integrations;
 mod launchers;
+mod shim;
 
 use std::io::Write;
 

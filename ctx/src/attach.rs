@@ -70,11 +70,18 @@ pub fn attach(mut conn: Connection, sentence: String, tab: TabRef) -> i32 {
     let reader = conn.stream.try_clone().expect("clone socket");
     let writer_stream = conn.stream.try_clone().expect("clone socket");
     // Output: server → this terminal.
+    // Whether the tab's program has this terminal on the alternate screen, so leaving restores it
+    // only then (leaving when it was never entered moves the cursor back over the output).
+    let alt = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let alt_seen = alt.clone();
     let output = std::thread::spawn(move || {
         let mut r = reader;
         loop {
             match read_message::<StreamOut>(&mut r) {
                 Ok(Some(StreamOut::Bytes(b))) => {
+                    if let Some(on) = alt_screen_switch(&b) {
+                        alt_seen.store(on, std::sync::atomic::Ordering::Relaxed);
+                    }
                     let _ = out.write_all(&b);
                     let _ = out.flush();
                 }
@@ -105,11 +112,16 @@ pub fn attach(mut conn: Connection, sentence: String, tab: TabRef) -> i32 {
     let mut stdin = std::io::stdin();
     let mut buf = [0u8; 4096];
     let stdin_fd = stdin.as_raw_fd();
-    let _ = stdin_fd;
     let mut detached = false;
     loop {
         if output.is_finished() {
             break;
+        }
+        // Wait for a key without blocking forever, so a tab that ends is noticed at once.
+        let mut pfd = libc::pollfd { fd: stdin_fd, events: libc::POLLIN, revents: 0 };
+        // SAFETY: one valid pollfd.
+        if unsafe { libc::poll(&mut pfd, 1, 100) } == 0 {
+            continue;
         }
         let n = match stdin.read(&mut buf) {
             Ok(0) | Err(_) => break,
@@ -129,7 +141,10 @@ pub fn attach(mut conn: Connection, sentence: String, tab: TabRef) -> i32 {
     }
     drop(raw);
     // Leave the screen tidy: reset modes the tab's program may have turned on.
-    print!("\x1b[?1049l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?25h\x1b[0m\r\n");
+    if alt.load(std::sync::atomic::Ordering::Relaxed) {
+        print!("\x1b[?1049l");
+    }
+    print!("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?25h\x1b[0m\r\n");
     let _ = std::io::stdout().flush();
     if detached {
         eprintln!("Detached from {label}; it keeps running. `ctx attach to tab {number}` comes back.");
@@ -137,4 +152,36 @@ pub fn attach(mut conn: Connection, sentence: String, tab: TabRef) -> i32 {
         eprintln!("{msg}");
     }
     0
+}
+
+/// The last alternate-screen switch in `bytes`: `Some(true)` entered, `Some(false)` left.
+fn alt_screen_switch(bytes: &[u8]) -> Option<bool> {
+    let mut last = None;
+    for (i, w) in bytes.windows(3).enumerate() {
+        if w != b"\x1b[?" {
+            continue;
+        }
+        let rest = &bytes[i + 3..];
+        for mode in [&b"1049"[..], b"1047", b"47"] {
+            if rest.starts_with(mode) {
+                match rest.get(mode.len()) {
+                    Some(b'h') => last = Some(true),
+                    Some(b'l') => last = Some(false),
+                    _ => {}
+                }
+            }
+        }
+    }
+    last
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn alternate_screen_switches_are_seen() {
+        assert_eq!(super::alt_screen_switch(b"hi"), None);
+        assert_eq!(super::alt_screen_switch(b"\x1b[?1049hvim"), Some(true));
+        assert_eq!(super::alt_screen_switch(b"\x1b[?1049h..\x1b[?1049l"), Some(false));
+        assert_eq!(super::alt_screen_switch(b"\x1b[?47h"), Some(true));
+    }
 }

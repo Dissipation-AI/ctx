@@ -205,6 +205,10 @@ pub enum Record {
         at_ms: i64,
         names: Vec<String>,
     },
+    /// The agent the tab belongs to, right after `Opened` (no record: it's yours).
+    Owner {
+        owner: String,
+    },
 }
 
 pub fn encode_record(r: &Record) -> io::Result<Vec<u8>> {

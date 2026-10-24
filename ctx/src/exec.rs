@@ -69,6 +69,10 @@ pub fn run(args: &[String], caller: Caller) -> Out {
     {
         return out;
     }
+    // What an agent program's name runs in your tabs (see shim.rs); not a sentence.
+    if caller == Caller::Cli && args.first().is_some_and(|a| a == "shim") {
+        return crate::shim::run(&args[1..]);
+    }
     // Used by the zsh completion; not a sentence.
     if caller == Caller::Cli && args.len() == 2 && args[0] == "completion-words" && args[1] == "tabs" {
         return completion_tabs();
@@ -272,6 +276,7 @@ fn execute(s: Sentence, caller: Caller) -> Out {
         Command::RebuildLauncher { name } => launchers::rebuild(&name, format),
         Command::RemoveLauncher { name } => launchers::remove(&name, format),
         Command::ListLaunchers => launchers::list(format),
+        Command::ListAgents => crate::agents::list(format),
         Command::Ask { question, about, within_ms } => ask::run(&question, about, within_ms, format),
         Command::Mcp => {
             if caller == Caller::Mcp {

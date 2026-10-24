@@ -1,0 +1,13 @@
+[package]
+name = "ctx-helper"
+description = "Root daemon that starts an agent's ctx tab as the agent's own macOS account."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ctx-protocol.workspace = true
+libc.workspace = true
+serde_json.workspace = true

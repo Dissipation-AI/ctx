@@ -104,6 +104,9 @@ pub fn render(o: &Output, st: &Style) -> Printed {
                             if t.unread_lines == 1 { "line" } else { "lines" }
                         ));
                     }
+                    if let Some(o) = &t.owner {
+                        s.push_str(&format!(", belongs to the agent \"{o}\""));
+                    }
                     if let Some(l) = &t.permissions_of {
                         s.push_str(&format!(", running with the permissions of {l}"));
                     }
@@ -382,6 +385,7 @@ mod tests {
                     folder: "/Users/c/code/site".into(),
                     window: 1,
                     opened_by: "you".into(),
+                    owner: None,
                     title: None,
                     state: "busy".into(),
                     running: Some("npm run dev".into()),

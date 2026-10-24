@@ -37,7 +37,7 @@ impl Connection {
     /// Connect, starting the server if it isn't running, and handle a version mismatch.
     pub fn open(kind: ClientKind) -> Result<Connection, NoServer> {
         let paths = paths();
-        let socket = paths.socket();
+        let socket = paths.client_socket();
         let mut restarted = false;
         loop {
             let stream = match UnixStream::connect(&socket) {
@@ -48,6 +48,10 @@ impl Connection {
                         "Can't reach the ctx server: connecting to {} was denied. If this runs in a sandbox, run it outside.",
                         socket.display()
                     )));
+                }
+                // An agent account's tab: the server is yours, and only you can start it.
+                Err(e) if std::env::var_os("CTX_SOCKET").is_some() => {
+                    return Err(NoServer(format!("Can't reach the ctx server at {}: {e}", socket.display())));
                 }
                 Err(_) => {
                     start_server(&paths)?;
@@ -88,7 +92,7 @@ impl Connection {
 
     /// Connect only if a server is already running (never starts one).
     pub fn open_quiet() -> Result<Connection, NoServer> {
-        let mut stream = UnixStream::connect(paths().socket()).map_err(|e| NoServer(e.to_string()))?;
+        let mut stream = UnixStream::connect(paths().client_socket()).map_err(|e| NoServer(e.to_string()))?;
         write_message(&mut stream, &hello(ClientKind::Cli)).map_err(|e| NoServer(e.to_string()))?;
         match read_message::<Welcome>(&mut stream) {
             Ok(Some(Welcome::Accepted { .. })) => Ok(Connection { stream }),
@@ -247,7 +251,7 @@ fn start_server(paths: &Paths) -> Result<(), NoServer> {
 
 /// After `ctx restart server`: wait until the new server answers.
 pub fn wait_for_new_server() {
-    let socket = paths().socket();
+    let socket = paths().client_socket();
     std::thread::sleep(Duration::from_millis(100));
     wait_for_restart(&socket);
 }

@@ -9,6 +9,7 @@ members = [
     "ctx-mcp",
     "ctx",
     "ctx-launch",
+    "ctx-helper",
 ]
 
 [workspace.package]
