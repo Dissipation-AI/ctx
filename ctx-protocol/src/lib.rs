@@ -502,6 +502,10 @@ pub struct StarterInfo {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct TabList {
     pub windows: Vec<WindowInfo>,
+    /// The agent asking (`None`: you), so it can tell its own tabs from ones it only sees.
+    /// Optional on the wire: an older server leaves it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

@@ -53,6 +53,7 @@ pub fn examples() -> Vec<(&'static str, &'static str, Output)> {
             "Open windows and their tabs.",
             Output::Tabs(TabList {
                 windows: vec![WindowInfo { number: 2, name: Some("Work".into()), tabs: vec![tab()] }],
+                caller: None,
             }),
         ),
         (

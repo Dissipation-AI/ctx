@@ -1453,6 +1453,7 @@ impl Server {
                 })
                 .filter(|w| key.is_none() || !w.tabs.is_empty())
                 .collect(),
+            caller: key.and_then(|k| self.principal(k)).map(str::to_string),
         }
     }
 

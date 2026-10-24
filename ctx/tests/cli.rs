@@ -456,6 +456,33 @@ fn agents_see_and_drive_only_their_own_tabs_and_run_sandboxed() {
     assert!(!clients.is_empty() && clients.iter().all(|c| c.starts_with("dev: ")), "{clients:?}");
 }
 
+/// A session whose tab is yours (it started before the agent was configured, or was resumed) gets a
+/// tab of the agent's own instead of commands it isn't allowed to run.
+#[test]
+fn an_agents_hook_never_reuses_a_tab_it_cant_drive() {
+    let s = Server::start("hook-owner");
+    std::fs::write(s.dir.join("config.toml"), "shell = \"/bin/zsh\"\n[agents.dev]\nsee_tabs_of = [\"you\"]\n").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2500)); // the server rereads its config
+    s.ctx(&["open", "tab", "named", "Claude abc12345", "at", "/tmp"]).ok();
+    let call = r#"{"session_id": "abc12345-xyz", "tool_name": "Bash", "tool_input": {"command": "echo hi"}, "cwd": "/tmp"}"#;
+    let hook = |env: &[(&str, &str)]| {
+        let o = s.ctx_with(env, &["hook", "claude"], Some(call)).ok().stdout.clone();
+        let v: serde_json::Value = serde_json::from_str(&o).unwrap();
+        v["hookSpecificOutput"]["updatedInput"]["command"].as_str().unwrap().to_string()
+    };
+    let dev = [("CTX_AGENT_NAME", "dev")];
+    let sentence = hook(&dev);
+    assert!(sentence.starts_with("ctx run in 'Claude abc12345 (dev)' "), "{sentence}");
+    let o = s.ctx(&["list", "tabs"]).ok().stdout.clone();
+    assert!(o.contains("\"Claude abc12345 (dev)\"") && o.contains("belongs to the agent \"dev\""), "{o}");
+    // The next call reuses it, and you keep yours.
+    assert_eq!(hook(&dev), sentence);
+    assert!(hook(&[]).starts_with("ctx run in 'Claude abc12345' "));
+    let words: Vec<String> = ctx_mcp::shell_words(&sentence).unwrap();
+    let args: Vec<&str> = words[1..].iter().map(String::as_str).collect();
+    assert_eq!(s.ctx_with(&dev, &args, None).ok().stdout, "hi\n");
+}
+
 /// The helper, unprivileged: the only account it can become is this one, which is enough to see
 /// the whole path (rules, the attached terminal, the door, the sandbox) work.
 #[test]

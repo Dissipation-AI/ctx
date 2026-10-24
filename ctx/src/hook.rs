@@ -56,22 +56,32 @@ pub fn is_ctx_sentence(command: &str) -> bool {
     !single && !double
 }
 
-/// Make sure the session's tab exists, opening it in `folder` if not. Returns the tab's folder, or
-/// `None` if ctx isn't reachable (the caller then leaves the command alone).
-fn session_tab_folder(tab: &str, folder: Option<String>) -> Option<String> {
+/// The session's tab, opened in `folder` if there isn't one: its name and folder, or `None` if ctx
+/// isn't reachable (the caller then leaves the command alone). The tab is the agent's own: when a
+/// tab of that name belongs to someone else (the session started before the agent was configured,
+/// or was resumed), the agent's is named `<tab> (<agent>)`.
+fn session_tab_folder(tab: &str, folder: Option<String>) -> Option<(String, String)> {
     let mut conn = Connection::open(ClientKind::Hook).ok()?;
     let list = match conn.request(&Envelope { sentence: "ctx list tabs".into(), request: Request::ListTabs }) {
         Ok(Response::Ok(Output::Tabs(list))) => list,
         _ => return None,
     };
-    if let Some(t) = list.windows.iter().flat_map(|w| &w.tabs).find(|t| t.name.as_deref() == Some(tab)) {
-        return Some(t.folder.clone());
+    let tabs: Vec<&TabInfo> = list.windows.iter().flat_map(|w| &w.tabs).collect();
+    let named = |name: &str| tabs.iter().filter(|t| t.name.as_deref() == Some(name)).copied().collect::<Vec<_>>();
+    // You may drive every tab; an agent its own.
+    let mine = |t: &&TabInfo| list.caller.is_none() || t.owner == list.caller;
+    let own = format!("{tab} ({})", list.caller.as_deref().unwrap_or(ctx_protocol::agents::YOU));
+    for name in [tab, own.as_str()] {
+        if let Some(t) = named(name).into_iter().find(mine) {
+            return Some((name.to_string(), t.folder.clone()));
+        }
     }
+    let name = if named(tab).is_empty() { tab.to_string() } else { own };
     let opened = conn.request(&Envelope {
-        sentence: format!("ctx open tab named \"{tab}\""),
-        request: Request::OpenTab { window: None, folder: folder.clone(), name: Some(tab.to_string()), agent: None },
+        sentence: format!("ctx open tab named \"{name}\""),
+        request: Request::OpenTab { window: None, folder: folder.clone(), name: Some(name.clone()), agent: None },
     });
-    matches!(opened, Ok(Response::Ok(_))).then(|| folder.unwrap_or_default())
+    matches!(opened, Ok(Response::Ok(_))).then(|| (name, folder.unwrap_or_default()))
 }
 
 /// The rewritten Bash input, or `None` to leave the call alone.
@@ -108,12 +118,12 @@ pub fn claude() -> Out {
         return out;
     }
     let session = input.get("session_id").and_then(Value::as_str).unwrap_or("");
-    let tab = tab_name(session);
-    let Some(updated) = rewrite(&input, &tab) else { return out };
-    let folder = input.get("cwd").and_then(Value::as_str).map(str::to_string);
-    if session_tab_folder(&tab, folder).is_none() {
+    if rewrite(&input, "").is_none() {
         return out;
     }
+    let folder = input.get("cwd").and_then(Value::as_str).map(str::to_string);
+    let Some((tab, _)) = session_tab_folder(&tab_name(session), folder) else { return out };
+    let Some(updated) = rewrite(&input, &tab) else { return out };
     out.line(json!({"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": updated}}).to_string());
     out
 }
@@ -156,8 +166,7 @@ fn route(prefix: &str, call: &ShellCall) -> Option<String> {
     if command.is_empty() || is_ctx_sentence(command) {
         return None;
     }
-    let tab = session_tab(prefix, call.session);
-    let folder = session_tab_folder(&tab, call.cwd.map(str::to_string))?;
+    let (tab, folder) = session_tab_folder(&session_tab(prefix, call.session), call.cwd.map(str::to_string))?;
     Some(sentence(&tab, &folder, &ShellCall { command, ..*call }))
 }
 
@@ -187,13 +196,14 @@ pub fn mcp(call: &ctx_mcp::Call, session: &str, folder: &str) -> Out {
             }
         }
     } else {
-        let tab = session_tab(&client_prefix(call.client), session);
-        if session_tab_folder(&tab, Some(folder.to_string())).is_none() {
+        let Some((tab, _)) =
+            session_tab_folder(&session_tab(&client_prefix(call.client), session), Some(folder.to_string()))
+        else {
             let mut out = Out::default();
             out.err("ctx's server isn't reachable, so the command didn't run.");
             out.ctx_error = true;
             return out.code(1);
-        }
+        };
         let secs = (call.timeout_ms / 1000).max(1);
         ["run", "in", &tab, command, "within", &secs.to_string(), "seconds"].map(str::to_string).to_vec()
     };
@@ -377,7 +387,7 @@ pub fn antigravity() -> Out {
         .or_else(|| input.get("workspacePaths").and_then(|w| w.get(0)))
         .and_then(Value::as_str)
         .map(str::to_string);
-    let overwrite = session_tab_folder(&tab, folder).and_then(|f| rewrite_antigravity(&input, &tab, &f));
+    let overwrite = session_tab_folder(&tab, folder).and_then(|(tab, f)| rewrite_antigravity(&input, &tab, &f));
     match overwrite {
         Some(overwrite) => out.line(json!({ "decision": ASK, "overwrite": overwrite }).to_string()),
         None => out.line(json!({ "decision": ASK }).to_string()),
