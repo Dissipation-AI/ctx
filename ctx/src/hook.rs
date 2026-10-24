@@ -107,18 +107,6 @@ pub fn claude() -> Out {
     if input.get("tool_name").and_then(Value::as_str) != Some("Bash") {
         return out;
     }
-    let command = input.pointer("/tool_input/command").and_then(Value::as_str).unwrap_or("").trim();
-    if std::env::var("CTX_CLAUDE_HOOK").is_ok_and(|v| v == "deny") && !is_ctx_sentence(command) {
-        out.line(
-            json!({"hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": "Shell commands run in ctx tabs here: use `ctx run in \"<tab>\" \"<command>\"`."
-            }})
-            .to_string(),
-        );
-        return out;
-    }
     let session = input.get("session_id").and_then(Value::as_str).unwrap_or("");
     let tab = tab_name(session);
     let Some(updated) = rewrite(&input, &tab) else { return out };

@@ -583,9 +583,10 @@ block into the files each agent reads at startup:
 Instructions *ask* an agent to use ctx; the deeper step is to make ctx **the** shell tool, so
 agents can't fall back to a throwaway shell. Each agent has its own extension mechanism:
 
-- **Claude Code:** a plugin with a `PreToolUse` hook on `Bash`. The hook either rewrites commands
-  into `ctx run` or, where that isn't supported, denies them (all but single ctx sentences) with a
-  message pointing at `ctx run`.
+- **Claude Code:** a plugin with a `PreToolUse` hook on `Bash` that rewrites commands into `ctx run`.
+  To make ctx the only shell instead, `permissions.deny: ["Bash"]` removes the Bash tool from
+  Claude's context entirely and `ctx mcp` supplies `shell` (a hook that denies calls is pointless
+  when the tool can be removed).
 - **OpenAI Codex CLI:** the same kind of hook, through its plugin registry.
 - **Google Gemini CLI / Antigravity:** an extension bundling the MCP server and the instruction file,
   plus their settings for excluding built-in shell tools.
