@@ -636,8 +636,18 @@ Because tabs persist and have names, they're shared resources:
   (e.g. Claude Code → Antigravity), the new one doesn't dig through the old one's private session
   files. It runs `ctx list`, then `ctx read last 30 commands in "Claude - auth refactor"`, and
   continues **in the same tab**, with the same folder, environment, running dev server and history.
-  Nothing about a tab is tied to the agent that opened it.
+  Nothing about a tab is tied to the agent that opened it, unless agents are configured (below).
 - All of it is in the activity log and badged in CTX.app, so it's always visible who touched what.
+
+### Agents as principals (added 2026-10-23)
+
+With `[agents.<name>]` in config.toml, sharing becomes explicit. Each agent is a principal; a tab belongs to whoever opened it (recorded in the tab's log, so it survives reopening). An agent sees and drives its own tabs, plus those of the principals in its `see_tabs_of` / `drive_tabs_of`; you see and drive everything. Requests that act on tabs an agent can't see are answered as if those tabs don't exist; commands it can see but not drive are refused with the reason. CTX.app's requests count only when they come from you.
+
+Identity comes from the strongest evidence available: the process's account (`account`), its Seatbelt sandbox (checked against a per-agent marker file only that agent's profile can read), a launcher in its ancestry (`launcher`), an agent program in an agent's folder (`folders`, `default_agent`), then the tab it runs in. `CTX_AGENT_NAME` is a claim, honoured only when it names a configured agent and never to become you. An unsandboxed agent running as you can still lie by double-forking out of its ancestry; the sandbox and accounts are what make identity hold.
+
+Enforcement: the sandbox profile (`ctx-protocol/src/agents.rs`) is applied by `ctx-launch --sandbox` before an agent tab's shell starts, or by the `ctx shim` an agent program's name runs in your tabs. It fails closed: a profile that can't be applied means nothing starts. Agents with accounts start through `ctx-helper` (root, launchd), which checks its own root-owned rules, `getpeereid` of the caller, and, for root, an Authorization from an administrator, then drops to the account irreversibly, applies the sandbox and execs. The README's "Agents: who may reach what" has the config.
+
+Known limits: approving a root tab blocks the server while the dialog is up; an agent with write access to your home can still plant things you run later (repository hooks, shell files), so the dev profile keeps those read-only; an account agent needs its own login for its agent program.
 
 ## Asking about a tab
 

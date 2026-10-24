@@ -11,7 +11,7 @@ _ctx() {
   local verb=${words[2]} prev=${words[CURRENT-1]}
   local -A phrase_words tab_after
   phrase_words=(
-    list 'activity as by closed commands in launchers since tabs up'
+    list 'activity agents as by closed commands in launchers since tabs up'
     read 'as command everything in last up with'
     find 'as at by in since up'
     ask 'about as at by since within'

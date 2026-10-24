@@ -11,6 +11,8 @@ pub struct Server {
     pub dir: PathBuf,
     pub home: PathBuf,
     child: Option<Child>,
+    /// More environment for the server and every `ctx` (e.g. the helper's socket).
+    pub extra_env: Vec<(String, String)>,
 }
 
 pub struct Out {
@@ -41,6 +43,10 @@ fn ensure_launcher() {
 
 impl Server {
     pub fn start(name: &str) -> Server {
+        Server::start_with(name, &[])
+    }
+
+    pub fn start_with(name: &str, extra_env: &[(&str, &str)]) -> Server {
         ensure_launcher();
         let dir = std::env::temp_dir().join(format!("ctx-it-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -48,7 +54,8 @@ impl Server {
         std::fs::create_dir_all(&home).unwrap();
         // ctx's local shell integration is for zsh; CI runners log in with bash.
         std::fs::write(dir.join("config.toml"), "shell = \"/bin/zsh\"\n").unwrap();
-        let mut s = Server { dir, home, child: None };
+        let extra_env = extra_env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let mut s = Server { dir, home, child: None, extra_env };
         s.spawn();
         s
     }
@@ -61,6 +68,7 @@ impl Server {
             .env_remove("CTX_TAB")
             .env_remove("ZDOTDIR")
             .env_remove("CTX_WINDOW");
+        cmd.envs(self.extra_env.iter().map(|(k, v)| (k, v)));
     }
 
     pub fn spawn(&mut self) {

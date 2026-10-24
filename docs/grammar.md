@@ -12,10 +12,10 @@ A tab is its name in quotes, `tab <number>`, or `this tab`. A window is `window 
 
 ### `list`
 
-List open tabs, closed tabs, a tab's commands, the activity log or launchers.
+List open tabs, closed tabs, a tab's commands, the activity log, launchers or agents.
 
 ```
-ctx list tabs|closed tabs|commands|activity|launchers [in "<tab>"] [by me|<agent>] [since <number> minutes|hours|days ago] [up to <number>] [as json|toon]
+ctx list tabs|closed tabs|commands|activity|launchers|agents [in "<tab>"] [by me|<agent>] [since <number> minutes|hours|days ago] [up to <number>] [as json|toon]
 ```
 
 - `ctx list tabs`: Every open window and its tabs: number, name, folder, what's running, idle or busy, unread output.
@@ -23,6 +23,7 @@ ctx list tabs|closed tabs|commands|activity|launchers [in "<tab>"] [by me|<agent
 - `ctx list commands in "Dev server"`: Commands run in that tab: where, exit status, start time, duration. No output.
 - `ctx list activity by claude since 1 hour ago`: The activity log: who did what to which tab, newest first.
 - `ctx list launchers`: Scoped launchers ctx made, and which tabs are running them now.
+- `ctx list agents`: The agents in config.toml: where each works, the account it runs as, what its sandbox gives it, whose tabs it may use.
 
 ### `read`
 

@@ -27,6 +27,8 @@ const UNKNOWN_AGENT: &str = "unknown agent";
 const LISTENER: usize = 0;
 const SIGNALS: usize = 1;
 const TAB_KEY_BASE: usize = 1 << 40;
+/// The agent door's socket (see `Paths::door`).
+const DOOR_LISTENER: usize = TAB_KEY_BASE - 1;
 const ZSHENV: &str = include_str!("../../shell/zsh/.zshenv");
 const CTX_ZSH: &str = include_str!("../../shell/ctx.zsh");
 const ZSH_COMPLETION: &str = include_str!("../../shell/_ctx");
@@ -152,6 +154,8 @@ pub struct Server {
     config_mtime: Option<std::time::SystemTime>,
     poller: sys::Poller,
     listener: UnixListener,
+    /// Where agent accounts connect, opened when the first one's tab starts.
+    door: Option<UnixListener>,
     signals: OwnedFd,
     tabs: BTreeMap<u64, Tab>,
     windows: Vec<Window>,
@@ -281,6 +285,7 @@ impl Server {
             config,
             poller,
             listener,
+            door: None,
             signals: sig_r,
             tabs: BTreeMap::new(),
             windows: Vec::new(),
@@ -392,7 +397,8 @@ impl Server {
             };
             for (key, readable, writable) in ready {
                 match key {
-                    LISTENER => self.accept(),
+                    LISTENER => self.accept(false),
+                    DOOR_LISTENER => self.accept(true),
                     SIGNALS => self.on_signal(),
                     k if k >= TAB_KEY_BASE => {
                         let n = (k - TAB_KEY_BASE) as u64;
@@ -568,9 +574,14 @@ impl Server {
     // Clients
     // -----------------------------------------------------------------------------------------
 
-    fn accept(&mut self) {
+    fn accept(&mut self, door: bool) {
         loop {
-            match self.listener.accept() {
+            let accepted = match (&self.door, door) {
+                (Some(d), true) => d.accept(),
+                (None, true) => return,
+                _ => self.listener.accept(),
+            };
+            match accepted {
                 Ok((stream, _)) => {
                     let fd = stream.as_raw_fd();
                     // Our own user, and the accounts of configured agents.
@@ -1326,7 +1337,7 @@ impl Server {
             Request::Find { text, filter, limit } => self.find(key, &text, filter, limit),
             Request::Status => ok(Output::Status(self.status())),
             Request::OpenWindow { folder, name } => self.open_window(key, folder, name),
-            Request::OpenTab { window, folder, name } => self.open_tab(key, window, folder, name),
+            Request::OpenTab { window, folder, name, agent } => self.open_tab(key, window, folder, name, agent),
             Request::CloseTab { tab, without_asking } => self.close_tab(key, &tab, without_asking),
             Request::CloseWindow { window, without_asking } => self.close_window(&window, without_asking),
             Request::RenameTab { tab, to } => self.rename_tab(key, &tab, &to),
@@ -1724,7 +1735,20 @@ impl Server {
         window: Option<WindowRef>,
         folder: Option<String>,
         name: Option<String>,
+        agent: Option<String>,
     ) -> Handled {
+        // A tab for a named agent: you may open one for any agent, an agent only for itself.
+        if let Some(a) = &agent {
+            if !self.config.agents.contains_key(a) {
+                return err(ErrorKind::NotAllowed, format!("There's no agent \"{a}\" in config.toml."));
+            }
+            if self.principal(key).is_some_and(|p| p != a) {
+                return err(
+                    ErrorKind::NotAllowed,
+                    format!("Only you, or the agent \"{a}\" itself, may open its tabs."),
+                );
+            }
+        }
         let name = match name {
             Some(n) => match self.validate_name(&n, None, false) {
                 Ok(n) => Some(n),
@@ -1752,7 +1776,7 @@ impl Server {
                 .unwrap_or_else(sys::home)
         });
         let by = self.clients.get(&key).map(|c| c.identity.ran_by()).unwrap_or_else(|| "you".into());
-        let owner = self.principal(key).map(str::to_string);
+        let owner = agent.or_else(|| self.principal(key).map(str::to_string));
         match self.spawn_tab(None, w, &folder, name, &by, owner, None) {
             Ok(o) => self.when_ready(key, o),
             Err(e) => {
@@ -1831,23 +1855,32 @@ impl Server {
             }
         }
         let mut args = vec!["ctx-launch".to_string()];
+        // An agent with its own account: (agent, account, sandbox text), for the ctx helper.
+        let mut as_account: Option<(String, String, String)> = None;
+        let mut rc_dir = self.paths.runtime.clone();
         if let Some(o) = &owner {
-            let Some(agent) = self.config.agents.get(o) else {
+            let Some(agent) = self.config.agents.get(o).cloned() else {
                 return Err(failed(format!(
                     "This tab belongs to the agent \"{o}\", and config.toml has no [agents.{o}], so it can't start without that agent's limits."
                 )));
             };
+            let sandbox = match agent.sandbox {
+                true => Some(
+                    self.write_sandbox(o, number)
+                        .map_err(|e| failed(format!("couldn't write the agent's sandbox: {e}")))?,
+                ),
+                false => None,
+            };
             if !agent.account.is_empty() {
-                return Err(failed(format!(
-                    "The agent \"{o}\" runs as the account \"{}\", which needs the ctx helper; it isn't installed.",
-                    agent.account
-                )));
-            }
-            if agent.sandbox {
-                let file = self
-                    .write_sandbox(o, number)
-                    .map_err(|e| failed(format!("couldn't write the agent's sandbox: {e}")))?;
-                args.extend(["--sandbox".to_string(), file.display().to_string()]);
+                let door = self
+                    .open_door()
+                    .map_err(|e| failed(format!("couldn't open the way in for agent accounts: {e}")))?;
+                self.door_env(&mut env, &door);
+                rc_dir = door.join("shell");
+                let text = sandbox.map(|f| std::fs::read_to_string(f).unwrap_or_default()).unwrap_or_default();
+                as_account = Some((o.clone(), agent.account.clone(), text));
+            } else if let Some(f) = sandbox {
+                args.extend(["--sandbox".to_string(), f.display().to_string()]);
             }
             env.retain(|(k, _)| k != "CTX_AGENT");
             env.push(("CTX_AGENT".into(), o.clone()));
@@ -1858,17 +1891,42 @@ impl Server {
                 Err(e) => eprintln!("ctx server: couldn't write the agent shims: {e}"),
             }
         }
-        args.extend([folder.clone(), shell.clone()]);
-        if shell_name == "bash" {
+        let shell_argv = if shell_name == "bash" {
             // A login bash can't take an rc file; this one reads the login files itself.
-            let rc = self.paths.runtime.join("ctx.bashrc").display().to_string();
-            args.extend(["bash".to_string(), "--rcfile".into(), rc, "-i".into()]);
+            let rc = rc_dir.join("ctx.bashrc").display().to_string();
+            vec!["bash".to_string(), "--rcfile".into(), rc, "-i".into()]
         } else {
-            args.push(format!("-{shell_name}"));
-        }
-        let disclaim = sys::can_disclaim() && std::env::var_os("CTX_NO_DISCLAIM").is_none();
-        let pid = sys::spawn(&self.launch_path, &args, &env, Some(slave.as_raw_fd()), disclaim)
-            .map_err(|e| failed(format!("couldn't start the shell: {e}")))?;
+            vec![format!("-{shell_name}")]
+        };
+        args.extend([folder.clone(), shell.clone()]);
+        args.extend(shell_argv.iter().cloned());
+        let pid = match as_account {
+            Some((agent, account, sandbox)) => {
+                let authorization = match sys::account(&account) {
+                    Some((0, _)) => Some(sys::admin_approval().map_err(|e| {
+                        failed(format!("The agent \"{agent}\" runs as root and {e}, so its tab didn't open."))
+                    })?),
+                    _ => None,
+                };
+                let req = ctx_protocol::helper::SpawnRequest {
+                    agent: agent.clone(),
+                    account,
+                    folder: folder.clone(),
+                    program: shell.clone(),
+                    argv: shell_argv,
+                    env: env.clone(),
+                    sandbox,
+                    authorization,
+                };
+                sys::helper_spawn(&req, slave.as_raw_fd())
+                    .map_err(|e| failed(format!("couldn't start the agent \"{agent}\"'s shell: {e}")))?
+            }
+            None => {
+                let disclaim = sys::can_disclaim() && std::env::var_os("CTX_NO_DISCLAIM").is_none();
+                sys::spawn(&self.launch_path, &args, &env, Some(slave.as_raw_fd()), disclaim)
+                    .map_err(|e| failed(format!("couldn't start the shell: {e}")))?
+            }
+        };
         drop(slave);
 
         let log = TabLog::open(&self.paths.tab_log(number))
@@ -1992,6 +2050,64 @@ impl Server {
         Ok(Opened { tab: Some(number), window, new_window: false, window_name: None, name, folder, not_restored })
     }
 
+    /// The way in for agent accounts, which can't reach anything of yours: a socket anyone may
+    /// connect to (the server answers only the accounts of configured agents) and a copy of the
+    /// shell integration, in a folder others may pass through but not list.
+    fn open_door(&mut self) -> io::Result<PathBuf> {
+        let door = self.paths.door();
+        std::fs::create_dir_all(&door)?;
+        set_mode(&door, 0o711);
+        let shell = door.join("shell");
+        write_shell_files(&shell)?;
+        for d in [shell.clone(), shell.join("zsh")] {
+            set_mode(&d, 0o755);
+            for e in std::fs::read_dir(&d)?.flatten() {
+                if e.path().is_file() {
+                    set_mode(&e.path(), 0o644);
+                }
+            }
+        }
+        if self.door.is_none() {
+            let socket = self.paths.door_socket();
+            if let Some(d) = socket.parent() {
+                std::fs::create_dir_all(d)?;
+                set_mode(d, 0o711);
+            }
+            let _ = std::fs::remove_file(&socket);
+            let l = UnixListener::bind(&socket)?;
+            set_mode(&socket, 0o666);
+            l.set_nonblocking(true)?;
+            sys::set_cloexec_nonblock(l.as_raw_fd(), true)?;
+            self.poller.add(l.as_raw_fd(), DOOR_LISTENER, false);
+            self.door = Some(l);
+        }
+        Ok(door)
+    }
+
+    /// An agent account's tab reaches the server and the shell integration through the door.
+    fn door_env(&self, env: &mut Vec<(String, String)>, door: &Path) {
+        let shell = door.join("shell");
+        let set = |env: &mut Vec<(String, String)>, k: &str, v: String| {
+            env.retain(|(ek, _)| ek != k);
+            env.push((k.to_string(), v));
+        };
+        for (k, v) in [
+            ("ZDOTDIR", shell.join("zsh")),
+            ("CTX_INTEGRATION", shell.join("ctx.zsh")),
+            ("CTX_COMPLETION", shell.join("_ctx")),
+            ("CTX_SOCKET", self.paths.door_socket()),
+        ] {
+            set(env, k, v.display().to_string());
+        }
+        // Your launchers, history and files aren't the agent's.
+        env.retain(|(k, _)| !matches!(k.as_str(), "CTX_LAUNCHERS" | "CTX_REOPEN_HISTORY" | "CTX_USER_ZDOTDIR"));
+        if let Some(bin) = self.server_exe.parent()
+            && let Some((_, p)) = env.iter_mut().find(|(k, _)| k == "PATH")
+        {
+            *p = format!("{}:{p}", bin.display());
+        }
+    }
+
     /// The shims that make agent programs run as their agent (see the `ctx` crate's shim.rs).
     fn write_shims(&self) -> io::Result<PathBuf> {
         let dir = agents::shims_dir(&self.paths.runtime);
@@ -2012,10 +2128,10 @@ impl Server {
 
     /// Write agent `name`'s sandbox for tab `number`; `ctx-launch` applies it before the shell.
     fn write_sandbox(&self, name: &str, number: u64) -> io::Result<PathBuf> {
-        let agent = &self.config.agents[name];
+        let agent = &agents::profile(&self.config, name).ok_or_else(|| io::Error::other("no such agent"))?;
         let places = agents::Places {
             home: PathBuf::from(sys::home()),
-            agent_home: None,
+            agent_home: Some(&agent.account).filter(|a| !a.is_empty()).and_then(|a| sys::account(a)).map(|(_, h)| h),
             ctx_data: self.paths.data.clone(),
             // The folder holding config.toml (with CTX_HOME, that folder holds everything else
             // too, so only the file).

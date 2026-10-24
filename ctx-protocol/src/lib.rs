@@ -12,6 +12,7 @@
 pub mod agents;
 pub mod config;
 pub mod docs;
+pub mod helper;
 pub mod sgr;
 pub mod time;
 pub mod toon;
@@ -254,6 +255,8 @@ pub enum Request {
         window: Option<WindowRef>,
         folder: Option<String>,
         name: Option<String>,
+        /// The agent the tab is for (`None`: the asker's own). Only you, or that agent, may ask.
+        agent: Option<String>,
     },
     CloseTab {
         tab: TabRef,
@@ -1117,7 +1120,12 @@ mod tests {
             Request::Find { text: "deploy".into(), filter: filter.clone(), limit: 20 },
             Request::Status,
             Request::OpenWindow { folder: Some("/tmp".into()), name: None },
-            Request::OpenTab { window: Some(WindowRef::Name("Work".into())), folder: None, name: Some("x".into()) },
+            Request::OpenTab {
+                window: Some(WindowRef::Name("Work".into())),
+                folder: None,
+                name: Some("x".into()),
+                agent: None,
+            },
             Request::CloseTab { tab: tab.clone(), without_asking: true },
             Request::CloseWindow { window: WindowRef::Number(2), without_asking: false },
             Request::RenameTab { tab: tab.clone(), to: "y".into() },

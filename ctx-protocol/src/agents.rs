@@ -131,6 +131,16 @@ pub fn agent_for_launcher<'a>(config: &'a Config, launcher: &str) -> Option<&'a 
     config.agents.iter().find(|(_, a)| a.launcher == launcher).map(|(n, _)| n.as_str())
 }
 
+/// An agent's profile with `agent_base` added: its sandbox gets both.
+pub fn profile(config: &Config, name: &str) -> Option<Agent> {
+    let mut a = config.agents.get(name)?.clone();
+    let b = &config.agent_base;
+    for (list, base) in [(&mut a.read, &b.read), (&mut a.write, &b.write), (&mut a.deny, &b.deny)] {
+        list.extend(base.iter().filter(|p| !list.contains(p)).cloned().collect::<Vec<_>>());
+    }
+    Some(a)
+}
+
 /// Whether a principal's rule list (`see_tabs_of`, `drive_tabs_of`) covers `owner`.
 pub fn covers(list: &[String], owner: &str) -> bool {
     list.iter().any(|x| x == "*" || x.eq_ignore_ascii_case(owner))

@@ -276,6 +276,7 @@ fn execute(s: Sentence, caller: Caller) -> Out {
         Command::RebuildLauncher { name } => launchers::rebuild(&name, format),
         Command::RemoveLauncher { name } => launchers::remove(&name, format),
         Command::ListLaunchers => launchers::list(format),
+        Command::ListAgents => crate::agents::list(format),
         Command::Ask { question, about, within_ms } => ask::run(&question, about, within_ms, format),
         Command::Mcp => {
             if caller == Caller::Mcp {

@@ -98,6 +98,45 @@ your approval as the check. Each `integrations/<agent>/README.md` has the detail
 
 For an agent whose shell tool can't be hooked, `ctx mcp` is an MCP server (stdio) with one tool, `shell`, that stands in for it: `{command, timeout?}` in, output and `[exit status: N]` out. Each command runs in a tab named for the session (`Gemini 48211`: the client's name and the server's process id), opened in the server's folder on first use, so state persists and a person can watch, as with the hooks. A command still running at the timeout (default 120 seconds) keeps running, and the reply says how to wait for it. A single ctx sentence (`ctx list tabs`) runs as is; everything else ctx does, the agent reaches by running `ctx …` in that shell. The server's MCP instructions are the same block `ctx install instructions` writes. The Gemini CLI extension uses it; so does Claude Code with its Bash tool removed (`integrations/claude/README.md`). The hooked agents don't need it.
 
+## Agents: who may reach what
+
+Each agent is a principal of its own, named in `~/.config/ctx/config.toml`. Its tabs belong to it; it sees and drives only those, plus the tabs of anyone listed in `see_tabs_of` / `drive_tabs_of` (`"you"`, another agent, or `"*"`). Every activity log line names the agent (`dev: claude (pid 5512) …`), including commands its hooks rewrote. `ctx list agents` shows the whole setup.
+
+```toml
+default_agent = "dev"            # agent programs started outside every agent's folders
+
+[agent_base]                     # every agent's sandbox gets these too
+read = ["~/.zshrc", "~/.gitconfig", "~/.cargo", "~/Library/Keychains"]
+write = ["~/.claude", "~/.claude.json", "~/.cache"]
+
+[agents.dev]
+folders = ["~/Workspaces"]       # claude, codex, agy, … started here are dev
+write = ["~"]
+deny = ["~/Context", "~/Agents", "~/Library", "~/.ssh"]
+read = ["~/.zshrc", "~/.ssh/known_hosts"]
+see_tabs_of = ["you"]
+# account = "vibe-daemon"        # run as its own macOS account (needs the ctx helper)
+
+[agents.sysadmin]
+launcher = "sysadmin"            # whatever runs through this launcher is the sysadmin
+folders = ["~/Agents/sys-admin"]
+sandbox = false
+```
+
+How an agent is recognised, strongest first: the account a process runs as, the sandbox it's in, a launcher in its ancestry, an agent program in an agent's folder, the tab it runs in. A declared `CTX_AGENT_NAME` counts only when it names a configured agent, and never upgrades a process to you.
+
+**The sandbox** (on unless `sandbox = false`). Your home is closed, then the agent's `read`, `write` and `deny` paths are given back. The most specific path wins whatever its kind, so `write = ["~"]` with `deny = ["~/.ssh"]` and `read = ["~/.ssh/known_hosts"]` means what it says. Outside your home everything stays readable and only temporary folders are writable. ctx's own files, Apple Events and `open` are always closed. A tab for the agent starts its shell inside the sandbox; an agent program you start in one of your tabs (ctx puts a small shim for each of `agent_programs` first on PATH) applies it to itself before it starts. macOS privacy protection (TCC: Full Disk Access, browser data) still applies on top: the sandbox can only take away.
+
+**Accounts.** With `account = "<name>"`, the agent's tabs run as that macOS account, started by the ctx helper (`ctx-helper`), a small root daemon. It accepts requests only from the account the server runs as, and only for the agents its own root-owned rules (`/Library/Application Support/ctx/helper.toml`) list, so nothing running as you can widen them. An agent that runs as root needs an administrator's approval (password or Touch ID) each time a tab starts. The agent's shell reaches the server through `/private/tmp/ctx-agents-<uid>/server.sock` (`CTX_SOCKET`). An agent program you start in your own tab runs in a new tab of the agent's, shown in your terminal until it exits.
+
+```sh
+cargo build --release -p ctx-helper
+sudo scripts/install-helper.sh c dev=vibe-daemon sysadmin=sys-ops-monkey
+sudo scripts/install-helper.sh --remove
+```
+
+An account only helps if it can't read your files: close your home (`chmod 700 ~`) and give back what each account needs with ACLs, and give each account its own login for its agent program (`claude setup-token` as that account).
+
 ## Licence
 
 Apache-2.0.

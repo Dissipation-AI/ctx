@@ -69,7 +69,7 @@ fn session_tab_folder(tab: &str, folder: Option<String>) -> Option<String> {
     }
     let opened = conn.request(&Envelope {
         sentence: format!("ctx open tab named \"{tab}\""),
-        request: Request::OpenTab { window: None, folder: folder.clone(), name: Some(tab.to_string()) },
+        request: Request::OpenTab { window: None, folder: folder.clone(), name: Some(tab.to_string()), agent: None },
     });
     matches!(opened, Ok(Response::Ok(_))).then(|| folder.unwrap_or_default())
 }

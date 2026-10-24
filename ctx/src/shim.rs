@@ -61,13 +61,9 @@ pub fn run(args: &[String]) -> Out {
     let Some(agent_name) = agents::agent_for_folder(&config, &folder, &home).map(str::to_string) else {
         return exec(&program, name, rest);
     };
-    let agent = &config.agents[&agent_name];
+    let Some(agent) = &agents::profile(&config, &agent_name) else { return exec(&program, name, rest) };
     if !agent.account.is_empty() {
-        out.err(format!(
-            "ctx: {name} here runs as the agent \"{agent_name}\", which runs as the account \"{}\"; that needs the ctx helper, which isn't installed. It didn't start.",
-            agent.account
-        ));
-        return out.code(126);
+        return in_agent_tab(&agent_name, name, rest, &folder);
     }
     // SAFETY: setenv before exec, in this single-threaded process.
     unsafe { std::env::set_var("CTX_AGENT", &agent_name) };
@@ -112,4 +108,65 @@ fn apply(profile: &str) -> Result<(), String> {
     }
     // SAFETY: sandbox_init sets a C string on failure.
     Err(unsafe { std::ffi::CStr::from_ptr(err) }.to_string_lossy().into_owned())
+}
+
+/// An agent with its own account: this process can't become it, so the program runs in a new
+/// tab of the agent's (started by the ctx helper as that account), shown in this terminal until
+/// it exits.
+fn in_agent_tab(agent: &str, name: &str, args: &[String], folder: &Path) -> Out {
+    use crate::client::Connection;
+    use crate::hook::shell_quote;
+    use ctx_protocol::*;
+    let mut out = Out::default();
+    let mut conn = match Connection::open(ClientKind::Cli) {
+        Ok(c) => c,
+        Err(crate::client::NoServer(m)) => {
+            out.err(format!("ctx: {name} here runs as the agent \"{agent}\" in a tab of its own, and {m}"));
+            return out.code(126);
+        }
+    };
+    // SAFETY: getpid can't fail.
+    let tab_name = format!("{agent} {name} {}", unsafe { libc::getpid() });
+    let opened = conn.request(&Envelope {
+        sentence: format!("ctx open tab named {} for {agent}", shell_quote(&tab_name)),
+        request: Request::OpenTab {
+            window: None,
+            folder: Some(folder.display().to_string()),
+            name: Some(tab_name.clone()),
+            agent: Some(agent.to_string()),
+        },
+    });
+    let n = match opened {
+        Ok(Response::Ok(Output::Opened(o))) => o.tab.unwrap_or_default(),
+        Ok(Response::Error(e)) => {
+            out.err(format!("ctx: {name} didn't start: {}", e.message));
+            return out.code(126);
+        }
+        _ => {
+            out.err(format!("ctx: {name} didn't start: the ctx server didn't open the agent's tab."));
+            return out.code(126);
+        }
+    };
+    let mut command = format!("exec {}", shell_quote(name));
+    for a in args {
+        command.push(' ');
+        command.push_str(&shell_quote(a));
+    }
+    let ran = conn.request(&Envelope {
+        sentence: format!("ctx run in tab {n} {} without waiting", shell_quote(&command)),
+        request: Request::Run {
+            tab: TabRef::Number(n),
+            command,
+            colors: false,
+            max_lines: None,
+            within_ms: None,
+            wait: false,
+        },
+    });
+    if let Ok(Response::Error(e)) = ran {
+        out.err(format!("ctx: {name} didn't start in tab {n}: {}", e.message));
+        return out.code(126);
+    }
+    let code = crate::attach::attach(conn, format!("ctx attach to tab {n}"), TabRef::Number(n));
+    out.code(code)
 }

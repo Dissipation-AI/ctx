@@ -192,8 +192,8 @@ pub const VERBS: &[Verb] = &[
     Verb {
         name: "list",
         group: Group::Seeing,
-        summary: "List open tabs, closed tabs, a tab's commands, the activity log or launchers.",
-        object: Object::Noun(&["tabs", "closed tabs", "commands", "activity", "launchers"]),
+        summary: "List open tabs, closed tabs, a tab's commands, the activity log, launchers or agents.",
+        object: Object::Noun(&["tabs", "closed tabs", "commands", "activity", "launchers", "agents"]),
         order: &[
             O,
             Ph(ph(P::In, &["in"], Kind::Tab, "which tab (for commands and activity)")),
@@ -217,6 +217,10 @@ pub const VERBS: &[Verb] = &[
                 "The activity log: who did what to which tab, newest first.",
             ),
             ("ctx list launchers", "Scoped launchers ctx made, and which tabs are running them now."),
+            (
+                "ctx list agents",
+                "The agents in config.toml: where each works, the account it runs as, what its sandbox gives it, whose tabs it may use.",
+            ),
         ],
         hidden: false,
     },

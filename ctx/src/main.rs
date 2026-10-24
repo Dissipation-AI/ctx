@@ -1,5 +1,6 @@
 //! `ctx`: the CLI (`ctx <sentence>`) and the server (`ctx server`) in one binary.
 
+mod agents;
 mod ask;
 mod attach;
 mod client;

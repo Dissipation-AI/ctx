@@ -456,6 +456,68 @@ fn agents_see_and_drive_only_their_own_tabs_and_run_sandboxed() {
     assert!(!clients.is_empty() && clients.iter().all(|c| c.starts_with("dev: ")), "{clients:?}");
 }
 
+/// The helper, unprivileged: the only account it can become is this one, which is enough to see
+/// the whole path (rules, the attached terminal, the door, the sandbox) work.
+#[test]
+fn agent_accounts_start_through_the_helper() {
+    let helper = common::ctx_bin().with_file_name("ctx-helper");
+    if !helper.exists() {
+        assert!(
+            std::process::Command::new(env!("CARGO")).args(["build", "-p", "ctx-helper"]).status().unwrap().success()
+        );
+    }
+    let me = std::env::var("USER").unwrap();
+    let rules_dir = std::env::temp_dir().join(format!("ctx-it-helper-{}", std::process::id()));
+    std::fs::create_dir_all(&rules_dir).unwrap();
+    let rules = rules_dir.join("helper.toml");
+    std::fs::write(&rules, format!("owner = \"{me}\"\n[accounts]\ndev = \"{me}\"\n")).unwrap();
+    let sock = format!("/tmp/ctx-it-helper-{}.sock", std::process::id());
+    let mut h = std::process::Command::new(&helper)
+        .env("CTX_HELPER_SOCKET", &sock)
+        .env("CTX_HELPER_CONFIG", &rules)
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    while !std::path::Path::new(&sock).exists() {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let s = Server::start_with("accounts", &[("CTX_HELPER_SOCKET", &sock)]);
+    std::fs::create_dir_all(s.home.join("Secret")).unwrap();
+    std::fs::write(s.home.join("Secret/key"), "hunter2").unwrap();
+    std::fs::create_dir_all(s.home.join("Work")).unwrap();
+    std::fs::write(
+        s.dir.join("config.toml"),
+        format!("shell = \"/bin/zsh\"\n[agents.dev]\naccount = \"{me}\"\nwrite = [\"~/Work\"]\n"),
+    )
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2500));
+    let work = s.home.join("Work").display().to_string();
+    s.ctx_with(&[("CTX_AGENT_NAME", "dev")], &["open", "tab", "named", "Acct", "at", &work], None).ok();
+    // The helper started the shell, which reaches the server through the door, in the sandbox.
+    // (The account's home is its own, so the secret goes by its full path.)
+    let secret = s.home.join("Secret/key").display().to_string();
+    let o = s.ctx(&["run", "in", "Acct", &format!("echo $PPID; echo $CTX_SOCKET; cat '{secret}'")]).stdout;
+    let lines: Vec<&str> = o.lines().collect();
+    assert_eq!(lines[0].trim(), h.id().to_string(), "{o}");
+    assert!(lines[1].ends_with("server.sock"), "{o}");
+    assert!(o.contains("Operation not permitted") && !o.contains("hunter2"), "{o}");
+    let ctx = common::ctx_bin().display().to_string();
+    let o = s.ctx(&["run", "in", "Acct", &format!("env -u CTX_AGENT_NAME '{ctx}' list tabs")]).ok().stdout.clone();
+    assert!(o.contains("\"Acct\""), "{o}");
+    // A request for an agent the rules don't have is refused, and says so.
+    std::fs::write(
+        s.dir.join("config.toml"),
+        format!("shell = \"/bin/zsh\"\n[agents.dev]\naccount = \"{me}\"\n[agents.mail]\naccount = \"{me}\"\n"),
+    )
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2500));
+    let o = s.ctx_with(&[("CTX_AGENT_NAME", "mail")], &["open", "tab", "named", "Mail"], None);
+    assert!(o.stderr.contains("don't have the agent \"mail\""), "{}", o.stderr);
+    let _ = h.kill();
+    let _ = h.wait();
+    let _ = std::fs::remove_file(&sock);
+}
+
 #[test]
 fn dont_save_env_keeps_values_out_and_says_so_on_reopen() {
     let s = Server::start("hidden-env");

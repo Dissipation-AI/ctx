@@ -289,6 +289,112 @@ pub fn account(name: &str) -> Option<(u32, PathBuf)> {
     }
 }
 
+/// Ask the ctx helper to start a tab's program as an agent's account, handing it the terminal.
+/// Returns the new process's pid.
+pub fn helper_spawn(req: &ctx_protocol::helper::SpawnRequest, tty: RawFd) -> Result<i32, String> {
+    use ctx_protocol::helper::{SpawnReply, socket};
+    use std::io::BufRead;
+    let path = socket();
+    let stream = std::os::unix::net::UnixStream::connect(&path)
+        .map_err(|e| format!("the ctx helper isn't running ({}: {e}); see `ctx help agents`", path.display()))?;
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+    let mut line = serde_json::to_vec(req).map_err(|e| e.to_string())?;
+    line.push(b'\n');
+    let mut cmsg = [0u8; 64];
+    let mut iov = libc::iovec { iov_base: line.as_mut_ptr().cast(), iov_len: line.len() };
+    // SAFETY: msghdr and its control buffer stay alive for sendmsg; one descriptor is attached.
+    let sent = unsafe {
+        let mut msg: libc::msghdr = std::mem::zeroed();
+        msg.msg_iov = &mut iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = cmsg.as_mut_ptr().cast();
+        msg.msg_controllen = libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as u32) as _;
+        let c = libc::CMSG_FIRSTHDR(&msg);
+        (*c).cmsg_level = libc::SOL_SOCKET;
+        (*c).cmsg_type = libc::SCM_RIGHTS;
+        (*c).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<RawFd>() as u32) as _;
+        *(libc::CMSG_DATA(c) as *mut RawFd) = tty;
+        libc::sendmsg(stream.as_raw_fd(), &msg, 0)
+    };
+    if sent < 0 || sent as usize != line.len() {
+        return Err(format!("couldn't send the request to the ctx helper: {}", io::Error::last_os_error()));
+    }
+    let mut answer = String::new();
+    io::BufReader::new(&stream).read_line(&mut answer).map_err(|e| format!("the ctx helper didn't answer: {e}"))?;
+    match serde_json::from_str::<SpawnReply>(&answer) {
+        Ok(SpawnReply::Started { pid }) => Ok(pid),
+        Ok(SpawnReply::Refused { message }) => Err(format!("the ctx helper refused: {message}")),
+        Err(e) => Err(format!("the ctx helper's answer didn't make sense: {e}")),
+    }
+}
+
+/// An administrator's approval (`system.privilege.admin`): macOS asks for an admin's password or
+/// Touch ID. Returns the approval's 32-byte external form, for the ctx helper.
+#[cfg(target_os = "macos")]
+pub fn admin_approval() -> Result<Vec<u8>, String> {
+    #[repr(C)]
+    struct Item {
+        name: *const libc::c_char,
+        value_length: usize,
+        value: *mut libc::c_void,
+        flags: u32,
+    }
+    #[repr(C)]
+    struct Rights {
+        count: u32,
+        items: *mut Item,
+    }
+    #[link(name = "Security", kind = "framework")]
+    unsafe extern "C" {
+        fn AuthorizationCreate(r: *const Rights, e: *const libc::c_void, f: u32, a: *mut *mut libc::c_void) -> i32;
+        fn AuthorizationCopyRights(
+            a: *mut libc::c_void,
+            r: *const Rights,
+            e: *const libc::c_void,
+            f: u32,
+            o: *mut *mut Rights,
+        ) -> i32;
+        fn AuthorizationMakeExternalForm(a: *mut libc::c_void, ext: *mut [u8; 32]) -> i32;
+        fn AuthorizationFree(a: *mut libc::c_void, f: u32) -> i32;
+    }
+    const INTERACTION_ALLOWED: u32 = 1;
+    const EXTEND_RIGHTS: u32 = 1 << 1;
+    const PRE_AUTHORIZE: u32 = 1 << 4;
+    let mut a: *mut libc::c_void = std::ptr::null_mut();
+    // SAFETY: Authorization calls with valid pointers; the reference is freed (rights kept, so the
+    // external form stays usable) before returning.
+    unsafe {
+        if AuthorizationCreate(std::ptr::null(), std::ptr::null(), 0, &mut a) != 0 {
+            return Err("couldn't ask macOS for an administrator's approval".into());
+        }
+        let mut item =
+            Item { name: c"system.privilege.admin".as_ptr(), value_length: 0, value: std::ptr::null_mut(), flags: 0 };
+        let rights = Rights { count: 1, items: &mut item };
+        let flags = INTERACTION_ALLOWED | EXTEND_RIGHTS | PRE_AUTHORIZE;
+        let r = AuthorizationCopyRights(a, &rights, std::ptr::null(), flags, std::ptr::null_mut());
+        if r != 0 {
+            AuthorizationFree(a, 0);
+            return Err(if r == -60006 {
+                "an administrator didn't approve it".into()
+            } else {
+                format!("macOS didn't approve it (error {r})")
+            });
+        }
+        let mut ext = [0u8; 32];
+        let r = AuthorizationMakeExternalForm(a, &mut ext);
+        AuthorizationFree(a, 0);
+        if r != 0 {
+            return Err(format!("couldn't pass the approval on (error {r})"));
+        }
+        Ok(ext.to_vec())
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn admin_approval() -> Result<Vec<u8>, String> {
+    Err("administrator approval needs macOS".into())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcInfo {
     pub pid: i32,
