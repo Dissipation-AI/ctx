@@ -428,7 +428,7 @@ Fields: `schema` (number), `version` (text), `protocol` (number), `pid` (number)
 {
   "schema": 1,
   "version": "0.1.0",
-  "protocol": 6,
+  "protocol": 7,
   "pid": 81200,
   "uptime_seconds": 3600,
   "socket": "/var/folders/xx/T/ctx-501/server.sock",
@@ -448,7 +448,7 @@ Fields: `schema` (number), `version` (text), `protocol` (number), `pid` (number)
 ```
 schema: 1
 version: "0.1.0"
-protocol: 6
+protocol: 7
 pid: 81200
 uptime_seconds: 3600
 socket: /var/folders/xx/T/ctx-501/server.sock
@@ -460,9 +460,9 @@ tabs[1]{number,name,memory_bytes,scrollback_lines}:
 
 ## `ctx open tab named "Dev server"`
 
-A new tab (or window, with `new_window`). `not_restored` lists variables kept out by `dont_save_env` when reopening.
+A new tab (or window, with `new_window`). `like` is the tab it copies (`open tab like`). `not_restored` lists variables kept out by `dont_save_env` when reopening or copying.
 
-Fields: `schema` (number), `tab` (number), `window` (number), `new_window` (boolean), `window_name` (nullable), `name` (text), `folder` (text), `not_restored` (list).
+Fields: `schema` (number), `tab` (number), `window` (number), `new_window` (boolean), `window_name` (nullable), `name` (text), `folder` (text), `not_restored` (list), `like` (nullable).
 
 ```json
 {
@@ -473,7 +473,8 @@ Fields: `schema` (number), `tab` (number), `window` (number), `new_window` (bool
   "window_name": null,
   "name": "Dev server",
   "folder": "/Users/c/code/site",
-  "not_restored": []
+  "not_restored": [],
+  "like": null
 }
 ```
 
@@ -486,6 +487,7 @@ window_name: null
 name: Dev server
 folder: /Users/c/code/site
 not_restored[0]:
+like: null
 ```
 
 ## `ctx close "Dev server"`

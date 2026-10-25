@@ -220,6 +220,7 @@ the server couldn't be reached, 3 if a time limit ran out. For `run`, the comman
 | `ctx open window at ~/code/site` | …starting in that folder. |
 | `ctx open tab` | A new tab in the current window (window 1 when headless; the Agents window for agents). |
 | `ctx open tab in window 2 at ~/code/site named "Dev server"` | Any combination of which window, which folder and a name. To start something in it, use `ctx run … without waiting`. |
+| `ctx open tab like "Dev server"` | A copy of that tab, beside it: its folder, exported variables (as of its last prompt) and command history, in a new shell, so nothing it's running. Named `Dev server 2` (then `3`…) unless `named` says otherwise; `at` and `in window` still apply. Unexported variables, functions and aliases live only in the old shell and aren't copied. Copying needs permission to drive that tab, since its variables come along. The new tab's first line says what it copies. |
 | `ctx close "Dev server"` | Close that tab. Asks first if something is running. |
 | `ctx close window 2` | Close a window and all its tabs. Same rule. |
 | `ctx close "Dev server" without asking` | Don't ask. |
@@ -584,6 +585,12 @@ Instructions *ask* an agent to use ctx; the deeper step is to make ctx **the** s
 agents can't fall back to a throwaway shell. Each agent has its own extension mechanism:
 
 - **Claude Code:** a plugin with a `PreToolUse` hook on `Bash` that rewrites commands into `ctx run`.
+  The session tab never blocks the agent: a background call (`run_in_background`) runs in its own
+  copy of the session tab, named for the command (`Claude 4db0312f - npm run dev`, reused when idle,
+  so restarting a server lands in the same tab), and a call that finds the session tab busy (a
+  command that outlived its wait, a prompt) runs in the first idle `Claude 4db0312f 2`, `3`…, or a
+  new copy. Copies carry the session's folder and exported variables. The other agents' hooks and
+  `ctx mcp` route the same way.
   To make ctx the only shell instead, `permissions.deny: ["Bash"]` removes the Bash tool from
   Claude's context entirely and `ctx mcp` supplies `shell` (a hook that denies calls is pointless
   when the tool can be removed).

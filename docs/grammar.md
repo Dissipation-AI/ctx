@@ -80,13 +80,14 @@ ctx status [as json|toon]
 Open a window or a tab.
 
 ```
-ctx open window|tab [in window <number or name>] [at <folder>] [named "<name>"] [as json|toon]
+ctx open window|tab [in window <number or name>] [at <folder>] [named "<name>"] [like "<tab>"] [as json|toon]
 ```
 
 - `ctx open window`: A new window with one tab in your home folder.
 - `ctx open window at ~/code/site`: …starting in that folder.
 - `ctx open tab`: A new tab in the current window (the Agents window for agents).
 - `ctx open tab in window 2 at ~/code/site named "Dev server"`: Any combination of window, folder and name. Prints the new tab's number.
+- `ctx open tab like "Dev server"`: A copy beside it: same folder, exported variables and history, without what it's running.
 
 ### `close`
 
@@ -327,7 +328,7 @@ Keys: enter, escape, tab, backspace, delete, space, up, down, left, right, home,
 
 Tab and window names must contain a letter and can't be exactly one of these words:
 
-`a`, `about`, `activity`, `agents`, `ago`, `all`, `allowing`, `an`, `antigravity`, `any`, `arguments`, `as`, `ask`, `asking`, `at`, `attach`, `by`, `clear`, `close`, `closed`, `colors`, `command`, `commands`, `cursor`, `day`, `days`, `everything`, `find`, `for`, `forget`, `help`, `hooks`, `hour`, `hours`, `idle`, `in`, `install`, `instructions`, `into`, `is`, `json`, `last`, `launcher`, `launchers`, `line`, `lines`, `list`, `make`, `mcp`, `me`, `minute`, `minutes`, `month`, `months`, `move`, `named`, `open`, `opencode`, `pi`, `position`, `press`, `quiet`, `read`, `rebuild`, `remove`, `rename`, `reopen`, `restart`, `results`, `run`, `screen`, `second`, `seconds`, `server`, `show`, `shows`, `signed`, `since`, `status`, `tab`, `tabs`, `the`, `then`, `this`, `to`, `today`, `toon`, `type`, `until`, `up`, `wait`, `waiting`, `week`, `weeks`, `window`, `with`, `within`, `without`, `yesterday`
+`a`, `about`, `activity`, `agents`, `ago`, `all`, `allowing`, `an`, `antigravity`, `any`, `arguments`, `as`, `ask`, `asking`, `at`, `attach`, `by`, `clear`, `close`, `closed`, `colors`, `command`, `commands`, `cursor`, `day`, `days`, `everything`, `find`, `for`, `forget`, `help`, `hooks`, `hour`, `hours`, `idle`, `in`, `install`, `instructions`, `into`, `is`, `json`, `last`, `launcher`, `launchers`, `like`, `line`, `lines`, `list`, `make`, `mcp`, `me`, `minute`, `minutes`, `month`, `months`, `move`, `named`, `open`, `opencode`, `pi`, `position`, `press`, `quiet`, `read`, `rebuild`, `remove`, `rename`, `reopen`, `restart`, `results`, `run`, `screen`, `second`, `seconds`, `server`, `show`, `shows`, `signed`, `since`, `status`, `tab`, `tabs`, `the`, `then`, `this`, `to`, `today`, `toon`, `type`, `until`, `up`, `wait`, `waiting`, `week`, `weeks`, `window`, `with`, `within`, `without`, `yesterday`
 
 ## Exit status
 

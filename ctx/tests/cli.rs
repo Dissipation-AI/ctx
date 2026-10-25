@@ -637,3 +637,71 @@ fn ctx_store_history(path: &std::path::Path) -> String {
     let (records, _) = ctx_store::record::read_records(path).unwrap();
     format!("{records:?}")
 }
+
+#[test]
+fn a_copy_keeps_folder_exported_variables_and_history() {
+    let s = Server::start("copy");
+    s.ctx(&["open", "tab", "named", "Src", "at", "/tmp"]).ok();
+    s.ctx(&["open", "tab", "named", "Other"]).ok();
+    s.ctx(&["run", "in", "Src", "export KEEP=kept; LOCAL=not-exported; cd /usr; echo first-command"]).ok();
+    s.ctx(&["run", "in", "Src", "sleep 600", "without", "waiting"]).ok();
+    // A copy of a busy tab: same folder and exported variables, its history, nothing running.
+    let o = s.ctx(&["open", "tab", "like", "Src"]).ok().stdout.clone();
+    assert!(o.contains("tab 3 \"Src 2\"") && o.contains("Copied from tab 1"), "{o}");
+    let o = s.ctx(&["run", "in", "Src 2", "echo $KEEP-$LOCAL; pwd"]).ok().stdout.clone();
+    assert_eq!(o, "kept-\n/usr\n");
+    // Tabs an agent opens (the tests run as one) have no pager to wait on.
+    assert_eq!(s.ctx(&["run", "in", "Src 2", "echo $PAGER $GIT_PAGER"]).ok().stdout, "cat cat\n");
+    let o = s.ctx(&["run", "in", "Src 2", "fc -ln 1"]).ok().stdout.clone();
+    assert!(o.contains("echo first-command") && o.contains("sleep 600"), "{o}");
+    let screen = s.ctx(&["read", "Src 2"]).ok().stdout.clone();
+    assert!(screen.contains("like tab 1 \"Src\": same folder, exported variables and history"), "{screen}");
+    // Beside the tab it copies; a copy of a copy takes the next number.
+    let list = s.ctx(&["list", "tabs"]).ok().stdout.clone();
+    let at = |n: &str| list.find(n).unwrap();
+    assert!(at("\"Src\"") < at("\"Src 2\"") && at("\"Src 2\"") < at("\"Other\""), "{list}");
+    assert!(s.ctx(&["open", "tab", "like", "Src 2"]).ok().stdout.contains("\"Src 3\""));
+    // A name and a folder can still be given; a window can't be a copy.
+    let o = s.ctx(&["open", "tab", "like", "tab", "1", "named", "Elsewhere", "at", "/"]).ok().stdout.clone();
+    assert!(o.contains("\"Elsewhere\"") && o.contains(" at /."), "{o}");
+    assert_ne!(s.ctx(&["open", "window", "like", "Src"]).code, 0);
+    s.ctx(&["press", "ctrl-c", "in", "Src"]).ok();
+}
+
+#[test]
+fn the_hook_sends_background_and_busy_calls_to_copies_of_the_session_tab() {
+    let s = Server::start("hook-copies");
+    let call = |command: &str, background: bool| {
+        let input = serde_json::json!({
+            "session_id": "abc12345-xyz", "tool_name": "Bash", "cwd": "/tmp",
+            "tool_input": {"command": command, "run_in_background": background, "timeout": 20000},
+        });
+        let o = s.ctx_in(&["hook", "claude"], Some(&input.to_string())).ok().stdout.clone();
+        let v: serde_json::Value = serde_json::from_str(&o).unwrap();
+        let sentence = v["hookSpecificOutput"]["updatedInput"]["command"].as_str().unwrap().to_string();
+        let words: Vec<String> = ctx_mcp::shell_words(&sentence).unwrap();
+        (sentence, s.ctx(&words[1..].iter().map(String::as_str).collect::<Vec<_>>()))
+    };
+    let (sentence, o) = call("export SESSION_VAR=1; echo ready", false);
+    assert!(sentence.starts_with("ctx run in 'Claude abc12345' "), "{sentence}");
+    assert_eq!(o.stdout, "ready\n");
+    // A background call gets its own copy, named for the command; the session tab stays free.
+    let (sentence, _) = call("sleep 600; echo never", true);
+    assert!(sentence.starts_with("ctx run in 'Claude abc12345 - sleep 600 echo never' "), "{sentence}");
+    assert!(sentence.ends_with(" without waiting"), "{sentence}");
+    let (sentence, o) = call("echo $SESSION_VAR", false);
+    assert!(sentence.starts_with("ctx run in 'Claude abc12345' "), "{sentence}");
+    assert_eq!(o.stdout, "1\n");
+    // A foreground call that outlives its wait leaves the session tab busy; the next call goes to a
+    // copy (with the session's variables) instead of failing.
+    let (_, o) = call("sleep 600", false);
+    assert_eq!(o.code, 3, "{}", o.stderr);
+    let (sentence, o) = call("echo $SESSION_VAR", false);
+    assert!(sentence.starts_with("ctx run in 'Claude abc12345 2' "), "{sentence}");
+    assert_eq!(o.stdout, "1\n");
+    // …and keeps going there while it's free.
+    assert!(call("true", false).0.starts_with("ctx run in 'Claude abc12345 2' "));
+    for t in ["Claude abc12345", "Claude abc12345 - sleep 600 echo never"] {
+        s.ctx(&["press", "ctrl-c", "in", t]).ok();
+    }
+}

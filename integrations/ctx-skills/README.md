@@ -29,7 +29,7 @@ or copy `skills/using-ctx` and `skills/persistent-terminals` into the agent's sk
 
 ## Auto mode
 
-Claude Code's auto-mode classifier blocks an agent from sending keystrokes to its own interface (`Tmux Self Drive`), and it can't review a Bash call that the ctx hook rewrote. The skills tell agents to keep ctx actions to single, plain `ctx` sentences, never to type into a tab running an agent, and to stop and tell you when a call is denied rather than try another route.
+Claude Code's auto-mode classifier blocks an agent from sending keystrokes to its own interface (`Tmux Self Drive`), and it can't review a Bash call that the ctx hook rewrote. The skills tell agents to keep calls aimed at their own session tab to single, plain `ctx` sentences, never to type into a tab running an agent, and to stop and tell you when a call is denied rather than try another route.
 
 If the classifier still blocks ordinary ctx work (typing into a REPL tab the agent opened), describe ctx to it in your own settings. Add a line like this to `autoMode.environment` in `~/.claude/settings.json`:
 

@@ -134,6 +134,7 @@ fn in_agent_tab(agent: &str, name: &str, args: &[String], folder: &Path) -> Out 
             folder: Some(folder.display().to_string()),
             name: Some(tab_name.clone()),
             agent: Some(agent.to_string()),
+            like: None,
         },
     });
     let n = match opened {

@@ -33,14 +33,36 @@ pub fn split_event_line(l: &str) -> Option<(&str, &str)> {
 /// Something that happened *to* a tab, shown as a dimmed `[…]` line.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum Event {
-    Opened { by: String },
-    Reopened { reason: Option<String>, last_active_ms: i64 },
-    Renamed { from: Option<String>, to: String },
-    Moved { window: u64, window_name: Option<String> },
-    SshStarted { target: String },
-    SshEnded { target: String, how: String },
+    Opened {
+        by: String,
+    },
+    Reopened {
+        reason: Option<String>,
+        last_active_ms: i64,
+    },
+    Renamed {
+        from: Option<String>,
+        to: String,
+    },
+    Moved {
+        window: u64,
+        window_name: Option<String>,
+    },
+    SshStarted {
+        target: String,
+    },
+    SshEnded {
+        target: String,
+        how: String,
+    },
     ScreenCleared,
     Closed,
+    /// Opened as a copy of another tab (`open tab like`): its folder, exported variables and history.
+    Copied {
+        by: String,
+        from: u64,
+        from_name: Option<String>,
+    },
 }
 
 impl Event {
@@ -55,6 +77,7 @@ impl Event {
             Event::SshEnded { .. } => "ssh_ended",
             Event::ScreenCleared => "screen_cleared",
             Event::Closed => "closed",
+            Event::Copied { .. } => "copied",
         }
     }
 
@@ -93,6 +116,14 @@ impl Event {
                 m.insert("target".into(), target.clone().into());
                 m.insert("how".into(), how.clone().into());
             }
+            Event::Copied { by, from, from_name } => {
+                m.insert("by".into(), by.clone().into());
+                m.insert("from".into(), (*from).into());
+                m.insert(
+                    "from_name".into(),
+                    from_name.clone().map(serde_json::Value::from).unwrap_or(serde_json::Value::Null),
+                );
+            }
             Event::ScreenCleared | Event::Closed => {}
         }
         serde_json::Value::Object(m).to_string()
@@ -123,6 +154,13 @@ impl Event {
             Event::SshEnded { target, how } => format!("ssh to {target} ended {} · {how}", local_clock(at_ms, tz)),
             Event::ScreenCleared => "program cleared the screen — earlier output is kept in the saved record".into(),
             Event::Closed => format!("closed {}", local_minutes(at_ms, tz)),
+            Event::Copied { by, from, from_name } => {
+                let name = from_name.as_ref().map(|n| format!(" \"{n}\"")).unwrap_or_default();
+                format!(
+                    "opened {} by {by} like tab {from}{name}: same folder, exported variables and history",
+                    local_minutes(at_ms, tz)
+                )
+            }
         };
         format!("[{body}]")
     }
@@ -426,6 +464,10 @@ pub fn events_markdown() -> String {
     let at = 1_791_654_721_000; // 2026-10-10T17:52:01Z
     let events = [
         (Event::Opened { by: "claude (pid 5512)".into() }, "A tab was opened (by you or an agent)."),
+        (
+            Event::Copied { by: "claude (pid 5512)".into(), from: 41, from_name: Some("Claude 4db0312f".into()) },
+            "A tab was opened as a copy of another (`open tab like`).",
+        ),
         (
             Event::Reopened { reason: Some("reboot".into()), last_active_ms: at - 3_600_000 },
             "A closed tab came back after a reboot.",
