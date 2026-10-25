@@ -182,7 +182,8 @@ fn mcp_shell_runs_in_the_sessions_tab() {
 fn restart_keeps_tabs() {
     let s = Server::start("restart");
     s.ctx(&["open", "tab", "named", "Stay", "at", "/tmp"]).ok();
-    s.ctx(&["run", "in", "Stay", "export STAY=1; cd /usr"]).ok();
+    // An empty variable among them must not shift the others (zsh drops empty words unquoted).
+    s.ctx(&["run", "in", "Stay", "export AAA_EMPTY= STAY=1 ZZZ_EMPTY=; cd /usr"]).ok();
     s.ctx(&["restart", "server", "without", "asking"]).ok();
     let o = s.ctx(&["run", "in", "Stay", "echo $STAY; pwd"]).ok().stdout.clone();
     assert_eq!(o, "1\n/usr\n");
@@ -500,12 +501,23 @@ fn agent_accounts_start_through_the_helper() {
     let rules = rules_dir.join("helper.toml");
     std::fs::write(&rules, format!("owner = \"{me}\"\n[accounts]\ndev = \"{me}\"\n")).unwrap();
     let sock = format!("/tmp/ctx-it-helper-{}.sock", std::process::id());
-    let mut h = std::process::Command::new(&helper)
-        .env("CTX_HELPER_SOCKET", &sock)
-        .env("CTX_HELPER_CONFIG", &rules)
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
+    // Stopped when the test ends, pass or fail, so it can't hold the test's output open.
+    struct Helper(std::process::Child);
+    impl Drop for Helper {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let h = Helper(
+        std::process::Command::new(&helper)
+            .env("CTX_HELPER_SOCKET", &sock)
+            .env("CTX_HELPER_CONFIG", &rules)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     while !std::path::Path::new(&sock).exists() {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
@@ -526,7 +538,7 @@ fn agent_accounts_start_through_the_helper() {
     let secret = s.home.join("Secret/key").display().to_string();
     let o = s.ctx(&["run", "in", "Acct", &format!("echo $PPID; echo $CTX_SOCKET; cat '{secret}'")]).stdout;
     let lines: Vec<&str> = o.lines().collect();
-    assert_eq!(lines[0].trim(), h.id().to_string(), "{o}");
+    assert_eq!(lines[0].trim(), h.0.id().to_string(), "{o}");
     assert!(lines[1].ends_with("server.sock"), "{o}");
     assert!(o.contains("Operation not permitted") && !o.contains("hunter2"), "{o}");
     let ctx = common::ctx_bin().display().to_string();
@@ -541,8 +553,7 @@ fn agent_accounts_start_through_the_helper() {
     std::thread::sleep(std::time::Duration::from_millis(2500));
     let o = s.ctx_with(&[("CTX_AGENT_NAME", "mail")], &["open", "tab", "named", "Mail"], None);
     assert!(o.stderr.contains("don't have the agent \"mail\""), "{}", o.stderr);
-    let _ = h.kill();
-    let _ = h.wait();
+    drop(h);
     let _ = std::fs::remove_file(&sock);
 }
 

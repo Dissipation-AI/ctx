@@ -151,6 +151,8 @@ struct SavedState {
 pub struct Server {
     paths: Paths,
     config: Config,
+    /// The sandbox the server itself runs in (see `sys::sandbox_root`); every tab inherits it.
+    own_sandbox: Option<(i32, u64)>,
     config_mtime: Option<std::time::SystemTime>,
     poller: sys::Poller,
     listener: UnixListener,
@@ -280,6 +282,7 @@ impl Server {
         let launch_path = exe.parent().map(|d| d.join("ctx-launch")).unwrap_or_else(|| PathBuf::from("ctx-launch"));
 
         let mut server = Server {
+            own_sandbox: sys::sandbox_root(std::process::id() as i32),
             config_mtime: std::fs::metadata(&paths.config).and_then(|m| m.modified()).ok(),
             paths,
             config,
@@ -1061,7 +1064,9 @@ impl Server {
         if uid != sys::uid() {
             return self.agent_for_uid(uid);
         }
-        if sys::sandboxed(pid) {
+        // A process in the server's own sandbox is no more limited than the tabs the server opens
+        // (a server started from inside an agent's sandbox, as when an agent runs ctx's tests).
+        if sys::sandboxed(pid) && (self.own_sandbox.is_none() || sys::sandbox_root(pid) != self.own_sandbox) {
             let markers = agents::real(&agents::markers(&self.paths.runtime));
             return Some(
                 self.config
@@ -1973,6 +1978,11 @@ impl Server {
                     "This tab belongs to the agent \"{o}\", and config.toml has no [agents.{o}], so it can't start without that agent's limits."
                 )));
             };
+            if agent.sandbox && self.own_sandbox.is_some() {
+                return Err(failed(format!(
+                    "The ctx server runs inside a sandbox, and macOS can't start a sandbox inside one, so it can't open tabs for the agent \"{o}\". Run the server outside any sandbox."
+                )));
+            }
             let sandbox = match agent.sandbox {
                 true => Some(
                     self.write_sandbox(o, number)

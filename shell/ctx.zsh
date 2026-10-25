@@ -27,14 +27,14 @@ _ctx_report_env() {
     done
     if (( _ctx_first )); then
         kind="full"
-        for k v in ${(kv)now}; do out+="S"$'\x1f'"$k"$'\x1f'"$v"$'\x1e'; done
+        for k v in "${(@kv)now}"; do out+="S"$'\x1f'"$k"$'\x1f'"$v"$'\x1e'; done
     else
-        for k v in ${(kv)now}; do
+        for k v in "${(@kv)now}"; do
             if [[ -z "${_ctx_env[$k]+X}" || "${_ctx_env[$k]}" != "$v" ]]; then
                 out+="S"$'\x1f'"$k"$'\x1f'"$v"$'\x1e'
             fi
         done
-        for k in ${(k)_ctx_env}; do
+        for k in "${(@k)_ctx_env}"; do
             [[ -z "${now[$k]+X}" ]] && out+="U"$'\x1f'"$k"$'\x1e'
         done
     fi
