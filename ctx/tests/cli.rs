@@ -457,6 +457,41 @@ fn agents_see_and_drive_only_their_own_tabs_and_run_sandboxed() {
     assert!(!clients.is_empty() && clients.iter().all(|c| c.starts_with("dev: ")), "{clients:?}");
 }
 
+/// The real Claude Code, started in your tab, comes up as the agent inside its sandbox; in a folder
+/// that sandbox can't read, ctx says so instead of Claude's "low max file descriptors". Its binary
+/// goes by another name here: these tests often run under Claude Code, and a `ctx` with an agent
+/// program above it would be that agent rather than you.
+#[test]
+fn claude_starts_in_a_tab_as_its_agent() {
+    let Some(claude) = std::env::var("PATH")
+        .unwrap_or_default()
+        .split(':')
+        .map(|d| std::path::Path::new(d).join("claude"))
+        .find(|p| p.is_file())
+    else {
+        eprintln!("skipped: no claude on PATH");
+        return;
+    };
+    let s = Server::start("claude");
+    for d in ["Work", "Closed", "bin"] {
+        std::fs::create_dir_all(s.home.join(d)).unwrap();
+    }
+    std::os::unix::fs::symlink(&claude, s.home.join("bin/claude-it")).unwrap();
+    std::fs::write(
+        s.dir.join("config.toml"),
+        "shell = \"/bin/zsh\"\nagent_programs = [\"claude-it\"]\ndefault_agent = \"dev\"\n[agents.dev]\nfolders = [\"~/Work\"]\nwrite = [\"~\"]\ndeny = [\"~/Closed\"]\n",
+    )
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2500)); // the server rereads its config
+    s.ctx(&["open", "tab", "named", "Mine", "at", "/tmp"]).ok();
+    s.ctx(&["run", "in", "Mine", "export PATH=$PATH:~/bin"]).ok();
+    let o = s.ctx(&["run", "in", "Mine", "cd ~/Work && claude-it --version"]).ok().stdout.clone();
+    assert!(o.contains("runs as the agent \"dev\", in its sandbox") && o.contains("(Claude Code)"), "{o}");
+    let o = s.ctx(&["run", "in", "Mine", "cd ~/Closed && claude-it --version"]).stdout;
+    assert!(o.contains("default_agent") && o.contains("its sandbox can't read this folder"), "{o}");
+    assert!(!o.contains("(Claude Code)") && !o.contains("file descriptors"), "{o}");
+}
+
 /// A session whose tab is yours (it started before the agent was configured, or was resumed) gets a
 /// tab of the agent's own instead of commands it isn't allowed to run.
 #[test]
