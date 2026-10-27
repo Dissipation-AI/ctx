@@ -7,16 +7,16 @@
 ## Opening an ssh tab
 
 ```
-ctx open tab named "ssh slopslinger"
-ctx run in "ssh slopslinger" "ssh slopslinger" without waiting
-ctx wait until "ssh slopslinger" is quiet for 3 seconds
-ctx read "ssh slopslinger"
+ctx open tab named "ssh build-box"
+ctx run in "ssh build-box" "ssh build-box" without waiting
+ctx wait until "ssh build-box" is quiet for 3 seconds
+ctx read "ssh build-box"
 ```
 
 Then read the screen and act on it:
 
 - A shell prompt from the remote host: you're in.
-- `password:`, `Verification code:`, `Enter passphrase`: the user's job. `ctx show "ssh slopslinger"`, ask them to log in, then `ctx wait until "ssh slopslinger" shows "<remote prompt text>" within 5 minutes`.
+- `password:`, `Verification code:`, `Enter passphrase`: the user's job. `ctx show "ssh build-box"`, ask them to log in, then `ctx wait until "ssh build-box" shows "<remote prompt text>" within 5 minutes`.
 - `Are you sure you want to continue connecting (yes/no)?`: a new host key. Ask the user unless they told you this host is expected.
 - `no such identity: … Operation not permitted` followed by `Permission denied (publickey)`: your agent's sandbox can't read the key file (`ctx list agents`). The host is fine. Tell the user; don't try other keys or options.
 
@@ -25,7 +25,7 @@ Then read the screen and act on it:
 With ctx's remote shell integration (on by default for interactive `ssh host` to a bash or zsh login shell), `ctx run`, `ctx wait until … is idle` and `ctx read last command` work in the ssh tab like a local one:
 
 ```
-ctx run in "ssh slopslinger" "nvidia-smi --query-gpu=index,name,memory.used --format=csv"
+ctx run in "ssh build-box" "nvidia-smi --query-gpu=index,name,memory.used --format=csv"
 ```
 
 If `run` refuses for lack of shell-integration marks (fish, plain `sh`, busybox, routers, or the host is excluded in ctx's settings), use `type` with a marker:

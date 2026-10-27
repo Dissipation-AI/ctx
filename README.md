@@ -37,7 +37,7 @@ lines ([docs/events.md](docs/events.md)). What was measured and decided while bu
 | `ctx-launch` | Starts each tab's shell under its own macOS identity |
 | `launchers/` | The reviewed template for `ctx make launcher` |
 | `shell/` | zsh and bash integration, the ssh bootstrap, zsh completion |
-| `integrations/` | Hooks for Claude Code, Antigravity, Codex, Cursor, pi and opencode (`ctx install hooks for …`); the Gemini CLI extension; `ctx-skills`, agent skills for ctx and persistent terminals |
+| `integrations/` | Hooks for Claude Code, Antigravity, Codex, Cursor, pi and opencode (`ctx install hooks for …`); the Gemini CLI extension; `ctx-skills`, agent skills for ctx and interactive programs |
 | `evals/agents/` | The agent evaluation that gates those integrations |
 | `scripts/budgets.sh` | Memory, latency and size budgets |
 
@@ -96,7 +96,7 @@ your approval as the check. Each `integrations/<agent>/README.md` has the detail
 
 ### Skills: teaching agents to use ctx
 
-`integrations/ctx-skills` holds two Agent Skills: `using-ctx` (getting around ctx, reading the messages that make an agent think its shell is broken, long jobs in their own tab, finding earlier work, arranging tabs for you) and `persistent-terminals` (REPLs, debuggers, ssh, adb and database shells driven through tabs that keep their state). They work with or without the hook.
+`integrations/ctx-skills` holds two Agent Skills: `using-ctx` (getting around ctx, reading the messages that make an agent think its shell is broken, long jobs in their own tab, finding earlier work, arranging tabs for you) and `interactive-programs` (consoles and CLIs that need a terminal, setup wizards, REPLs, debuggers, ssh, adb and database shells, run in a tab and typed into). They work with or without the hook.
 
 ```sh
 claude plugin install ctx-skills --marketplace Dissipation-AI/ctx
