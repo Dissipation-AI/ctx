@@ -132,6 +132,9 @@ pub struct Config {
 
     pub run_max_lines: u32,
     pub agent_window_name: String,
+    /// An agent running in one of your tabs opens its tabs beside it, in your window, instead of
+    /// in the Agents window.
+    pub agent_tabs_beside_caller: bool,
 
     pub assist: bool,
     pub assist_command: String,
@@ -239,6 +242,7 @@ impl Default for Config {
             ssh_integration_skip: Vec::new(),
             run_max_lines: 400,
             agent_window_name: "Agents".into(),
+            agent_tabs_beside_caller: false,
             assist: true,
             assist_command: "bro".into(),
             ask: AskConfig::default(),
@@ -350,6 +354,7 @@ ssh_integration = true
 ssh_integration_skip = []
 run_max_lines = 400
 agent_window_name = "Agents"
+agent_tabs_beside_caller = false
 assist = true
 assist_command = "bro"
 
