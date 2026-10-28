@@ -1650,14 +1650,17 @@ impl Server {
         n
     }
 
-    /// Where a new tab goes when no window is named.
+    /// Where a new tab goes when no window is named. An agent's tabs go to the Agents window, which
+    /// CTX.app doesn't put on screen, even when the agent runs in one of your tabs (unless
+    /// `agent_tabs_beside_caller`): they'd crowd the window you're working in.
     fn default_window(&mut self, key: usize) -> u64 {
-        if let Some(t) = self.client_tab(key)
+        let is_agent = self.clients.get(&key).is_some_and(|c| c.identity.is_agent && !c.identity.is_app);
+        if (!is_agent || self.config.agent_tabs_beside_caller)
+            && let Some(t) = self.client_tab(key)
             && let Some(tab) = self.tabs.get(&t)
         {
             return tab.window;
         }
-        let is_agent = self.clients.get(&key).is_some_and(|c| c.identity.is_agent && !c.identity.is_app);
         if is_agent {
             let name = self.config.agent_window_name.clone();
             if let Some(w) = self.windows.iter().find(|w| w.name.as_deref() == Some(name.as_str())) {

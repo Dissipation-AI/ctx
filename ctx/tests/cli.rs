@@ -484,6 +484,32 @@ fn an_agents_hook_never_reuses_a_tab_it_cant_drive() {
     assert_eq!(s.ctx_with(&dev, &args, None).ok().stdout, "hi\n");
 }
 
+#[test]
+fn an_agent_in_your_tab_opens_its_tabs_out_of_your_window() {
+    let s = Server::start("agent-window");
+    // In a window of its own: the test may itself run under an agent, whose tabs go to "Agents".
+    s.ctx(&["open", "tab", "in", "new", "window", "named", "Mine", "at", "/tmp"]).ok();
+    let ctx = common::ctx_bin().display().to_string();
+    let agent_opens = |name: &str| {
+        s.ctx(&["run", "in", "Mine", &format!("CTX_AGENT_NAME=claude '{ctx}' open tab named {name}")]).ok();
+        let o = s.ctx(&["list", "tabs"]).ok().stdout.clone();
+        let window =
+            o.lines().take_while(|l| !l.contains(&format!("\"{name}\""))).filter(|l| l.starts_with("window")).last();
+        window.unwrap_or_default().to_string()
+    };
+    assert!(agent_opens("Helper").ends_with("\"Agents\""));
+    // You still get yours beside you.
+    s.ctx(&["run", "in", "Mine", &format!("'{ctx}' open tab named Yours")]).ok();
+    let o = s.ctx(&["list", "tabs"]).ok().stdout.clone();
+    let mine = o.lines().take_while(|l| !l.contains("\"Mine\"")).filter(|l| l.starts_with("window")).last().unwrap();
+    let yours = o.lines().take_while(|l| !l.contains("\"Yours\"")).filter(|l| l.starts_with("window")).last().unwrap();
+    assert_eq!(mine, yours, "{o}");
+
+    std::fs::write(s.dir.join("config.toml"), "shell = \"/bin/zsh\"\nagent_tabs_beside_caller = true\n").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2500)); // the server rereads its config
+    assert_eq!(agent_opens("Beside"), mine);
+}
+
 /// The helper, unprivileged: the only account it can become is this one, which is enough to see
 /// the whole path (rules, the attached terminal, the door, the sandbox) work.
 #[test]
