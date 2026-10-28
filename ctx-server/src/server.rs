@@ -1972,6 +1972,7 @@ impl Server {
             typing: false,
             pending_text: None,
             running: Vec::new(),
+            shown_foreground: None,
             finished: Default::default(),
             next_command: reopen.as_ref().map(|r| r.next_command).unwrap_or(1),
             last_exit: None,
@@ -3557,6 +3558,11 @@ impl Server {
             t.refresh_password_input();
             fx
         };
+        // A new program in front (it printed, so it's there now): clients show its name.
+        let foreground_changed = self.tabs.get_mut(&n).is_some_and(|t| {
+            let fg = sys::foreground_pgid(t.fd());
+            std::mem::replace(&mut t.shown_foreground, fg) != fg
+        });
         // Attached terminals get the raw output (minus ctx's private reports).
         let attached: Vec<usize> =
             self.clients.iter().filter(|(_, c)| c.mode == Mode::Attached(n)).map(|(k, _)| *k).collect();
@@ -3571,7 +3577,13 @@ impl Server {
         {
             t.to_pty.extend_from_slice(&fx.replies);
         }
-        if fx.title_changed || fx.folder_changed || !fx.started.is_empty() || !fx.finished.is_empty() || fx.prompt {
+        if fx.title_changed
+            || fx.folder_changed
+            || !fx.started.is_empty()
+            || !fx.finished.is_empty()
+            || fx.prompt
+            || foreground_changed
+        {
             self.broadcast_tabs();
         }
         if let Some(c) = &fx.clipboard {
