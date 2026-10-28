@@ -187,6 +187,9 @@ pub struct Tab {
     /// Command text reported just before its start mark.
     pub pending_text: Option<String>,
     pub running: Vec<Running>,
+    /// The foreground process group the clients were last told about (`TabInfo.pid`), so a
+    /// program taking the terminal (`cd dir && python`: python, after cd) is announced.
+    pub shown_foreground: Option<i32>,
     /// The last few finished commands, kept for `run`'s answer.
     pub finished: VecDeque<Running>,
     pub next_command: u64,
