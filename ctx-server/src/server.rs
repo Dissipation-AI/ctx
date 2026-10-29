@@ -2884,9 +2884,16 @@ impl Server {
                 if let Some(cmd) = t.current() {
                     let (lines, _) = cmd.kept_output();
                     let live = t.live_rows(false);
+                    // A full-screen program draws with cursor moves, so its text may never come
+                    // through as a line of output: look at its screen too.
+                    let screen = if t.term.full_screen() { t.screen_text(false) } else { Vec::new() };
                     let needle = text.to_lowercase();
-                    if let Some(l) =
-                        lines.iter().map(|l| plain_line(l)).chain(live).find(|l| l.to_lowercase().contains(&needle))
+                    if let Some(l) = lines
+                        .iter()
+                        .map(|l| plain_line(l))
+                        .chain(live)
+                        .chain(screen)
+                        .find(|l| l.to_lowercase().contains(&needle))
                     {
                         return ok(Output::Waited(WaitResult {
                             tab: n,
@@ -3813,7 +3820,10 @@ impl Server {
                         if t.output_seq > *seen {
                             let needle = text.to_lowercase();
                             // Look at recent lines (new output is near the bottom).
-                            let lines = t.recent_output(t.rows as usize * 2 + fx.new_lines as usize);
+                            let mut lines = t.recent_output(t.rows as usize * 2 + fx.new_lines as usize);
+                            if t.term.full_screen() {
+                                lines.extend(t.screen_text(false)); // see above: drawn, not printed
+                            }
                             if lines.iter().any(|l| l.to_lowercase().contains(&needle)) {
                                 fire = true;
                             }
