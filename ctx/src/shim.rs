@@ -13,6 +13,7 @@ use std::ffi::CString;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
+#[cfg(target_os = "macos")]
 unsafe extern "C" {
     fn sandbox_init(profile: *const libc::c_char, flags: u64, errorbuf: *mut *mut libc::c_char) -> libc::c_int;
 }
@@ -113,6 +114,13 @@ pub fn run(args: &[String]) -> Out {
     exec(&program, name, rest)
 }
 
+/// The agent sandbox is Seatbelt; elsewhere a sandboxed agent doesn't start.
+#[cfg(not(target_os = "macos"))]
+fn apply(_profile: &str) -> Result<(), String> {
+    Err("the agent sandbox is macOS only".into())
+}
+
+#[cfg(target_os = "macos")]
 fn apply(profile: &str) -> Result<(), String> {
     let c = CString::new(profile.as_bytes()).map_err(|e| e.to_string())?;
     let mut err: *mut libc::c_char = std::ptr::null_mut();

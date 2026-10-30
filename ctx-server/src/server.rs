@@ -2083,6 +2083,7 @@ impl Server {
             cold,
             log,
             to_pty: Vec::new(),
+            shell: shell.clone(),
             integration_expected: is_zsh || shell_name == "bash",
             integration: false,
             at_prompt: false,
@@ -2734,6 +2735,17 @@ impl Server {
                 ),
             );
         }
+        // An unclosed quote, bracket or here-document would leave the shell at its continuation
+        // prompt waiting for the rest, and the command would never start (an agent's own shell
+        // fails such a command at once). Refuse it instead, with the shell's own message.
+        if !at_remote_prompt && let Some(why) = incomplete_command(&t.shell, &command) {
+            return err(
+                ErrorKind::NotAllowed,
+                format!(
+                    "Nothing was run: the command is incomplete, so the shell would wait for more input ({why}). Check its quotes and brackets."
+                ),
+            );
+        }
         t.contributors.push(by);
         let mut bytes = t.term.encode_paste(&command);
         bytes.push(b'\r');
@@ -2872,9 +2884,16 @@ impl Server {
                 if let Some(cmd) = t.current() {
                     let (lines, _) = cmd.kept_output();
                     let live = t.live_rows(false);
+                    // A full-screen program draws with cursor moves, so its text may never come
+                    // through as a line of output: look at its screen too.
+                    let screen = if t.term.full_screen() { t.screen_text(false) } else { Vec::new() };
                     let needle = text.to_lowercase();
-                    if let Some(l) =
-                        lines.iter().map(|l| plain_line(l)).chain(live).find(|l| l.to_lowercase().contains(&needle))
+                    if let Some(l) = lines
+                        .iter()
+                        .map(|l| plain_line(l))
+                        .chain(live)
+                        .chain(screen)
+                        .find(|l| l.to_lowercase().contains(&needle))
                     {
                         return ok(Output::Waited(WaitResult {
                             tab: n,
@@ -3801,7 +3820,10 @@ impl Server {
                         if t.output_seq > *seen {
                             let needle = text.to_lowercase();
                             // Look at recent lines (new output is near the bottom).
-                            let lines = t.recent_output(t.rows as usize * 2 + fx.new_lines as usize);
+                            let mut lines = t.recent_output(t.rows as usize * 2 + fx.new_lines as usize);
+                            if t.term.full_screen() {
+                                lines.extend(t.screen_text(false)); // see above: drawn, not printed
+                            }
                             if lines.iter().any(|l| l.to_lowercase().contains(&needle)) {
                                 fire = true;
                             }
@@ -4293,6 +4315,35 @@ fn activates_environment(cmd: &str) -> bool {
 /// First commands not worth offering (`clear`, `exit`).
 fn is_trivial(cmd: &str) -> bool {
     matches!(cmd.trim(), "clear" | "exit" | "reset" | "logout")
+}
+
+/// Why `command` is incomplete for `shell` (bash or zsh), or None when it parses or the shell
+/// can't be asked. Only incompleteness counts: other syntax errors are the shell's to report.
+fn incomplete_command(shell: &str, command: &str) -> Option<String> {
+    let name = shell.rsplit('/').next().unwrap_or("");
+    if name != "bash" && name != "zsh" {
+        return None;
+    }
+    let out = std::process::Command::new(shell)
+        .args(["-n", "-c", command])
+        .env("LC_ALL", "C")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let msg = String::from_utf8_lossy(&out.stderr);
+    let incomplete = [
+        "unexpected EOF",           // bash: unclosed quote
+        "unexpected end of file",   // bash: unclosed if/for/brace
+        "delimited by end-of-file", // bash: here-document without its end word
+        "unmatched",                // zsh: unmatched " or ' (zsh doesn't tell an unclosed `if` from other errors)
+    ];
+    if !incomplete.iter().any(|m| msg.contains(m)) {
+        return None;
+    }
+    let line = msg.lines().find(|l| incomplete.iter().any(|m| l.contains(m))).unwrap_or("").trim();
+    let line =
+        line.split_once(": -c: ").map(|(_, r)| r).or_else(|| line.rsplit_once(": ").map(|(_, r)| r)).unwrap_or(line);
+    Some(format!("{name}: {line}"))
 }
 
 #[cfg(test)]
