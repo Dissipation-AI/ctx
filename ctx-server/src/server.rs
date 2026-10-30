@@ -4332,16 +4332,17 @@ fn incomplete_command(shell: &str, command: &str) -> Option<String> {
         .ok()?;
     let msg = String::from_utf8_lossy(&out.stderr);
     let incomplete = [
-        "unexpected EOF",            // bash: unclosed quote
-        "unexpected end of file",    // bash: unclosed if/for/brace
-        "delimited by end-of-file",  // bash: here-document without its end word
-        "unmatched",                 // zsh: unmatched " or ' (zsh doesn't tell an unclosed `if` from other errors)
+        "unexpected EOF",           // bash: unclosed quote
+        "unexpected end of file",   // bash: unclosed if/for/brace
+        "delimited by end-of-file", // bash: here-document without its end word
+        "unmatched",                // zsh: unmatched " or ' (zsh doesn't tell an unclosed `if` from other errors)
     ];
     if !incomplete.iter().any(|m| msg.contains(m)) {
         return None;
     }
     let line = msg.lines().find(|l| incomplete.iter().any(|m| l.contains(m))).unwrap_or("").trim();
-    let line = line.split_once(": -c: ").map(|(_, r)| r).or_else(|| line.rsplit_once(": ").map(|(_, r)| r)).unwrap_or(line);
+    let line =
+        line.split_once(": -c: ").map(|(_, r)| r).or_else(|| line.rsplit_once(": ").map(|(_, r)| r)).unwrap_or(line);
     Some(format!("{name}: {line}"))
 }
 
