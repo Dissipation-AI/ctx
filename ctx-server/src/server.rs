@@ -3791,7 +3791,9 @@ impl Server {
                         }
                     }
                     WaitKind::Idle => {
-                        if !fx.finished.is_empty() && t.running.is_empty() {
+                        // Idle once the prompt is back: a wait that starts after the command
+                        // ended but before the prompt arrived has no command left to see finish.
+                        if (fx.prompt || !fx.finished.is_empty()) && !t.busy() {
                             fire = true;
                         }
                     }

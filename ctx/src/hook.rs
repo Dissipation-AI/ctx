@@ -82,7 +82,26 @@ fn session_tab_folder(tab: &str, folder: Option<String>, background: Option<&str
         .collect();
     let own = format!("{tab} {who}");
     let session = [tab, own.as_str()].into_iter().find_map(|name| {
-        named(name).into_iter().find(mine).map(|t| (name.to_string(), t.folder.clone(), t.state == "idle"))
+        named(name).into_iter().find(mine).map(|t| (name.to_string(), t.folder.clone(), t.state == "idle", t))
+    });
+    // A command that just ended leaves the tab busy until the shell's next prompt arrives; a call
+    // made in that moment waits for the prompt rather than going to a copy without the tab's state.
+    let session = session.map(|(name, folder, idle, t)| {
+        let between = t.state == "busy" && t.running.is_none();
+        let idle = idle
+            || between
+                && matches!(
+                    conn.request(&Envelope {
+                        sentence: format!("ctx wait until \"{name}\" is idle within 2 seconds"),
+                        request: Request::Wait {
+                            tab: TabRef::Name(name.clone()),
+                            until: WaitCondition::Idle,
+                            within_ms: 2000
+                        },
+                    }),
+                    Ok(Response::Ok(_))
+                );
+        (name, folder, idle)
     });
     let (session, session_folder, idle) = match session {
         Some(s) => s,

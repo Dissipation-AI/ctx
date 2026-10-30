@@ -158,6 +158,25 @@ fn instructions_install_update_and_remove() {
 }
 
 #[test]
+fn a_call_right_after_a_command_waits_for_the_prompt() {
+    // The command-end mark comes in precmd and the prompt mark in PS1, so a slow precmd leaves the
+    // tab busy with nothing running. The next call still belongs in the session tab: an unexported
+    // variable is only there, not in a copy.
+    let s = Server::start("mcp-gap");
+    let input = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","clientInfo":{"name":"test-client"}}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"shell","arguments":{"command":"slow() { sleep 1 }; precmd_functions+=(slow); KEPT=1"}}}"#,
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"shell","arguments":{"command":"echo $KEPT"}}}"#,
+    ]
+    .join("\n");
+    let o = s.ctx_in(&["mcp"], Some(&(input + "\n")));
+    let replies: Vec<serde_json::Value> = o.stdout.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(replies.len(), 3);
+    assert_eq!(replies[2]["result"]["content"][0]["text"], "1\n[exit status: 0]");
+}
+
+#[test]
 fn mcp_shell_runs_in_the_sessions_tab() {
     let s = Server::start("mcp");
     let input = [
