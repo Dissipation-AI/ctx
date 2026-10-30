@@ -158,6 +158,25 @@ fn instructions_install_update_and_remove() {
 }
 
 #[test]
+fn a_call_right_after_a_command_waits_for_the_prompt() {
+    // The command-end mark comes in precmd and the prompt mark in PS1, so a slow precmd leaves the
+    // tab busy with nothing running. The next call still belongs in the session tab: an unexported
+    // variable is only there, not in a copy.
+    let s = Server::start("mcp-gap");
+    let input = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","clientInfo":{"name":"test-client"}}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"shell","arguments":{"command":"slow() { sleep 1 }; precmd_functions+=(slow); KEPT=1"}}}"#,
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"shell","arguments":{"command":"echo $KEPT"}}}"#,
+    ]
+    .join("\n");
+    let o = s.ctx_in(&["mcp"], Some(&(input + "\n")));
+    let replies: Vec<serde_json::Value> = o.stdout.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(replies.len(), 3);
+    assert_eq!(replies[2]["result"]["content"][0]["text"], "1\n[exit status: 0]");
+}
+
+#[test]
 fn mcp_shell_runs_in_the_sessions_tab() {
     let s = Server::start("mcp");
     let input = [
@@ -182,7 +201,8 @@ fn mcp_shell_runs_in_the_sessions_tab() {
 fn restart_keeps_tabs() {
     let s = Server::start("restart");
     s.ctx(&["open", "tab", "named", "Stay", "at", "/tmp"]).ok();
-    s.ctx(&["run", "in", "Stay", "export STAY=1; cd /usr"]).ok();
+    // An empty variable among them must not shift the others (zsh drops empty words unquoted).
+    s.ctx(&["run", "in", "Stay", "export AAA_EMPTY= STAY=1 ZZZ_EMPTY=; cd /usr"]).ok();
     s.ctx(&["restart", "server", "without", "asking"]).ok();
     let o = s.ctx(&["run", "in", "Stay", "echo $STAY; pwd"]).ok().stdout.clone();
     assert_eq!(o, "1\n/usr\n");
@@ -456,6 +476,41 @@ fn agents_see_and_drive_only_their_own_tabs_and_run_sandboxed() {
     assert!(!clients.is_empty() && clients.iter().all(|c| c.starts_with("dev: ")), "{clients:?}");
 }
 
+/// The real Claude Code, started in your tab, comes up as the agent inside its sandbox; in a folder
+/// that sandbox can't read, ctx says so instead of Claude's "low max file descriptors". Its binary
+/// goes by another name here: these tests often run under Claude Code, and a `ctx` with an agent
+/// program above it would be that agent rather than you.
+#[test]
+fn claude_starts_in_a_tab_as_its_agent() {
+    let Some(claude) = std::env::var("PATH")
+        .unwrap_or_default()
+        .split(':')
+        .map(|d| std::path::Path::new(d).join("claude"))
+        .find(|p| p.is_file())
+    else {
+        eprintln!("skipped: no claude on PATH");
+        return;
+    };
+    let s = Server::start("claude");
+    for d in ["Work", "Closed", "bin"] {
+        std::fs::create_dir_all(s.home.join(d)).unwrap();
+    }
+    std::os::unix::fs::symlink(&claude, s.home.join("bin/claude-it")).unwrap();
+    std::fs::write(
+        s.dir.join("config.toml"),
+        "shell = \"/bin/zsh\"\nagent_programs = [\"claude-it\"]\ndefault_agent = \"dev\"\n[agents.dev]\nfolders = [\"~/Work\"]\nwrite = [\"~\"]\ndeny = [\"~/Closed\"]\n",
+    )
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2500)); // the server rereads its config
+    s.ctx(&["open", "tab", "named", "Mine", "at", "/tmp"]).ok();
+    s.ctx(&["run", "in", "Mine", "export PATH=$PATH:~/bin"]).ok();
+    let o = s.ctx(&["run", "in", "Mine", "cd ~/Work && claude-it --version"]).ok().stdout.clone();
+    assert!(o.contains("runs as the agent \"dev\", in its sandbox") && o.contains("(Claude Code)"), "{o}");
+    let o = s.ctx(&["run", "in", "Mine", "cd ~/Closed && claude-it --version"]).stdout;
+    assert!(o.contains("default_agent") && o.contains("its sandbox can't read this folder"), "{o}");
+    assert!(!o.contains("(Claude Code)") && !o.contains("file descriptors"), "{o}");
+}
+
 /// A session whose tab is yours (it started before the agent was configured, or was resumed) gets a
 /// tab of the agent's own instead of commands it isn't allowed to run.
 #[test]
@@ -500,12 +555,23 @@ fn agent_accounts_start_through_the_helper() {
     let rules = rules_dir.join("helper.toml");
     std::fs::write(&rules, format!("owner = \"{me}\"\n[accounts]\ndev = \"{me}\"\n")).unwrap();
     let sock = format!("/tmp/ctx-it-helper-{}.sock", std::process::id());
-    let mut h = std::process::Command::new(&helper)
-        .env("CTX_HELPER_SOCKET", &sock)
-        .env("CTX_HELPER_CONFIG", &rules)
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
+    // Stopped when the test ends, pass or fail, so it can't hold the test's output open.
+    struct Helper(std::process::Child);
+    impl Drop for Helper {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let h = Helper(
+        std::process::Command::new(&helper)
+            .env("CTX_HELPER_SOCKET", &sock)
+            .env("CTX_HELPER_CONFIG", &rules)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     while !std::path::Path::new(&sock).exists() {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
@@ -526,7 +592,7 @@ fn agent_accounts_start_through_the_helper() {
     let secret = s.home.join("Secret/key").display().to_string();
     let o = s.ctx(&["run", "in", "Acct", &format!("echo $PPID; echo $CTX_SOCKET; cat '{secret}'")]).stdout;
     let lines: Vec<&str> = o.lines().collect();
-    assert_eq!(lines[0].trim(), h.id().to_string(), "{o}");
+    assert_eq!(lines[0].trim(), h.0.id().to_string(), "{o}");
     assert!(lines[1].ends_with("server.sock"), "{o}");
     assert!(o.contains("Operation not permitted") && !o.contains("hunter2"), "{o}");
     let ctx = common::ctx_bin().display().to_string();
@@ -541,8 +607,7 @@ fn agent_accounts_start_through_the_helper() {
     std::thread::sleep(std::time::Duration::from_millis(2500));
     let o = s.ctx_with(&[("CTX_AGENT_NAME", "mail")], &["open", "tab", "named", "Mail"], None);
     assert!(o.stderr.contains("don't have the agent \"mail\""), "{}", o.stderr);
-    let _ = h.kill();
-    let _ = h.wait();
+    drop(h);
     let _ = std::fs::remove_file(&sock);
 }
 
@@ -636,4 +701,72 @@ fn screen_shows(s: &Server, tab: &str, text: &str) {
 fn ctx_store_history(path: &std::path::Path) -> String {
     let (records, _) = ctx_store::record::read_records(path).unwrap();
     format!("{records:?}")
+}
+
+#[test]
+fn a_copy_keeps_folder_exported_variables_and_history() {
+    let s = Server::start("copy");
+    s.ctx(&["open", "tab", "named", "Src", "at", "/tmp"]).ok();
+    s.ctx(&["open", "tab", "named", "Other"]).ok();
+    s.ctx(&["run", "in", "Src", "export KEEP=kept; LOCAL=not-exported; cd /usr; echo first-command"]).ok();
+    s.ctx(&["run", "in", "Src", "sleep 600", "without", "waiting"]).ok();
+    // A copy of a busy tab: same folder and exported variables, its history, nothing running.
+    let o = s.ctx(&["open", "tab", "like", "Src"]).ok().stdout.clone();
+    assert!(o.contains("tab 3 \"Src 2\"") && o.contains("Copied from tab 1"), "{o}");
+    let o = s.ctx(&["run", "in", "Src 2", "echo $KEEP-$LOCAL; pwd"]).ok().stdout.clone();
+    assert_eq!(o, "kept-\n/usr\n");
+    // Tabs an agent opens (the tests run as one) have no pager to wait on.
+    assert_eq!(s.ctx(&["run", "in", "Src 2", "echo $PAGER $GIT_PAGER"]).ok().stdout, "cat cat\n");
+    let o = s.ctx(&["run", "in", "Src 2", "fc -ln 1"]).ok().stdout.clone();
+    assert!(o.contains("echo first-command") && o.contains("sleep 600"), "{o}");
+    let screen = s.ctx(&["read", "Src 2"]).ok().stdout.clone();
+    assert!(screen.contains("like tab 1 \"Src\": same folder, exported variables and history"), "{screen}");
+    // Beside the tab it copies; a copy of a copy takes the next number.
+    let list = s.ctx(&["list", "tabs"]).ok().stdout.clone();
+    let at = |n: &str| list.find(n).unwrap();
+    assert!(at("\"Src\"") < at("\"Src 2\"") && at("\"Src 2\"") < at("\"Other\""), "{list}");
+    assert!(s.ctx(&["open", "tab", "like", "Src 2"]).ok().stdout.contains("\"Src 3\""));
+    // A name and a folder can still be given; a window can't be a copy.
+    let o = s.ctx(&["open", "tab", "like", "tab", "1", "named", "Elsewhere", "at", "/"]).ok().stdout.clone();
+    assert!(o.contains("\"Elsewhere\"") && o.contains(" at /."), "{o}");
+    assert_ne!(s.ctx(&["open", "window", "like", "Src"]).code, 0);
+    s.ctx(&["press", "ctrl-c", "in", "Src"]).ok();
+}
+
+#[test]
+fn the_hook_sends_background_and_busy_calls_to_copies_of_the_session_tab() {
+    let s = Server::start("hook-copies");
+    let call = |command: &str, background: bool| {
+        let input = serde_json::json!({
+            "session_id": "abc12345-xyz", "tool_name": "Bash", "cwd": "/tmp",
+            "tool_input": {"command": command, "run_in_background": background, "timeout": 20000},
+        });
+        let o = s.ctx_in(&["hook", "claude"], Some(&input.to_string())).ok().stdout.clone();
+        let v: serde_json::Value = serde_json::from_str(&o).unwrap();
+        let sentence = v["hookSpecificOutput"]["updatedInput"]["command"].as_str().unwrap().to_string();
+        let words: Vec<String> = ctx_mcp::shell_words(&sentence).unwrap();
+        (sentence, s.ctx(&words[1..].iter().map(String::as_str).collect::<Vec<_>>()))
+    };
+    let (sentence, o) = call("export SESSION_VAR=1; echo ready", false);
+    assert!(sentence.starts_with("ctx run in 'Claude abc12345' "), "{sentence}");
+    assert_eq!(o.stdout, "ready\n");
+    // A background call gets its own copy, named for the command; the session tab stays free.
+    let (sentence, _) = call("sleep 600; echo never", true);
+    assert!(sentence.starts_with("ctx run in 'Claude abc12345 - sleep 600 echo never' "), "{sentence}");
+    assert!(sentence.ends_with(" without waiting"), "{sentence}");
+    let (sentence, o) = call("echo $SESSION_VAR", false);
+    assert!(sentence.starts_with("ctx run in 'Claude abc12345' "), "{sentence}");
+    assert_eq!(o.stdout, "1\n");
+    // A foreground call that outlives its wait leaves the session tab busy; the next call goes to a
+    // copy (with the session's variables) instead of failing.
+    let (_, o) = call("sleep 600", false);
+    assert_eq!(o.code, 3, "{}", o.stderr);
+    let (sentence, o) = call("echo $SESSION_VAR", false);
+    assert!(sentence.starts_with("ctx run in 'Claude abc12345 2' "), "{sentence}");
+    assert_eq!(o.stdout, "1\n");
+    // …and keeps going there while it's free.
+    assert!(call("true", false).0.starts_with("ctx run in 'Claude abc12345 2' "));
+    for t in ["Claude abc12345", "Claude abc12345 - sleep 600 echo never"] {
+        s.ctx(&["press", "ctrl-c", "in", t]).ok();
+    }
 }

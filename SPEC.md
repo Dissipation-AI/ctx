@@ -220,6 +220,7 @@ the server couldn't be reached, 3 if a time limit ran out. For `run`, the comman
 | `ctx open window at ~/code/site` | …starting in that folder. |
 | `ctx open tab` | A new tab in the current window (window 1 when headless; the Agents window for agents). |
 | `ctx open tab in window 2 at ~/code/site named "Dev server"` | Any combination of which window, which folder and a name. To start something in it, use `ctx run … without waiting`. |
+| `ctx open tab like "Dev server"` | A copy of that tab, beside it: its folder, exported variables (as of its last prompt) and command history, in a new shell, so nothing it's running. Named `Dev server 2` (then `3`…) unless `named` says otherwise; `at` and `in window` still apply. Unexported variables, functions and aliases live only in the old shell and aren't copied. Copying needs permission to drive that tab, since its variables come along. The new tab's first line says what it copies. |
 | `ctx close "Dev server"` | Close that tab. Asks first if something is running. |
 | `ctx close window 2` | Close a window and all its tabs. Same rule. |
 | `ctx close "Dev server" without asking` | Don't ask. |
@@ -584,6 +585,12 @@ Instructions *ask* an agent to use ctx; the deeper step is to make ctx **the** s
 agents can't fall back to a throwaway shell. Each agent has its own extension mechanism:
 
 - **Claude Code:** a plugin with a `PreToolUse` hook on `Bash` that rewrites commands into `ctx run`.
+  The session tab never blocks the agent: a background call (`run_in_background`) runs in its own
+  copy of the session tab, named for the command (`Claude 4db0312f - npm run dev`, reused when idle,
+  so restarting a server lands in the same tab), and a call that finds the session tab busy (a
+  command that outlived its wait, a prompt) runs in the first idle `Claude 4db0312f 2`, `3`…, or a
+  new copy. Copies carry the session's folder and exported variables. The other agents' hooks and
+  `ctx mcp` route the same way.
   To make ctx the only shell instead, `permissions.deny: ["Bash"]` removes the Bash tool from
   Claude's context entirely and `ctx mcp` supplies `shell` (a hook that denies calls is pointless
   when the tool can be removed).
@@ -643,7 +650,7 @@ Because tabs persist and have names, they're shared resources:
 
 With `[agents.<name>]` in config.toml, sharing becomes explicit. Each agent is a principal; a tab belongs to whoever opened it (recorded in the tab's log, so it survives reopening). An agent sees and drives its own tabs, plus those of the principals in its `see_tabs_of` / `drive_tabs_of`; you see and drive everything. Requests that act on tabs an agent can't see are answered as if those tabs don't exist; commands it can see but not drive are refused with the reason. CTX.app's requests count only when they come from you.
 
-Identity comes from the strongest evidence available: the process's account (`account`), its Seatbelt sandbox (checked against a per-agent marker file only that agent's profile can read), a launcher in its ancestry (`launcher`), an agent program in an agent's folder (`folders`, `default_agent`), then the tab it runs in. `CTX_AGENT_NAME` is a claim, honoured only when it names a configured agent and never to become you. An unsandboxed agent running as you can still lie by double-forking out of its ancestry; the sandbox and accounts are what make identity hold.
+Identity comes from the strongest evidence available: the process's account (`account`), its Seatbelt sandbox (checked against a per-agent marker file only that agent's profile can read), a launcher in its ancestry (`launcher`), an agent program in an agent's folder (`folders`, `default_agent`), then the tab it runs in. `CTX_AGENT_NAME` is a claim, honoured only when it names a configured agent and never to become you. An unsandboxed agent running as you can still lie by double-forking out of its ancestry; the sandbox and accounts are what make identity hold. A server that itself runs inside a sandbox (started from an agent's tab, as when an agent runs ctx's tests) treats a client in that same sandbox like an unsandboxed one, since every tab it opens inherits that sandbox anyway; macOS can't nest sandboxes, so two processes whose sandbox started at the same ancestor share one. Such a server can't open tabs for sandboxed agents, and says so.
 
 Enforcement: the sandbox profile (`ctx-protocol/src/agents.rs`) is applied by `ctx-launch --sandbox` before an agent tab's shell starts, or by the `ctx shim` an agent program's name runs in your tabs. It fails closed: a profile that can't be applied means nothing starts. Agents with accounts start through `ctx-helper` (root, launchd), which checks its own root-owned rules, `getpeereid` of the caller, and, for root, an Authorization from an administrator, then drops to the account irreversibly, applies the sandbox and execs. The README's "Agents: who may reach what" has the config.
 

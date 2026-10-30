@@ -274,6 +274,11 @@ pub fn render(o: &Output, st: &Style) -> Printed {
             } else {
                 p.line(format!("Opened {tab} in window {} at {}.", o.window, st.folder(&o.folder)));
             }
+            if let Some(from) = o.like {
+                p.line(format!(
+                    "Copied from tab {from}: folder, exported variables and history. Not copied: unexported variables, functions, aliases, and what tab {from} is running."
+                ));
+            }
             if !o.not_restored.is_empty() {
                 p.line(format!("Not restored (dont_save_env): {}.", o.not_restored.join(", ")));
             }

@@ -27,14 +27,14 @@ _ctx_report_env() {
     done
     if (( _ctx_first )); then
         kind="full"
-        for k v in ${(kv)now}; do out+="S"$'\x1f'"$k"$'\x1f'"$v"$'\x1e'; done
+        for k v in "${(@kv)now}"; do out+="S"$'\x1f'"$k"$'\x1f'"$v"$'\x1e'; done
     else
-        for k v in ${(kv)now}; do
+        for k v in "${(@kv)now}"; do
             if [[ -z "${_ctx_env[$k]+X}" || "${_ctx_env[$k]}" != "$v" ]]; then
                 out+="S"$'\x1f'"$k"$'\x1f'"$v"$'\x1e'
             fi
         done
-        for k in ${(k)_ctx_env}; do
+        for k in "${(@k)_ctx_env}"; do
             [[ -z "${now[$k]+X}" ]] && out+="U"$'\x1f'"$k"$'\x1e'
         done
     fi
@@ -154,6 +154,11 @@ _ctx_deferred_init() {
         builtin fc -R "$CTX_REOPEN_HISTORY"
     fi
     builtin unset CTX_REOPEN_HISTORY
+    # A tab an agent opened: no pager waits for a person to press q (after .zshrc, which may set one).
+    if [[ -n "$CTX_NO_PAGER" ]]; then
+        builtin export PAGER=cat GIT_PAGER=cat MANPAGER=cat GH_PAGER=cat PSQL_PAGER=cat AWS_PAGER= SYSTEMD_PAGER=
+    fi
+    builtin unset CTX_NO_PAGER
     # A command that was running when the tab ended: pre-filled, not run.
     if [[ -n "$CTX_PREFILL" ]]; then
         builtin print -z -- "$CTX_PREFILL"

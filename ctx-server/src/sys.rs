@@ -607,6 +607,23 @@ pub fn ancestors(pid: i32) -> Vec<ProcInfo> {
     out
 }
 
+/// The process whose sandbox `pid` runs in: the furthest ancestor that is still sandboxed, as
+/// (pid, start time). `None` when `pid` isn't sandboxed. A sandboxed process can't take on
+/// another sandbox, so two processes with the same root share one sandbox.
+pub fn sandbox_root(pid: i32) -> Option<(i32, u64)> {
+    if !sandboxed(pid) {
+        return None;
+    }
+    let mut root = proc_info(pid)?;
+    for p in ancestors(root.ppid) {
+        if !sandboxed(p.pid) {
+            break;
+        }
+        root = p;
+    }
+    Some((root.pid, root.start_us))
+}
+
 /// Resident memory of a process, less what it shares with others (file-backed pages).
 #[cfg(target_os = "linux")]
 pub fn memory_footprint(pid: i32) -> u64 {

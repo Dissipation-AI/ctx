@@ -314,7 +314,11 @@ fn parse_value(kind: Kind, tokens: &[Token], ctx: &Context, p: &Phrase) -> Resul
     let first = tokens.first().ok_or_else(|| missing(p))?;
     match kind {
         Kind::Flag => Ok((Value::Flag, 0, String::new())),
-        Kind::Tab => parse_tab(tokens).map(|(t, n)| (Value::Tab(t.clone()), n, show_tab(&t))).ok_or_else(|| missing(p)),
+        Kind::Tab => parse_tab(tokens)
+            // In `open like "Dev server" tab`, the trailing `tab` is what's opened.
+            .map(|(t, n)| if p.id == P::Like && matches!(t, TabRef::Name(_)) { (t, 1) } else { (t, n) })
+            .map(|(t, n)| (Value::Tab(t.clone()), n, show_tab(&t)))
+            .ok_or_else(|| missing(p)),
         Kind::Window => {
             parse_window(tokens).map(|(w, n)| (Value::Window(w.clone()), n, show_window(&w))).ok_or_else(|| missing(p))
         }
@@ -913,6 +917,7 @@ fn to_command(parts: &Parts) -> Result<Command, ParseError> {
                         P::In,
                         "A new window isn't in another window. To add a tab to a window: ctx open tab in window 2",
                     )?;
+                    not_with(P::Like, "`like` copies a tab: ctx open tab like \"Dev server\"")?;
                     Command::Server(Request::OpenWindow { folder, name })
                 }
                 _ => {
@@ -920,7 +925,11 @@ fn to_command(parts: &Parts) -> Result<Command, ParseError> {
                         Some((Value::Window(w), _)) => Some(w.clone()),
                         _ => None,
                     };
-                    Command::Server(Request::OpenTab { window, folder, name, agent: None })
+                    let like = match parts.phrases.get(&P::Like) {
+                        Some((Value::Tab(t), _)) => Some(t.clone()),
+                        _ => None,
+                    };
+                    Command::Server(Request::OpenTab { window, folder, name, agent: None, like })
                 }
             }
         }
@@ -1419,7 +1428,22 @@ mod tests {
                 folder: Some("/Users/c/code/site".into()),
                 name: Some("Dev server".into()),
                 agent: None,
+                like: None,
             }
+        );
+        assert_eq!(
+            req(r#"open tab like "Claude 4db0312f" named "Claude 4db0312f 2""#),
+            Request::OpenTab {
+                window: None,
+                folder: None,
+                name: Some("Claude 4db0312f 2".into()),
+                agent: None,
+                like: Some(TabRef::Name("Claude 4db0312f".into())),
+            }
+        );
+        assert_eq!(
+            req("open tab like tab 7"),
+            Request::OpenTab { window: None, folder: None, name: None, agent: None, like: Some(TabRef::Number(7)) }
         );
         assert_eq!(
             req(r#"read last 3 commands in "Dev server""#),

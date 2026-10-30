@@ -151,6 +151,8 @@ struct SavedState {
 pub struct Server {
     paths: Paths,
     config: Config,
+    /// The sandbox the server itself runs in (see `sys::sandbox_root`); every tab inherits it.
+    own_sandbox: Option<(i32, u64)>,
     config_mtime: Option<std::time::SystemTime>,
     poller: sys::Poller,
     listener: UnixListener,
@@ -280,6 +282,7 @@ impl Server {
         let launch_path = exe.parent().map(|d| d.join("ctx-launch")).unwrap_or_else(|| PathBuf::from("ctx-launch"));
 
         let mut server = Server {
+            own_sandbox: sys::sandbox_root(std::process::id() as i32),
             config_mtime: std::fs::metadata(&paths.config).and_then(|m| m.modified()).ok(),
             paths,
             config,
@@ -1027,6 +1030,7 @@ impl Server {
             | Request::Show { tab }
             | Request::Attach { tab, .. }
             | Request::Records { tab } => tab,
+            Request::OpenTab { like: Some(tab), .. } => tab,
             Request::Reopen { tab } | Request::Forget { tab, .. } => return Some(*tab),
             Request::Input { tab, .. } => return Some(*tab),
             _ => return None,
@@ -1060,7 +1064,9 @@ impl Server {
         if uid != sys::uid() {
             return self.agent_for_uid(uid);
         }
-        if sys::sandboxed(pid) {
+        // A process in the server's own sandbox is no more limited than the tabs the server opens
+        // (a server started from inside an agent's sandbox, as when an agent runs ctx's tests).
+        if sys::sandboxed(pid) && (self.own_sandbox.is_none() || sys::sandbox_root(pid) != self.own_sandbox) {
             let markers = agents::real(&agents::markers(&self.paths.runtime));
             return Some(
                 self.config
@@ -1148,6 +1154,8 @@ impl Server {
                 | Request::Attach { .. }
                 | Request::Reopen { .. }
                 | Request::Forget { .. }
+                // A copy carries the tab's exported variables.
+                | Request::OpenTab { like: Some(_), .. }
         );
         if drives
             && let Some(n) = target
@@ -1337,7 +1345,9 @@ impl Server {
             Request::Find { text, filter, limit } => self.find(key, &text, filter, limit),
             Request::Status => ok(Output::Status(self.status())),
             Request::OpenWindow { folder, name } => self.open_window(key, folder, name),
-            Request::OpenTab { window, folder, name, agent } => self.open_tab(key, window, folder, name, agent),
+            Request::OpenTab { window, folder, name, agent, like } => {
+                self.open_tab(key, window, folder, name, agent, like)
+            }
             Request::CloseTab { tab, without_asking } => self.close_tab(key, &tab, without_asking),
             Request::CloseWindow { window, without_asking } => self.close_window(&window, without_asking),
             Request::RenameTab { tab, to } => self.rename_tab(key, &tab, &to),
@@ -1737,7 +1747,13 @@ impl Server {
         folder: Option<String>,
         name: Option<String>,
         agent: Option<String>,
+        like: Option<TabRef>,
     ) -> Handled {
+        let source = match like.as_ref().map(|t| self.resolve(key, t)) {
+            Some(Ok(n)) => Some(n),
+            Some(Err(e)) => return Handled::Reply(Response::Error(e)),
+            None => None,
+        };
         // A tab for a named agent: you may open one for any agent, an agent only for itself.
         if let Some(a) = &agent {
             if !self.config.agents.contains_key(a) {
@@ -1755,7 +1771,7 @@ impl Server {
                 Ok(n) => Some(n),
                 Err(e) => return Handled::Reply(Response::Error(e)),
             },
-            None => None,
+            None => source.and_then(|n| self.copy_name(n)),
         };
         let w = match &window {
             Some(WindowRef::New) => self.new_window(None),
@@ -1763,8 +1779,12 @@ impl Server {
                 Ok(w) => w,
                 Err(e) => return Handled::Reply(Response::Error(e)),
             },
-            None => self.default_window(key),
+            None => match source.and_then(|n| self.tabs.get(&n)) {
+                Some(t) => t.window,
+                None => self.default_window(key),
+            },
         };
+        let folder = folder.or_else(|| source.and_then(|n| self.tabs.get(&n)).map(|t| t.folder.clone()));
         let folder = folder.unwrap_or_else(|| {
             if let Some(t) = self.client_tab(key).and_then(|t| self.tabs.get(&t)) {
                 return t.folder.clone();
@@ -1778,6 +1798,12 @@ impl Server {
         });
         let by = self.clients.get(&key).map(|c| c.identity.ran_by()).unwrap_or_else(|| "you".into());
         let owner = agent.or_else(|| self.principal(key).map(str::to_string));
+        if let Some(src) = source {
+            return match self.copy_tab(src, w, &folder, name, &by, owner) {
+                Ok(o) => self.when_ready(key, o),
+                Err(e) => Handled::Reply(Response::Error(e)),
+            };
+        }
         match self.spawn_tab(None, w, &folder, name, &by, owner, None) {
             Ok(o) => self.when_ready(key, o),
             Err(e) => {
@@ -1785,6 +1811,88 @@ impl Server {
                 Handled::Reply(Response::Error(e))
             }
         }
+    }
+
+    /// Write a record's commands as zsh history for tab `n` to load, returning the file's path
+    /// (`None` when there were no commands).
+    fn write_history(&self, n: u64, h: &History) -> Option<String> {
+        let mut hist = String::new();
+        for c in &h.commands {
+            if !c.text.is_empty() {
+                hist.push_str(&format!(": {}:0;{}\n", c.started_ms / 1000, c.text.replace('\n', "\\\n")));
+            }
+        }
+        if hist.is_empty() {
+            return None;
+        }
+        let path = self.paths.tab_history(n);
+        let _ = std::fs::write(&path, hist);
+        set_mode(&path, 0o600);
+        Some(path.display().to_string())
+    }
+
+    /// The first free `<name> 2`, `<name> 3`… for a copy of tab `n`, or `None` when it has no name.
+    fn copy_name(&self, n: u64) -> Option<String> {
+        let base = self.tabs.get(&n)?.name.clone()?;
+        let taken = |c: &str| self.tabs.values().any(|t| t.name.as_deref().is_some_and(|x| x.eq_ignore_ascii_case(c)));
+        // `Src 2` copied again is `Src 3`, not `Src 2 2`, while `Src` is open (`Claude 12345678` is
+        // its own name, not a copy of `Claude`).
+        let stem = match base.rsplit_once(' ') {
+            Some((stem, k)) if k.parse::<u32>().is_ok() && taken(stem) => stem.to_string(),
+            _ => base,
+        };
+        (2..).map(|k| format!("{stem} {k}")).find(|c| check_name(c).is_ok() && !taken(c))
+    }
+
+    /// Open a copy of tab `src` beside it: its folder, exported variables (as of its last prompt)
+    /// and command history, but a new shell, so nothing it's running.
+    fn copy_tab(
+        &mut self,
+        src: u64,
+        window: u64,
+        folder: &str,
+        name: Option<String>,
+        by: &str,
+        owner: Option<String>,
+    ) -> Result<Opened, ErrorReply> {
+        let failed = |m: String| ErrorReply::new(ErrorKind::Failed, m);
+        let Some(t) = self.tabs.get_mut(&src) else {
+            return Err(ErrorReply::new(ErrorKind::NoSuchTab, format!("There is no tab {src}.")));
+        };
+        let _ = t.log.flush();
+        let (live_env, hidden_env, reported) = (t.env.clone(), t.hidden_env.clone(), t.env_reported);
+        let (from_name, columns, rows) = (t.name.clone(), t.columns, t.rows);
+        let h = History::load(&self.paths.tab_log(src), self.tz)
+            .map_err(|e| failed(format!("couldn't read tab {src}'s record: {e}")))?;
+        let number = self.index.next_number("tab").map_err(|e| failed(format!("couldn't number the new tab: {e}")))?;
+        let history_file = self.write_history(number, &h);
+        let r = Reopening {
+            env: if reported { live_env } else { h.env.clone() },
+            hidden_env,
+            transcript: Vec::new(),
+            reason: None,
+            last_active_ms: 0,
+            history_file,
+            prefill: None,
+            next_command: 1,
+            opened_by: by.to_string(),
+            owner,
+            opened_ms: now_ms(),
+            columns,
+            rows,
+            copied_from: Some((src, from_name)),
+        };
+        let mut o = self.spawn_tab(Some(number), window, folder, name, by, None, Some(r))?;
+        // Beside the tab it copies, when they share a window.
+        if let Some(w) = self.windows.iter_mut().find(|w| w.number == window)
+            && let Some(i) = w.tabs.iter().position(|&x| x == src)
+        {
+            w.tabs.retain(|&x| x != number);
+            w.tabs.insert(i + 1, number);
+            self.broadcast_tabs();
+        }
+        o.like = Some(src);
+        Ok(o)
     }
 
     /// Start a tab's shell, under its owner's profile when an agent owns it. `reopen` carries
@@ -1830,6 +1938,11 @@ impl Server {
             eprintln!("ctx server: couldn't write the shell integration files: {e}");
         }
         let mut env = self.shell_env(number, window, is_zsh);
+        // A tab an agent opens has no one to page through output, so its shell turns pagers off.
+        let opener = reopen.as_ref().map(|r| r.opened_by.as_str()).unwrap_or(opened_by);
+        if opener != "you" {
+            env.push(("CTX_NO_PAGER".into(), "1".into()));
+        }
         let mut not_restored = Vec::new();
         if let Some(r) = &reopen {
             for (k, v) in &r.env {
@@ -1865,6 +1978,11 @@ impl Server {
                     "This tab belongs to the agent \"{o}\", and config.toml has no [agents.{o}], so it can't start without that agent's limits."
                 )));
             };
+            if agent.sandbox && self.own_sandbox.is_some() {
+                return Err(failed(format!(
+                    "The ctx server runs inside a sandbox, and macOS can't start a sandbox inside one, so it can't open tabs for the agent \"{o}\". Run the server outside any sandbox."
+                )));
+            }
             let sandbox = match agent.sandbox {
                 true => Some(
                     self.write_sandbox(o, number)
@@ -2029,11 +2147,14 @@ impl Server {
             last_active_ms: now,
             commands: 0,
         });
-        if reopen.is_some() {
+        if reopen.as_ref().is_some_and(|r| r.copied_from.is_none()) {
             let _ = self.index.set_reopened(number, now, window);
         }
         let (n, tz) = self.cx();
         let event = match &reopen {
+            Some(Reopening { copied_from: Some((from, from_name)), .. }) => {
+                Event::Copied { by: tab.opened_by.clone(), from: *from, from_name: from_name.clone() }
+            }
             Some(r) => Event::Reopened { reason: r.reason.clone(), last_active_ms: r.last_active_ms },
             None => Event::Opened { by: tab.opened_by.clone() },
         };
@@ -2048,7 +2169,16 @@ impl Server {
             w.tabs.push(number);
         }
         self.broadcast_tabs();
-        Ok(Opened { tab: Some(number), window, new_window: false, window_name: None, name, folder, not_restored })
+        Ok(Opened {
+            tab: Some(number),
+            window,
+            new_window: false,
+            window_name: None,
+            name,
+            folder,
+            not_restored,
+            like: None,
+        })
     }
 
     /// The way in for agent accounts, which can't reach anything of yours: a socket anyone may
@@ -2483,20 +2613,7 @@ impl Server {
             .clone()
             .filter(|nm| !self.tabs.values().any(|t| t.name.as_deref().is_some_and(|o| o.eq_ignore_ascii_case(nm))));
         // The tab's own commands become its up-arrow history.
-        let hist_path = self.paths.tab_history(n);
-        let mut hist = String::new();
-        for c in &h.commands {
-            if !c.text.is_empty() {
-                hist.push_str(&format!(": {}:0;{}\n", c.started_ms / 1000, c.text.replace('\n', "\\\n")));
-            }
-        }
-        let history_file = if hist.is_empty() {
-            None
-        } else {
-            let _ = std::fs::write(&hist_path, hist);
-            set_mode(&hist_path, 0o600);
-            Some(hist_path.display().to_string())
-        };
+        let history_file = self.write_history(n, &h);
         let prefill = h
             .unfinished
             .and_then(|u| h.command(u))
@@ -2530,6 +2647,7 @@ impl Server {
             opened_ms: h.opened_ms,
             columns: h.columns,
             rows: h.rows,
+            copied_from: None,
         };
         self.spawn_tab(Some(n), window, &h.folder, name, by, None, Some(r))
     }
@@ -3673,7 +3791,9 @@ impl Server {
                         }
                     }
                     WaitKind::Idle => {
-                        if !fx.finished.is_empty() && t.running.is_empty() {
+                        // Idle once the prompt is back: a wait that starts after the command
+                        // ended but before the prompt arrived has no command left to see finish.
+                        if (fx.prompt || !fx.finished.is_empty()) && !t.busy() {
                             fire = true;
                         }
                     }
@@ -3950,6 +4070,8 @@ struct Reopening {
     opened_ms: i64,
     columns: u16,
     rows: u16,
+    /// Set for a copy (`open tab like`): the tab copied and its name.
+    copied_from: Option<(u64, Option<String>)>,
 }
 
 /// Variables that belong to the old process and aren't restored.

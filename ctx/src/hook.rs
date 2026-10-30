@@ -56,11 +56,13 @@ pub fn is_ctx_sentence(command: &str) -> bool {
     !single && !double
 }
 
-/// The session's tab, opened in `folder` if there isn't one: its name and folder, or `None` if ctx
-/// isn't reachable (the caller then leaves the command alone). The tab is the agent's own: when a
-/// tab of that name belongs to someone else (the session started before the agent was configured,
-/// or was resumed), the agent's is named `<tab> <agent>`.
-fn session_tab_folder(tab: &str, folder: Option<String>) -> Option<(String, String)> {
+/// The tab a call runs in, and its folder, or `None` if ctx isn't reachable (the caller then leaves
+/// the command alone). That is the session's tab, opened in `folder` if there isn't one, unless it's
+/// busy or the call runs in the background (`background` is then its command): those go to an idle
+/// copy of the session tab, or a new one beside it, so the session tab never blocks the agent.
+/// The tab is the agent's own: when a tab of that name belongs to someone else (the session started
+/// before the agent was configured, or was resumed), the agent's is named `<tab> <agent>`.
+fn session_tab_folder(tab: &str, folder: Option<String>, background: Option<&str>) -> Option<(String, String)> {
     let mut conn = Connection::open(ClientKind::Hook).ok()?;
     let list = match conn.request(&Envelope { sentence: "ctx list tabs".into(), request: Request::ListTabs }) {
         Ok(Response::Ok(Output::Tabs(list))) => list,
@@ -79,17 +81,104 @@ fn session_tab_folder(tab: &str, folder: Option<String>) -> Option<(String, Stri
         .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '-' })
         .collect();
     let own = format!("{tab} {who}");
-    for name in [tab, own.as_str()] {
-        if let Some(t) = named(name).into_iter().find(mine) {
-            return Some((name.to_string(), t.folder.clone()));
-        }
-    }
-    let name = if named(tab).is_empty() { tab.to_string() } else { own };
-    let opened = conn.request(&Envelope {
-        sentence: format!("ctx open tab named \"{name}\""),
-        request: Request::OpenTab { window: None, folder: folder.clone(), name: Some(name.clone()), agent: None },
+    let session = [tab, own.as_str()].into_iter().find_map(|name| {
+        named(name).into_iter().find(mine).map(|t| (name.to_string(), t.folder.clone(), t.state == "idle", t))
     });
-    matches!(opened, Ok(Response::Ok(_))).then(|| (name, folder.unwrap_or_default()))
+    // A command that just ended leaves the tab busy until the shell's next prompt arrives; a call
+    // made in that moment waits for the prompt rather than going to a copy without the tab's state.
+    let session = session.map(|(name, folder, idle, t)| {
+        let between = t.state == "busy" && t.running.is_none();
+        let idle = idle
+            || between
+                && matches!(
+                    conn.request(&Envelope {
+                        sentence: format!("ctx wait until \"{name}\" is idle within 2 seconds"),
+                        request: Request::Wait {
+                            tab: TabRef::Name(name.clone()),
+                            until: WaitCondition::Idle,
+                            within_ms: 2000
+                        },
+                    }),
+                    Ok(Response::Ok(_))
+                );
+        (name, folder, idle)
+    });
+    let (session, session_folder, idle) = match session {
+        Some(s) => s,
+        None => {
+            let name = if named(tab).is_empty() { tab.to_string() } else { own };
+            let opened = conn.request(&Envelope {
+                sentence: format!("ctx open tab named \"{name}\""),
+                request: Request::OpenTab {
+                    window: None,
+                    folder: folder.clone(),
+                    name: Some(name.clone()),
+                    agent: None,
+                    like: None,
+                },
+            });
+            if !matches!(opened, Ok(Response::Ok(_))) {
+                return None;
+            }
+            (name, folder.unwrap_or_default(), true)
+        }
+    };
+    if idle && background.is_none() {
+        return Some((session, session_folder));
+    }
+    let base = match background {
+        Some(command) => format!("{session} - {}", background_label(command)),
+        None => session.clone(),
+    };
+    // `<base>` (background calls only), then `<base> 2`, `<base> 3`…: the first that is ours and idle, or
+    // the first free name, opened as a copy of the session tab.
+    let first = if background.is_some() { 1 } else { 2 };
+    for k in first..first + 50 {
+        let name = if k == 1 { base.clone() } else { format!("{base} {k}") };
+        match named(&name).first() {
+            Some(t) if mine(t) && t.state == "idle" => return Some((name, t.folder.clone())),
+            Some(_) => continue,
+            None => {}
+        }
+        let opened = conn.request(&Envelope {
+            sentence: format!("ctx open tab like \"{session}\" named \"{name}\""),
+            request: Request::OpenTab {
+                window: None,
+                folder: None,
+                name: Some(name.clone()),
+                agent: None,
+                like: Some(TabRef::Name(session.clone())),
+            },
+        });
+        return match opened {
+            Ok(Response::Ok(Output::Opened(o))) => Some((name, o.folder)),
+            _ => None,
+        };
+    }
+    None
+}
+
+/// A tab-name-safe label for a background command: its first words, up to about 30 characters
+/// (`npm run dev`, `sleep 1800 gh run watch`).
+fn background_label(command: &str) -> String {
+    let cleaned: String = command
+        .lines()
+        .next()
+        .unwrap_or("")
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { ' ' })
+        .collect();
+    let mut label = String::new();
+    for word in cleaned.split_whitespace() {
+        if !label.is_empty() && label.len() + 1 + word.len() > 30 {
+            break;
+        }
+        if !label.is_empty() {
+            label.push(' ');
+        }
+        label.push_str(&word.chars().take(30).collect::<String>());
+    }
+    if label.chars().any(char::is_alphabetic) { label } else { "background".into() }
 }
 
 /// The rewritten Bash input, or `None` to leave the call alone.
@@ -130,7 +219,14 @@ pub fn claude() -> Out {
         return out;
     }
     let folder = input.get("cwd").and_then(Value::as_str).map(str::to_string);
-    let Some((tab, _)) = session_tab_folder(&tab_name(session), folder) else { return out };
+    let tool_input = &input["tool_input"];
+    let background = tool_input
+        .get("run_in_background")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        .then(|| str_at(tool_input, "command"))
+        .flatten();
+    let Some((tab, _)) = session_tab_folder(&tab_name(session), folder, background) else { return out };
     let Some(updated) = rewrite(&input, &tab) else { return out };
     out.line(json!({"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": updated}}).to_string());
     out
@@ -174,7 +270,9 @@ fn route(prefix: &str, call: &ShellCall) -> Option<String> {
     if command.is_empty() || is_ctx_sentence(command) {
         return None;
     }
-    let (tab, folder) = session_tab_folder(&session_tab(prefix, call.session), call.cwd.map(str::to_string))?;
+    let background = call.background.then_some(command);
+    let (tab, folder) =
+        session_tab_folder(&session_tab(prefix, call.session), call.cwd.map(str::to_string), background)?;
     Some(sentence(&tab, &folder, &ShellCall { command, ..*call }))
 }
 
@@ -205,7 +303,7 @@ pub fn mcp(call: &ctx_mcp::Call, session: &str, folder: &str) -> Out {
         }
     } else {
         let Some((tab, _)) =
-            session_tab_folder(&session_tab(&client_prefix(call.client), session), Some(folder.to_string()))
+            session_tab_folder(&session_tab(&client_prefix(call.client), session), Some(folder.to_string()), None)
         else {
             let mut out = Out::default();
             out.err("ctx's server isn't reachable, so the command didn't run.");
@@ -395,7 +493,11 @@ pub fn antigravity() -> Out {
         .or_else(|| input.get("workspacePaths").and_then(|w| w.get(0)))
         .and_then(Value::as_str)
         .map(str::to_string);
-    let overwrite = session_tab_folder(&tab, folder).and_then(|(tab, f)| rewrite_antigravity(&input, &tab, &f));
+    let args = &input["toolCall"]["args"];
+    let background =
+        (args.get("Blocking").and_then(Value::as_bool) == Some(false)).then(|| antigravity_command(&input)).flatten();
+    let overwrite =
+        session_tab_folder(&tab, folder, background).and_then(|(tab, f)| rewrite_antigravity(&input, &tab, &f));
     match overwrite {
         Some(overwrite) => out.line(json!({ "decision": ASK, "overwrite": overwrite }).to_string()),
         None => out.line(json!({ "decision": ASK }).to_string()),
@@ -406,6 +508,15 @@ pub fn antigravity() -> Out {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn background_tabs_are_named_for_their_command() {
+        assert_eq!(background_label("npm run dev"), "npm run dev");
+        assert_eq!(background_label("sleep 1800 && gh run watch 123 --exit-status"), "sleep 1800 gh run watch 123");
+        assert_eq!(background_label("cd /w/site && python3 -m http.server 8000"), "cd w site python3 -m http");
+        assert_eq!(background_label("./a.out\necho done"), "a out");
+        assert_eq!(background_label("123 456"), "background");
+    }
 
     #[test]
     fn rewrites_into_ctx_run() {
