@@ -96,7 +96,8 @@ pub fn run(args: &[String]) -> Out {
             let covered = config.agents.get(&agent_name).is_some_and(|a| {
                 a.folders.iter().any(|f| agents::real(&folder).starts_with(agents::real(&agents::expand(f, &home))))
             });
-            let why = if covered { String::new() } else { format!(" (default_agent: no agent's folders include {shown})") };
+            let why =
+                if covered { String::new() } else { format!(" (default_agent: no agent's folders include {shown})") };
             out.err(format!(
                 "ctx: {name} here runs as the agent \"{agent_name}\"{why}, and its sandbox can't read this folder ({e}), so {name} didn't start. In config.toml, give {shown} an agent of its own, or add it to \"{agent_name}\"'s folders and write list."
             ));
