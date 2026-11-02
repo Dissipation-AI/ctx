@@ -59,6 +59,22 @@ fn base64(data: &[u8]) -> String {
 }
 /// Raw frame a client sends after a version mismatch to ask for a restart (never changes).
 pub const RESTART_MAGIC: &[u8] = b"ctx: restart the server";
+/// What to do about a server of another version with `busy` tabs: `ctx restart server` (from a
+/// ctx of any version since this one) restarts it, after asking.
+pub fn restart_advice(busy: &[u64]) -> String {
+    let tabs: Vec<String> = busy.iter().map(|t| t.to_string()).collect();
+    let tabs = match tabs.len() {
+        1 => format!("tab {}", tabs[0]),
+        n => format!("tabs {} and {}", tabs[..n - 1].join(", "), tabs[n - 1]),
+    };
+    format!(
+        "Restart it to use the new version: `ctx restart server without asking`. That stops what's running in {tabs}; every open tab comes back afterwards."
+    )
+}
+
+/// Like [`RESTART_MAGIC`], but restarts even when tabs are busy (`ctx restart server without
+/// asking` from a ctx of another version). Their programs stop; the tabs come back.
+pub const RESTART_ANYWAY_MAGIC: &[u8] = b"ctx: restart the server, stopping what runs";
 
 #[derive(Debug, Clone)]
 pub struct Window {
@@ -752,9 +768,9 @@ impl Server {
         let has_hello = self.clients.get(&key).is_some_and(|c| c.hello.is_some());
         let mismatched = self.clients.get(&key).is_some_and(|c| c.mismatched);
         if mismatched {
-            if frame == RESTART_MAGIC {
+            if frame == RESTART_MAGIC || frame == RESTART_ANYWAY_MAGIC {
                 let busy: Vec<u64> = self.tabs.values().filter(|t| t.busy()).map(|t| t.number).collect();
-                if busy.is_empty() {
+                if busy.is_empty() || frame == RESTART_ANYWAY_MAGIC {
                     self.restart = true;
                     self.quit = true;
                 }
@@ -778,9 +794,9 @@ impl Server {
                     hello.client_version,
                     hello.protocol,
                     if busy.is_empty() {
-                        "Restarting the server picks up the new version."
+                        "Restarting the server picks up the new version.".to_string()
                     } else {
-                        "Restart the server to use the new version: ctx restart server"
+                        restart_advice(&busy)
                     }
                 );
                 self.send(

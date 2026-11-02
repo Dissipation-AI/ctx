@@ -71,7 +71,7 @@ impl Connection {
                 read_message(&mut stream).map_err(|e| NoServer(format!("The ctx server didn't answer: {e}")))?;
             match welcome {
                 Some(Welcome::Accepted { .. }) => return Ok(Connection { stream }),
-                Some(Welcome::VersionMismatch { message, busy_tabs, .. }) => {
+                Some(Welcome::VersionMismatch { busy_tabs, server_protocol, .. }) => {
                     if busy_tabs.is_empty() && !restarted {
                         // Nothing is running: restart the server to pick up the new version.
                         use std::io::Write;
@@ -83,7 +83,7 @@ impl Connection {
                         wait_for_restart(&socket);
                         continue;
                     }
-                    return Err(NoServer(message));
+                    return Err(NoServer(mismatch_message(server_protocol, &busy_tabs)));
                 }
                 None => return Err(NoServer("The ctx server closed the connection.".into())),
             }
@@ -282,6 +282,68 @@ fn start_server(paths: &Paths) -> Result<(), NoServer> {
             }
         }
     }
+}
+
+/// The running server speaks another protocol and has busy tabs, so it didn't restart by itself.
+/// Written here rather than taken from the server, whose advice may predate what works.
+fn mismatch_message(server_protocol: u32, busy: &[u64]) -> String {
+    format!(
+        "The running ctx server speaks protocol {server_protocol}, and this ctx speaks {PROTOCOL_VERSION}. {}",
+        ctx_server::server::restart_advice(busy)
+    )
+}
+
+/// `ctx restart server` when the running server is another version, so it can't take the request:
+/// None when it's this version (or none runs). Restarts it with the request every version since
+/// this one knows, else through launchd. Asks first (an error) when tabs are busy.
+pub fn restart_mismatched(without_asking: bool) -> Option<Result<String, String>> {
+    let socket = paths().client_socket();
+    let mut stream = UnixStream::connect(&socket).ok()?;
+    write_message(&mut stream, &hello(ClientKind::Cli)).ok()?;
+    let Ok(Some(Welcome::VersionMismatch { server_protocol, busy_tabs, .. })) = read_message::<Welcome>(&mut stream)
+    else {
+        return None;
+    };
+    if !busy_tabs.is_empty() && !without_asking {
+        return Some(Err(mismatch_message(server_protocol, &busy_tabs)));
+    }
+    use std::io::Write;
+    let magic = ctx_server::server::RESTART_ANYWAY_MAGIC;
+    let mut frame = (magic.len() as u32).to_le_bytes().to_vec();
+    frame.extend_from_slice(magic);
+    let _ = stream.write_all(&frame);
+    drop(stream);
+    let restarted = || {
+        UnixStream::connect(&socket).is_ok_and(|mut s| {
+            write_message(&mut s, &hello(ClientKind::Cli)).is_ok()
+                && matches!(read_message::<Welcome>(&mut s), Ok(Some(Welcome::Accepted { .. })))
+        })
+    };
+    wait_for_restart(&socket);
+    if restarted() {
+        return Some(Ok(format!("Restarted the server (protocol {server_protocol} → {PROTOCOL_VERSION}).")));
+    }
+    // A server from before RESTART_ANYWAY_MAGIC: launchd stops and starts it. Its tabs end
+    // (CTX.app offers to reopen them).
+    if cfg!(target_os = "macos") && !Paths::is_custom() {
+        let job = format!("gui/{}/{LABEL}", ctx_server::sys::uid());
+        let k = std::process::Command::new("/bin/launchctl").args(["kickstart", "-k", &job]).output();
+        if let Ok(o) = &k
+            && !o.status.success()
+        {
+            return Some(Err(format!(
+                "launchd couldn't restart the ctx server: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            )));
+        }
+        wait_for_restart(&socket);
+        if restarted() {
+            return Some(Ok(format!(
+                "Restarted the server (protocol {server_protocol} → {PROTOCOL_VERSION}). It was too old to keep its tabs open; CTX.app offers to reopen them."
+            )));
+        }
+    }
+    Some(Err(format!("The ctx server didn't restart. {}", log_hint(&paths()))))
 }
 
 /// After `ctx restart server`: wait until the new server answers.
