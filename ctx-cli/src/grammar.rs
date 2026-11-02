@@ -542,8 +542,8 @@ pub const VERBS: &[Verb] = &[
     Verb {
         name: "install",
         group: Group::Agents,
-        summary: "Route an agent's shell tool through ctx tabs (hooks), or write ctx's instruction block.",
-        object: Object::Noun(&["hooks", "instructions"]),
+        summary: "Route an agent's shell tool through ctx tabs (hooks), add ctx's skills, or write ctx's instruction block.",
+        object: Object::Noun(&["hooks", "skills", "instructions"]),
         order: &[
             O,
             Ph(ph(P::For, &["for"], Kind::Agent, "which agent")),
@@ -564,6 +564,10 @@ pub const VERBS: &[Verb] = &[
                 "Also cursor, pi and opencode, each through its own plugin registry (Cursor: its hooks.json).",
             ),
             ("ctx install hooks for claude at ~/code/site", "Only for that project (Claude's local scope)."),
+            (
+                "ctx install skills for claude",
+                "Installs ctx's skills (using ctx, interactive programs in tabs). Any hook agent; `at <folder>` for one project.",
+            ),
             ("ctx install instructions for claude", "Writes to ~/.claude/CLAUDE.md, between ctx's markers."),
             ("ctx install instructions for codex", "Writes to ~/.codex/AGENTS.md."),
             ("ctx install instructions for gemini", "Writes to ~/.gemini/GEMINI.md."),
@@ -577,8 +581,8 @@ pub const VERBS: &[Verb] = &[
     Verb {
         name: "remove",
         group: Group::Agents,
-        summary: "Remove ctx's hooks or instruction block, or delete a launcher.",
-        object: Object::Noun(&["hooks", "instructions", "launcher"]),
+        summary: "Remove ctx's hooks, skills or instruction block, or delete a launcher.",
+        object: Object::Noun(&["hooks", "skills", "instructions", "launcher"]),
         order: &[
             O,
             Ph(ph(P::For, &["for"], Kind::Agent, "which agent")),
@@ -587,6 +591,7 @@ pub const VERBS: &[Verb] = &[
         ],
         examples: &[
             ("ctx remove hooks for antigravity", "Uninstall ctx's plugin; the agent's shell is its own again."),
+            ("ctx remove skills for cursor", "Remove ctx's skills; the hook, if any, stays."),
             ("ctx remove instructions for claude", "Remove the block; nothing outside ctx's markers is touched."),
             (
                 "ctx remove launcher \"sysadmin\"",
@@ -698,6 +703,7 @@ pub const AFTER_FILLER: &[&str] = &[
     "launchers",
     "instructions",
     "hooks",
+    "skills",
     "screen",
     "output",
 ];

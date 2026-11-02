@@ -1,5 +1,16 @@
 {
   "name": "ctx",
-  "interface": { "displayName": "ctx" },
-  "plugins": [{ "name": "ctx", "source": "./codex" }]
+  "interface": {
+    "displayName": "ctx"
+  },
+  "plugins": [
+    {
+      "name": "ctx",
+      "source": "./codex"
+    },
+    {
+      "name": "ctx-skills",
+      "source": "./ctx-skills"
+    }
+  ]
 }

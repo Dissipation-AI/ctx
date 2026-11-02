@@ -9,25 +9,19 @@ They don't need the Bash hook; they help with or without it.
 
 ## Install
 
-`ctx install hooks for claude` and `ctx install hooks for antigravity` (also with `at <folder>`) install these skills along with ctx's hook. To install only the skills:
+With ctx installed, `ctx install skills for <agent>` (claude, antigravity, codex, cursor, pi or opencode; add `at <folder>` for one project) installs them through the agent's plugin registry, or copies them into its skills folder where it has none; `ctx remove skills for <agent>` undoes it. `ctx install hooks for <agent>` offers them when run in a terminal. The table in [ctx's README](../../README.md#skills-teaching-agents-to-use-ctx) lists where each one goes.
 
-Claude Code:
+This folder is a plugin for several agents at once: `.claude-plugin/plugin.json` (Claude Code), `plugin.json` (Antigravity; a project's `.agents/plugins.json` loads only native plugins), `.codex-plugin/plugin.json` (Codex, listed in `../.agents/plugins/marketplace.json`) and `package.json` (a pi package).
+
+Without ctx, in Claude Code:
 
 ```sh
 claude plugin install ctx-skills --marketplace Dissipation-AI/ctx
 ```
 
-The skills show up as `ctx-skills:using-ctx` and `ctx-skills:interactive-programs`, and load on their own when a task calls for them. `claude plugin update ctx-skills@ctx` picks up new versions.
+The skills show up as `ctx-skills:using-ctx` and `ctx-skills:interactive-programs`. `claude plugin update ctx-skills@ctx` picks up new versions. Other agents that read `SKILL.md` folders can copy `skills/using-ctx` and `skills/interactive-programs` into their skills folder.
 
-Antigravity: `agy plugin install <this folder>`. `plugin.json` makes it a native Antigravity plugin, so a project's `.agents/plugins.json` can also list it.
-
-Other agents that read `SKILL.md` folders (Codex, Cursor, Gemini CLI, opencode and others) can use the [skills CLI](https://github.com/vercel-labs/skills), which finds every `SKILL.md` in the repository:
-
-```sh
-bunx skills add Dissipation-AI/ctx
-```
-
-or copy `skills/using-ctx` and `skills/interactive-programs` into the agent's skills folder.
+Checked on 2026-11-02 by installing into a throwaway home: Claude Code (`claude plugin list`), Antigravity (`agy plugin list`, and a project's plugins.json), Codex 0.142.2 (`codex debug prompt-input` lists both skills, as a plugin and from a project's `.agents/skills`) and opencode (`opencode debug skill`, user and project folders). Cursor's folders and pi's package format are from their docs ([Cursor](https://cursor.com/docs/skills), [pi](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/packages.md)) and not yet run.
 
 ## Auto mode
 
