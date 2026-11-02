@@ -154,9 +154,11 @@ _ctx_deferred_init() {
         builtin fc -R "$CTX_REOPEN_HISTORY"
     fi
     builtin unset CTX_REOPEN_HISTORY
-    # A tab an agent opened: no pager waits for a person to press q (after .zshrc, which may set one).
+    # A tab an agent opened: no pager waits for a person to press q, and no history expansion, so a
+    # command runs as it would in the agent's own shell (after .zshrc, which may set either).
     if [[ -n "$CTX_NO_PAGER" ]]; then
         builtin export PAGER=cat GIT_PAGER=cat MANPAGER=cat GH_PAGER=cat PSQL_PAGER=cat AWS_PAGER= SYSTEMD_PAGER=
+        builtin setopt no_bang_hist
     fi
     builtin unset CTX_NO_PAGER
     # A command that was running when the tab ended: pre-filled, not run.

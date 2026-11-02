@@ -26,11 +26,13 @@ fn fail(msg: &str) -> ! {
     std::process::exit(127);
 }
 
+#[cfg(target_os = "macos")]
 unsafe extern "C" {
     fn sandbox_init(profile: *const libc::c_char, flags: u64, errorbuf: *mut *mut libc::c_char) -> libc::c_int;
 }
 
 /// Apply a Seatbelt profile (its text) to this process and everything it starts.
+#[cfg(target_os = "macos")]
 fn apply_sandbox(file: &OsStr) {
     let text = std::fs::read(file).unwrap_or_else(|e| fail(&format!("couldn't read the agent's sandbox: {e}")));
     let profile = CString::new(text).unwrap_or_else(|_| fail("the agent's sandbox has a NUL byte"));
@@ -46,6 +48,12 @@ fn apply_sandbox(file: &OsStr) {
         };
         fail(&format!("couldn't apply the agent's sandbox, so the shell didn't start: {msg}"));
     }
+}
+
+/// The agent sandbox is Seatbelt, so on other systems a sandboxed tab doesn't start.
+#[cfg(not(target_os = "macos"))]
+fn apply_sandbox(_file: &OsStr) {
+    fail("the agent's sandbox is macOS only, so the shell didn't start");
 }
 
 fn main() {
