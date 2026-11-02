@@ -263,9 +263,14 @@ fn execute(s: Sentence, caller: Caller) -> Out {
                 Err(client::NoServer(m)) => no_server(&m, format),
             }
         }
-        Command::Restart { without_asking } => {
-            server_request(s.canonical, Request::Restart { without_asking }, format, caller)
-        }
+        Command::Restart { without_asking } => match client::restart_mismatched(without_asking) {
+            Some(Ok(m)) => {
+                out.line(m);
+                out.code(0)
+            }
+            Some(Err(m)) => no_server(&m, format),
+            None => server_request(s.canonical, Request::Restart { without_asking }, format, caller),
+        },
         Command::InstallInstructions { agent, folder } => instructions::install(&agent, folder.as_deref(), format),
         Command::RemoveInstructions { agent, folder } => instructions::remove(&agent, folder.as_deref(), format),
         Command::InstallHooks { agent, folder } => integrations::install(&agent, folder.as_deref(), format),
