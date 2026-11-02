@@ -1,0 +1,17 @@
+{
+  "name": "ctx",
+  "owner": { "name": "Dissipation AI" },
+  "description": "ctx: persistent, auditable terminal tabs for coding agents.",
+  "plugins": [
+    {
+      "name": "ctx",
+      "source": "./integrations/claude",
+      "description": "Run Claude Code's shell commands in persistent, named ctx tabs that a person can watch, search and reopen."
+    },
+    {
+      "name": "ctx-skills",
+      "source": "./integrations/ctx-skills",
+      "description": "Skills for agents working in ctx: getting around ctx tabs, and driving REPLs, debuggers, ssh, adb and database shells in persistent terminals."
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "name": "ctx-skills",
+  "version": "0.1.0",
+  "description": "Skills for agents working in ctx: getting around ctx tabs, and driving REPLs, debuggers, ssh, adb and database shells in persistent terminals.",
+  "author": { "name": "Dissipation AI" },
+  "repository": "https://github.com/Dissipation-AI/ctx",
+  "license": "Apache-2.0"
+}

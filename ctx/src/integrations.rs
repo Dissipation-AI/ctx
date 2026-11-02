@@ -25,6 +25,18 @@ const FILES: &[(&str, &str)] = files![
     ".claude-plugin/marketplace.json",
     "claude/.claude-plugin/plugin.json",
     "claude/hooks/hooks.json",
+    "ctx-skills/.claude-plugin/plugin.json",
+    "ctx-skills/skills/using-ctx/SKILL.md",
+    "ctx-skills/skills/using-ctx/reference/troubleshooting.md",
+    "ctx-skills/skills/using-ctx/reference/auto-mode.md",
+    "ctx-skills/skills/using-ctx/reference/layout-and-records.md",
+    "ctx-skills/skills/interactive-programs/SKILL.md",
+    "ctx-skills/skills/interactive-programs/reference/python.md",
+    "ctx-skills/skills/interactive-programs/reference/native-debuggers.md",
+    "ctx-skills/skills/interactive-programs/reference/ssh.md",
+    "ctx-skills/skills/interactive-programs/reference/adb.md",
+    "ctx-skills/skills/interactive-programs/reference/databases-and-repls.md",
+    "ctx-skills/skills/interactive-programs/reference/tabs-and-jobs.md",
     "antigravity/plugin.json",
     "antigravity/hooks.json",
     ".agents/plugins/marketplace.json",
@@ -368,6 +380,24 @@ mod tests {
 
     fn staged_json(rel: &str) -> Value {
         serde_json::from_str(&staged(rel)).unwrap()
+    }
+
+    #[test]
+    fn every_skill_file_is_staged() {
+        // The staged marketplace lists ctx-skills, so a file left out of FILES would be missing there.
+        let root = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../integrations"));
+        let mut dirs = vec![root.join("ctx-skills")];
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else if path.file_name() != Some("README.md".as_ref()) {
+                    let rel = path.strip_prefix(root).unwrap().to_string_lossy().into_owned();
+                    assert!(FILES.iter().any(|(r, _)| *r == rel), "{rel} isn't in FILES");
+                }
+            }
+        }
     }
 
     #[test]

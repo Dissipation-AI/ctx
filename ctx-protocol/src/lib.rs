@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 
 /// Bumped whenever a message changes shape. Client and server must match exactly.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 /// Version of the `as json` / `as toon` schema. Printed as `"schema": 1`.
 pub const SCHEMA_VERSION: u32 = 1;
 /// Largest message either side accepts (a whole `read everything` of a big tab fits).
@@ -257,6 +257,8 @@ pub enum Request {
         name: Option<String>,
         /// The agent the tab is for (`None`: the asker's own). Only you, or that agent, may ask.
         agent: Option<String>,
+        /// A tab to copy: its folder, exported variables and command history, not what it's running.
+        like: Option<TabRef>,
     },
     CloseTab {
         tab: TabRef,
@@ -723,8 +725,10 @@ pub struct Opened {
     pub window_name: Option<String>,
     pub name: Option<String>,
     pub folder: String,
-    /// Environment variables that were not restored (`reopen`).
+    /// Environment variables that were not restored (`reopen`) or copied (`like`).
     pub not_restored: Vec<String>,
+    /// The tab this one copies (`open tab like`).
+    pub like: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -1127,6 +1131,7 @@ mod tests {
                 folder: None,
                 name: Some("x".into()),
                 agent: None,
+                like: Some(TabRef::Name("Dev server".into())),
             },
             Request::CloseTab { tab: tab.clone(), without_asking: true },
             Request::CloseWindow { window: WindowRef::Number(2), without_asking: false },

@@ -94,6 +94,7 @@ pub enum P {
     Position,
     AllowingAnyArguments,
     SignedBy,
+    Like,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -321,6 +322,7 @@ pub const VERBS: &[Verb] = &[
             Ph(ph(P::In, &["in"], Kind::Window, "which window (tabs only)")),
             Ph(ph(P::At, &["at"], Kind::Folder, "starting folder")),
             Ph(ph(P::Named, &["named"], Kind::Name, "a name for the new tab or window")),
+            Ph(ph(P::Like, &["like"], Kind::Tab, "copy that tab's folder, exported variables and history (tabs only)")),
             Ph(AS),
         ],
         examples: &[
@@ -330,6 +332,10 @@ pub const VERBS: &[Verb] = &[
             (
                 "ctx open tab in window 2 at ~/code/site named \"Dev server\"",
                 "Any combination of window, folder and name. Prints the new tab's number.",
+            ),
+            (
+                "ctx open tab like \"Dev server\"",
+                "A copy beside it: same folder, exported variables and history, without what it's running.",
             ),
         ],
         hidden: false,

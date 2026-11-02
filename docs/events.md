@@ -9,6 +9,7 @@ record as events (never as text, so a program can't fake one). The set is fixed:
 | Event | Line | JSON |
 |---|---|---|
 | A tab was opened (by you or an agent). | `[opened 2026-10-10 17:52 by claude (pid 5512)]` | `{"event":"opened","at":"2026-10-10T17:52:01Z","by":"claude (pid 5512)"}` |
+| A tab was opened as a copy of another (`open tab like`). | `[opened 2026-10-10 17:52 by claude (pid 5512) like tab 41 "Claude 4db0312f": same folder, exported variables and history]` | `{"event":"copied","at":"2026-10-10T17:52:01Z","by":"claude (pid 5512)","from":41,"from_name":"Claude 4db0312f"}` |
 | A closed tab came back after a reboot. | `[reopened 2026-10-10 17:52 after reboot · last active 2026-10-10 16:52]` | `{"event":"reopened","at":"2026-10-10T17:52:01Z","reason":"reboot","last_active":"2026-10-10T16:52:01Z"}` |
 | A closed tab was reopened. | `[reopened 2026-10-10 17:52 · last active 2026-10-10 16:52]` | `{"event":"reopened","at":"2026-10-10T17:52:01Z","reason":null,"last_active":"2026-10-10T16:52:01Z"}` |
 | Open tabs came back after the server restarted. | `[reopened 2026-10-10 17:52 after server restart]` | `{"event":"reopened","at":"2026-10-10T17:52:01Z","reason":"server restart","last_active":"2026-10-10T17:52:01Z"}` |

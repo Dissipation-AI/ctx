@@ -213,7 +213,7 @@ pub fn examples() -> Vec<(&'static str, &'static str, Output)> {
         ),
         (
             "ctx open tab named \"Dev server\"",
-            "A new tab (or window, with `new_window`). `not_restored` lists variables kept out by `dont_save_env` when reopening.",
+            "A new tab (or window, with `new_window`). `like` is the tab it copies (`open tab like`). `not_restored` lists variables kept out by `dont_save_env` when reopening or copying.",
             Output::Opened(Opened {
                 tab: Some(43),
                 window: 2,
@@ -222,6 +222,7 @@ pub fn examples() -> Vec<(&'static str, &'static str, Output)> {
                 name: Some("Dev server".into()),
                 folder: "/Users/c/code/site".into(),
                 not_restored: vec![],
+                like: None,
             }),
         ),
         ("ctx close \"Dev server\"", "Done, in a sentence.", Output::Done(Done { message: "Closed tab 43.".into() })),
