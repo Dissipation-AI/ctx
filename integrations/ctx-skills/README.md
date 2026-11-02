@@ -9,6 +9,8 @@ They don't need the Bash hook; they help with or without it.
 
 ## Install
 
+`ctx install hooks for claude` and `ctx install hooks for antigravity` (also with `at <folder>`) install these skills along with ctx's hook. To install only the skills:
+
 Claude Code:
 
 ```sh
@@ -17,7 +19,7 @@ claude plugin install ctx-skills --marketplace Dissipation-AI/ctx
 
 The skills show up as `ctx-skills:using-ctx` and `ctx-skills:interactive-programs`, and load on their own when a task calls for them. `claude plugin update ctx-skills@ctx` picks up new versions.
 
-If you installed ctx's hook with `ctx install hooks for claude`, you already have a marketplace named `ctx` (ctx's own copy of `integrations/`). With a ctx that includes these skills, `claude plugin install ctx-skills@ctx` installs them from it.
+Antigravity: `agy plugin install <this folder>`. `plugin.json` makes it a native Antigravity plugin, so a project's `.agents/plugins.json` can also list it.
 
 Other agents that read `SKILL.md` folders (Codex, Cursor, Gemini CLI, opencode and others) can use the [skills CLI](https://github.com/vercel-labs/skills), which finds every `SKILL.md` in the repository:
 

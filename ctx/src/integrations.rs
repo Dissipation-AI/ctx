@@ -26,6 +26,7 @@ const FILES: &[(&str, &str)] = files![
     "claude/.claude-plugin/plugin.json",
     "claude/hooks/hooks.json",
     "ctx-skills/.claude-plugin/plugin.json",
+    "ctx-skills/plugin.json",
     "ctx-skills/skills/using-ctx/SKILL.md",
     "ctx-skills/skills/using-ctx/reference/troubleshooting.md",
     "ctx-skills/skills/using-ctx/reference/auto-mode.md",
@@ -127,7 +128,7 @@ fn plugins_json(existing: &str, staged: &Path, add: bool) -> Result<String, Stri
         .ok_or("its `entries` isn't a list")?;
     entries.retain(|e| e.get("path").and_then(Value::as_str) != Some(&path));
     if add {
-        entries.push(json!({"path": path, "include_only": ["antigravity"]}));
+        entries.push(json!({"path": path, "include_only": ["antigravity", "ctx-skills"]}));
     }
     Ok(serde_json::to_string_pretty(&config).unwrap_or_default() + "\n")
 }
@@ -232,17 +233,25 @@ fn install_hooks(agent: &str, folder: Option<&str>) -> Result<String, String> {
         ("claude", _) => {
             let scope = if folder.is_some() { "local" } else { "user" };
             run("claude", &["plugin", "install", "ctx", "--marketplace", &marketplace, "--scope", scope], folder)?;
-            Ok(format!("Installed ctx's Claude Code plugin {whom}. New sessions run Bash in ctx tabs."))
+            run(
+                "claude",
+                &["plugin", "install", "ctx-skills", "--marketplace", &marketplace, "--scope", scope],
+                folder,
+            )?;
+            Ok(format!(
+                "Installed ctx's Claude Code plugin and skills {whom}. New sessions run Bash in ctx tabs and load the skills when a task needs them."
+            ))
         }
         ("antigravity", None) => {
             run("agy", &["plugin", "install", &plugin("antigravity")], None)?;
-            Ok("Installed ctx's Antigravity plugin for you. New conversations run commands in ctx tabs.".into())
+            run("agy", &["plugin", "install", &plugin("ctx-skills")], None)?;
+            Ok("Installed ctx's Antigravity plugin and skills for you. New conversations run commands in ctx tabs and load the skills when a task needs them.".into())
         }
         ("antigravity", Some(f)) => {
             let path = Path::new(f).join(".agents/plugins.json");
             edit_json(&path, |e| plugins_json(e, &root, true))?;
             Ok(format!(
-                "Registered ctx's Antigravity plugin in {}. New conversations there run commands in ctx tabs.",
+                "Registered ctx's Antigravity plugin and skills in {}. New conversations there run commands in ctx tabs.",
                 path.display()
             ))
         }
@@ -292,16 +301,19 @@ fn remove_hooks(agent: &str, folder: Option<&str>) -> Result<String, String> {
         ("claude", _) => {
             let scope = if folder.is_some() { "local" } else { "user" };
             run("claude", &["plugin", "uninstall", "ctx@ctx", "--scope", scope], folder)?;
-            Ok("Removed ctx's Claude Code plugin. New sessions use Claude's own shell.".into())
+            // The skills may never have been installed (hooks from an older ctx); that's fine.
+            let _ = run("claude", &["plugin", "uninstall", "ctx-skills@ctx", "--scope", scope], folder);
+            Ok("Removed ctx's Claude Code plugin and skills. New sessions use Claude's own shell.".into())
         }
         ("antigravity", None) => {
             run("agy", &["plugin", "uninstall", "ctx"], None)?;
-            Ok("Removed ctx's Antigravity plugin. New conversations use Antigravity's own shell.".into())
+            let _ = run("agy", &["plugin", "uninstall", "ctx-skills"], None);
+            Ok("Removed ctx's Antigravity plugin and skills. New conversations use Antigravity's own shell.".into())
         }
         ("antigravity", Some(f)) => {
             let path = Path::new(f).join(".agents/plugins.json");
             edit_json(&path, |e| plugins_json(e, &root, false))?;
-            Ok(format!("Removed ctx's Antigravity plugin from {}.", path.display()))
+            Ok(format!("Removed ctx's Antigravity plugin and skills from {}.", path.display()))
         }
         ("codex", None) => {
             run("codex", &["plugin", "remove", "ctx@ctx"], None)?;
@@ -423,7 +435,10 @@ mod tests {
         let added = plugins_json(theirs, staged, true).unwrap();
         assert_eq!(added, plugins_json(&added, staged, true).unwrap());
         let v: Value = serde_json::from_str(&added).unwrap();
-        assert_eq!(v["entries"][1], json!({"path": "/data/integrations", "include_only": ["antigravity"]}));
+        assert_eq!(
+            v["entries"][1],
+            json!({"path": "/data/integrations", "include_only": ["antigravity", "ctx-skills"]})
+        );
         let removed: Value = serde_json::from_str(&plugins_json(&added, staged, false).unwrap()).unwrap();
         assert_eq!(removed, serde_json::from_str::<Value>(theirs).unwrap());
         assert!(plugins_json("[]", staged, true).is_err());
