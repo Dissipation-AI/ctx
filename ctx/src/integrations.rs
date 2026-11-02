@@ -12,6 +12,7 @@ use crate::client;
 use crate::exec::{Out, message};
 use ctx_cli::parse::Format;
 use serde_json::{Value, json};
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -27,6 +28,8 @@ const FILES: &[(&str, &str)] = files![
     "claude/hooks/hooks.json",
     "ctx-skills/.claude-plugin/plugin.json",
     "ctx-skills/plugin.json",
+    "ctx-skills/.codex-plugin/plugin.json",
+    "ctx-skills/package.json",
     "ctx-skills/skills/using-ctx/SKILL.md",
     "ctx-skills/skills/using-ctx/reference/troubleshooting.md",
     "ctx-skills/skills/using-ctx/reference/auto-mode.md",
@@ -118,17 +121,29 @@ fn parse_object(existing: &str) -> Result<Value, String> {
     if v.is_object() { Ok(v) } else { Err("it isn't a JSON object".into()) }
 }
 
-/// A project's `.agents/plugins.json` with (or without) the entry for ctx's Antigravity plugin.
-fn plugins_json(existing: &str, staged: &Path, add: bool) -> Result<String, String> {
+/// A project's `.agents/plugins.json` with `plugin` (one of the staged plugins: `antigravity`, the
+/// hook, or `ctx-skills`) added to or removed from ctx's entry, which goes once it lists none.
+fn plugins_json(existing: &str, staged: &Path, plugin: &str, add: bool) -> Result<String, String> {
     let mut config = parse_object(existing)?;
     let path = staged.to_string_lossy();
     let entries = config
         .as_object_mut()
         .and_then(|o| o.entry("entries").or_insert_with(|| json!([])).as_array_mut())
         .ok_or("its `entries` isn't a list")?;
-    entries.retain(|e| e.get("path").and_then(Value::as_str) != Some(&path));
+    let ours = |e: &Value| e.get("path").and_then(Value::as_str) == Some(&path);
+    let mut names: Vec<String> = entries
+        .iter()
+        .filter(|e| ours(e))
+        .flat_map(|e| e["include_only"].as_array().into_iter().flatten())
+        .filter_map(|n| n.as_str().filter(|n| *n != plugin).map(String::from))
+        .collect();
+    entries.retain(|e| !ours(e));
     if add {
-        entries.push(json!({"path": path, "include_only": ["antigravity", "ctx-skills"]}));
+        names.push(plugin.into());
+    }
+    names.dedup();
+    if !names.is_empty() {
+        entries.push(json!({"path": path, "include_only": names}));
     }
     Ok(serde_json::to_string_pretty(&config).unwrap_or_default() + "\n")
 }
@@ -191,15 +206,17 @@ fn hooks_file(agent: &str, folder: Option<&str>) -> PathBuf {
     }
 }
 
+/// opencode's own config folder, `~/.config/opencode`.
+fn opencode_dir() -> PathBuf {
+    let config = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".config"));
+    config.join("opencode")
+}
+
 /// opencode's config files, for you (`~/.config/opencode`) or a project.
 fn opencode_configs(folder: Option<&str>) -> Vec<PathBuf> {
     let dirs = match folder {
         Some(f) => vec![PathBuf::from(f), PathBuf::from(f).join(".opencode")],
-        None => {
-            let config =
-                std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".config"));
-            vec![config.join("opencode")]
-        }
+        None => vec![opencode_dir()],
     };
     dirs.iter()
         .flat_map(|d| ["opencode.json", "opencode.jsonc", "config.json"].map(|f| d.join(f)))
@@ -233,35 +250,22 @@ fn install_hooks(agent: &str, folder: Option<&str>) -> Result<String, String> {
         ("claude", _) => {
             let scope = if folder.is_some() { "local" } else { "user" };
             run("claude", &["plugin", "install", "ctx", "--marketplace", &marketplace, "--scope", scope], folder)?;
-            run(
-                "claude",
-                &["plugin", "install", "ctx-skills", "--marketplace", &marketplace, "--scope", scope],
-                folder,
-            )?;
-            Ok(format!(
-                "Installed ctx's Claude Code plugin and skills {whom}. New sessions run Bash in ctx tabs and load the skills when a task needs them."
-            ))
+            Ok(format!("Installed ctx's Claude Code plugin {whom}. New sessions run Bash in ctx tabs."))
         }
         ("antigravity", None) => {
             run("agy", &["plugin", "install", &plugin("antigravity")], None)?;
-            run("agy", &["plugin", "install", &plugin("ctx-skills")], None)?;
-            Ok("Installed ctx's Antigravity plugin and skills for you. New conversations run commands in ctx tabs and load the skills when a task needs them.".into())
+            Ok("Installed ctx's Antigravity plugin for you. New conversations run commands in ctx tabs.".into())
         }
         ("antigravity", Some(f)) => {
             let path = Path::new(f).join(".agents/plugins.json");
-            edit_json(&path, |e| plugins_json(e, &root, true))?;
+            edit_json(&path, |e| plugins_json(e, &root, "antigravity", true))?;
             Ok(format!(
-                "Registered ctx's Antigravity plugin and skills in {}. New conversations there run commands in ctx tabs.",
+                "Registered ctx's Antigravity plugin in {}. New conversations there run commands in ctx tabs.",
                 path.display()
             ))
         }
         ("codex", None) => {
-            // Adding a marketplace that's already there fails; installing from it is what matters.
-            let added = run("codex", &["plugin", "marketplace", "add", &marketplace], None);
-            run("codex", &["plugin", "add", "ctx@ctx"], None).map_err(|e| match added {
-                Err(a) => format!("{a}\n{e}"),
-                Ok(_) => e,
-            })?;
+            codex_add(&marketplace, "ctx@ctx")?;
             Ok("Installed ctx's Codex plugin for you. Trust its hook once with /hooks; then new sessions run shell commands in ctx tabs.".into())
         }
         ("codex" | "cursor", _) => {
@@ -301,19 +305,16 @@ fn remove_hooks(agent: &str, folder: Option<&str>) -> Result<String, String> {
         ("claude", _) => {
             let scope = if folder.is_some() { "local" } else { "user" };
             run("claude", &["plugin", "uninstall", "ctx@ctx", "--scope", scope], folder)?;
-            // The skills may never have been installed (hooks from an older ctx); that's fine.
-            let _ = run("claude", &["plugin", "uninstall", "ctx-skills@ctx", "--scope", scope], folder);
-            Ok("Removed ctx's Claude Code plugin and skills. New sessions use Claude's own shell.".into())
+            Ok("Removed ctx's Claude Code plugin. New sessions use Claude's own shell.".into())
         }
         ("antigravity", None) => {
             run("agy", &["plugin", "uninstall", "ctx"], None)?;
-            let _ = run("agy", &["plugin", "uninstall", "ctx-skills"], None);
-            Ok("Removed ctx's Antigravity plugin and skills. New conversations use Antigravity's own shell.".into())
+            Ok("Removed ctx's Antigravity plugin. New conversations use Antigravity's own shell.".into())
         }
         ("antigravity", Some(f)) => {
             let path = Path::new(f).join(".agents/plugins.json");
-            edit_json(&path, |e| plugins_json(e, &root, false))?;
-            Ok(format!("Removed ctx's Antigravity plugin and skills from {}.", path.display()))
+            edit_json(&path, |e| plugins_json(e, &root, "antigravity", false))?;
+            Ok(format!("Removed ctx's Antigravity plugin from {}.", path.display()))
         }
         ("codex", None) => {
             run("codex", &["plugin", "remove", "ctx@ctx"], None)?;
@@ -359,12 +360,225 @@ fn remove_hooks(agent: &str, folder: Option<&str>) -> Result<String, String> {
     }
 }
 
+/// Add the staged marketplace to Codex and install `plugin` (`name@ctx`) from it.
+fn codex_add(marketplace: &str, plugin: &str) -> Result<String, String> {
+    // Adding a marketplace that's already there fails; installing from it is what matters.
+    let added = run("codex", &["plugin", "marketplace", "add", marketplace], None);
+    run("codex", &["plugin", "add", plugin], None).map_err(|e| match added {
+        Err(a) => format!("{a}\n{e}"),
+        Ok(_) => e,
+    })
+}
+
+/// ctx's skills: each folder under `ctx-skills/skills/`, with its files' paths inside it.
+fn skills() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
+    let mut out: Vec<(&str, Vec<(&str, &str)>)> = Vec::new();
+    for (rel, text) in FILES {
+        let Some((name, file)) = rel.strip_prefix("ctx-skills/skills/").and_then(|r| r.split_once('/')) else {
+            continue;
+        };
+        match out.iter_mut().find(|(n, _)| *n == name) {
+            Some((_, files)) => files.push((file, text)),
+            None => out.push((name, vec![(file, text)])),
+        }
+    }
+    out
+}
+
+/// Whether `dir` holds the skill `name` (its SKILL.md says so), so it's ours to replace or delete.
+fn is_skill(dir: &Path, name: &str) -> bool {
+    let text = std::fs::read_to_string(dir.join("SKILL.md")).unwrap_or_default();
+    let front = text.strip_prefix("---").and_then(|t| t.split("\n---").next()).unwrap_or_default();
+    front.lines().any(|l| l.strip_prefix("name:").is_some_and(|v| v.trim().trim_matches(['"', '\'']) == name))
+}
+
+/// Copy ctx's skills into an agent's skills folder, replacing earlier copies of them.
+fn copy_skills(dest: &Path) -> Result<(), String> {
+    for (name, files) in skills() {
+        let dir = dest.join(name);
+        if dir.exists() {
+            if !is_skill(&dir, name) {
+                return Err(format!("{} exists and isn't ctx's {name} skill, so ctx left it alone.", dir.display()));
+            }
+            std::fs::remove_dir_all(&dir).map_err(|e| format!("Couldn't replace {}: {e}", dir.display()))?;
+        }
+        for (file, text) in files {
+            let path = dir.join(file);
+            if let Some(d) = path.parent() {
+                std::fs::create_dir_all(d).map_err(|e| format!("Couldn't create {}: {e}", d.display()))?;
+            }
+            std::fs::write(&path, text).map_err(|e| format!("Couldn't write {}: {e}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Delete ctx's skills from an agent's skills folder, returning the folders deleted.
+fn delete_skills(dest: &Path) -> Result<Vec<String>, String> {
+    let mut deleted = Vec::new();
+    for (name, _) in skills() {
+        let dir = dest.join(name);
+        if is_skill(&dir, name) {
+            std::fs::remove_dir_all(&dir).map_err(|e| format!("Couldn't delete {}: {e}", dir.display()))?;
+            deleted.push(dir.display().to_string());
+        }
+    }
+    Ok(deleted)
+}
+
+/// The skills folder of an agent that reads `SKILL.md` folders but has no plugin registry for
+/// them (or, for Codex in a project, none that works per project).
+fn skills_dir(agent: &str, folder: Option<&str>) -> Option<PathBuf> {
+    match (agent, folder) {
+        ("codex", Some(f)) => Some(Path::new(f).join(".agents/skills")),
+        ("cursor", Some(f)) => Some(Path::new(f).join(".cursor/skills")),
+        ("cursor", None) => Some(home().join(".cursor/skills")),
+        ("opencode", Some(f)) => Some(Path::new(f).join(".opencode/skills")),
+        ("opencode", None) => Some(opencode_dir().join("skills")),
+        _ => None,
+    }
+}
+
+const SKILLS_LOAD: &str = "load them when a task needs them";
+
+fn install_skills(agent: &str, folder: Option<&str>) -> Result<String, String> {
+    let root = stage()?;
+    let marketplace = root.to_string_lossy().into_owned();
+    let plugin = root.join("ctx-skills").to_string_lossy().into_owned();
+    let whom = for_whom(folder);
+    if let Some(dir) = skills_dir(agent, folder) {
+        copy_skills(&dir)?;
+        return Ok(format!(
+            "Copied ctx's skills into {}. New sessions {SKILLS_LOAD}; run this again after updating ctx to refresh them.",
+            dir.display()
+        ));
+    }
+    match (agent, folder) {
+        ("claude", _) => {
+            let scope = if folder.is_some() { "local" } else { "user" };
+            run(
+                "claude",
+                &["plugin", "install", "ctx-skills", "--marketplace", &marketplace, "--scope", scope],
+                folder,
+            )?;
+        }
+        ("antigravity", None) => {
+            run("agy", &["plugin", "install", &plugin], None)?;
+        }
+        ("antigravity", Some(f)) => {
+            let path = Path::new(f).join(".agents/plugins.json");
+            edit_json(&path, |e| plugins_json(e, &root, "ctx-skills", true))?;
+            return Ok(format!(
+                "Registered ctx's skills in {}. New conversations there {SKILLS_LOAD}.",
+                path.display()
+            ));
+        }
+        ("codex", None) => {
+            codex_add(&marketplace, "ctx-skills@ctx")?;
+        }
+        ("pi", _) => {
+            let mut args = vec!["install", plugin.as_str()];
+            if folder.is_some() {
+                args.push("-l");
+            }
+            run("pi", &args, folder)?;
+        }
+        _ => return Err(format!("ctx has skills for {}, not {agent}.", AGENTS.join(", "))),
+    }
+    Ok(format!("Installed ctx's skills (ctx-skills) {whom}. New sessions {SKILLS_LOAD}."))
+}
+
+fn remove_skills(agent: &str, folder: Option<&str>) -> Result<String, String> {
+    let root = staged_root();
+    let plugin = root.join("ctx-skills").to_string_lossy().into_owned();
+    if let Some(dir) = skills_dir(agent, folder) {
+        let deleted = delete_skills(&dir)?;
+        if deleted.is_empty() {
+            return Ok(format!("{} has no ctx skills, so there's nothing to remove.", dir.display()));
+        }
+        return Ok(format!("Deleted {}.", deleted.join(" and ")));
+    }
+    match (agent, folder) {
+        ("claude", _) => {
+            let scope = if folder.is_some() { "local" } else { "user" };
+            run("claude", &["plugin", "uninstall", "ctx-skills@ctx", "--scope", scope], folder)?;
+        }
+        ("antigravity", None) => {
+            run("agy", &["plugin", "uninstall", "ctx-skills"], None)?;
+        }
+        ("antigravity", Some(f)) => {
+            let path = Path::new(f).join(".agents/plugins.json");
+            edit_json(&path, |e| plugins_json(e, &root, "ctx-skills", false))?;
+            return Ok(format!("Removed ctx's skills from {}.", path.display()));
+        }
+        ("codex", None) => {
+            run("codex", &["plugin", "remove", "ctx-skills@ctx"], None)?;
+        }
+        ("pi", _) => {
+            let mut args = vec!["remove", plugin.as_str()];
+            if folder.is_some() {
+                args.push("-l");
+            }
+            run("pi", &args, folder)?;
+        }
+        _ => return Err(format!("ctx has skills for {}, not {agent}.", AGENTS.join(", "))),
+    }
+    Ok("Removed ctx's skills (ctx-skills).".into())
+}
+
+/// The `ctx … skills for <agent> [at <folder>]` sentence, for messages.
+fn skills_sentence(verb: &str, agent: &str, folder: Option<&str>) -> String {
+    let at = match folder {
+        Some(f) if f.contains(|c: char| c.is_whitespace() || c == '"') => format!(" at {}", Value::String(f.into())),
+        Some(f) => format!(" at {f}"),
+        None => String::new(),
+    };
+    format!("ctx {verb} skills for {agent}{at}")
+}
+
+/// Install the hook, then offer ctx's skills: asked on a terminal (yes by default), and left to
+/// `ctx install skills` otherwise, so a script or agent installing the hook doesn't also change
+/// which skills the agent loads.
 pub fn install(agent: &str, folder: Option<&str>, format: Format) -> Out {
-    finish(install_hooks(agent, folder), format)
+    let hooked = match install_hooks(agent, folder) {
+        Ok(text) => text,
+        Err(e) => return finish(Err(e), format),
+    };
+    let interactive =
+        matches!(format, Format::Text) && std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+    if !interactive {
+        let hint = format!(
+            "ctx's skills (using ctx, and running interactive programs in tabs) are separate: `{}`.",
+            skills_sentence("install", agent, folder)
+        );
+        return finish(Ok(format!("{hooked}\n{hint}")), format);
+    }
+    println!("{hooked}");
+    eprint!(
+        "Also install ctx's skills for {agent}? They teach it to use ctx tabs and drive interactive programs (REPLs, debuggers, ssh, setup wizards) in them. [Y/n] "
+    );
+    let _ = std::io::stderr().flush();
+    let mut answer = String::new();
+    let _ = std::io::stdin().read_line(&mut answer);
+    if matches!(answer.trim().to_lowercase().as_str(), "n" | "no") {
+        return finish(
+            Ok(format!("Skipped the skills; `{}` adds them later.", skills_sentence("install", agent, folder))),
+            format,
+        );
+    }
+    finish(install_skills(agent, folder), format)
 }
 
 pub fn remove(agent: &str, folder: Option<&str>, format: Format) -> Out {
     finish(remove_hooks(agent, folder), format)
+}
+
+pub fn install_skills_for(agent: &str, folder: Option<&str>, format: Format) -> Out {
+    finish(install_skills(agent, folder), format)
+}
+
+pub fn remove_skills_for(agent: &str, folder: Option<&str>, format: Format) -> Out {
+    finish(remove_skills(agent, folder), format)
 }
 
 fn finish(result: Result<String, String>, format: Format) -> Out {
@@ -432,16 +646,50 @@ mod tests {
     fn plugins_json_entry_is_added_once_and_removed_without_touching_the_rest() {
         let staged = Path::new("/data/integrations");
         let theirs = r#"{"entries": [{"path": "tools/plugins"}], "inherits": []}"#;
-        let added = plugins_json(theirs, staged, true).unwrap();
-        assert_eq!(added, plugins_json(&added, staged, true).unwrap());
-        let v: Value = serde_json::from_str(&added).unwrap();
+        let added = plugins_json(theirs, staged, "antigravity", true).unwrap();
+        assert_eq!(added, plugins_json(&added, staged, "antigravity", true).unwrap());
+        let both = plugins_json(&added, staged, "ctx-skills", true).unwrap();
+        let v: Value = serde_json::from_str(&both).unwrap();
         assert_eq!(
             v["entries"][1],
             json!({"path": "/data/integrations", "include_only": ["antigravity", "ctx-skills"]})
         );
-        let removed: Value = serde_json::from_str(&plugins_json(&added, staged, false).unwrap()).unwrap();
-        assert_eq!(removed, serde_json::from_str::<Value>(theirs).unwrap());
-        assert!(plugins_json("[]", staged, true).is_err());
+        let skills: Value = serde_json::from_str(&plugins_json(&both, staged, "antigravity", false).unwrap()).unwrap();
+        assert_eq!(skills["entries"][1]["include_only"], json!(["ctx-skills"]));
+        let removed = plugins_json(&skills.to_string(), staged, "ctx-skills", false).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&removed).unwrap(), serde_json::from_str::<Value>(theirs).unwrap());
+        assert!(plugins_json("[]", staged, "antigravity", true).is_err());
+    }
+
+    #[test]
+    fn skills_are_copied_and_deleted_without_touching_others() {
+        let dest = std::env::temp_dir().join(format!("ctx-skills-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dest);
+        std::fs::create_dir_all(dest.join("theirs")).unwrap();
+        std::fs::write(dest.join("theirs/SKILL.md"), "---\nname: theirs\n---\n").unwrap();
+        copy_skills(&dest).unwrap();
+        copy_skills(&dest).unwrap();
+        let names: Vec<_> = skills().into_iter().map(|(n, _)| n).collect();
+        assert_eq!(names, ["using-ctx", "interactive-programs"]);
+        for name in &names {
+            assert!(is_skill(&dest.join(name), name));
+        }
+        assert!(dest.join("interactive-programs/reference/ssh.md").exists());
+        assert_eq!(delete_skills(&dest).unwrap().len(), 2);
+        assert!(delete_skills(&dest).unwrap().is_empty());
+        assert!(dest.join("theirs/SKILL.md").exists());
+        // A folder of the same name that isn't ours is left alone.
+        std::fs::create_dir_all(dest.join("using-ctx")).unwrap();
+        assert!(copy_skills(&dest).is_err());
+        assert!(delete_skills(&dest).unwrap().is_empty());
+        std::fs::remove_dir_all(&dest).unwrap();
+    }
+
+    #[test]
+    fn skills_sentence_quotes_folders_with_spaces() {
+        assert_eq!(skills_sentence("install", "pi", None), "ctx install skills for pi");
+        assert_eq!(skills_sentence("install", "pi", Some("~/a")), "ctx install skills for pi at ~/a");
+        assert_eq!(skills_sentence("remove", "pi", Some("/a b")), "ctx remove skills for pi at \"/a b\"");
     }
 
     #[test]

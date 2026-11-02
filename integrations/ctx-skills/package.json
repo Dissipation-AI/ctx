@@ -1,0 +1,7 @@
+{
+  "name": "ctx-skills",
+  "version": "0.1.0",
+  "description": "Skills for agents working in ctx: getting around ctx tabs, and running interactive programs (consoles, setup wizards, REPLs, debuggers, ssh, adb, database shells) in ctx tabs.",
+  "private": true,
+  "pi": { "skills": ["./skills"] }
+}

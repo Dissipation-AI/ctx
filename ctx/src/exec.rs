@@ -275,6 +275,8 @@ fn execute(s: Sentence, caller: Caller) -> Out {
         Command::RemoveInstructions { agent, folder } => instructions::remove(&agent, folder.as_deref(), format),
         Command::InstallHooks { agent, folder } => integrations::install(&agent, folder.as_deref(), format),
         Command::RemoveHooks { agent, folder } => integrations::remove(&agent, folder.as_deref(), format),
+        Command::InstallSkills { agent, folder } => integrations::install_skills_for(&agent, folder.as_deref(), format),
+        Command::RemoveSkills { agent, folder } => integrations::remove_skills_for(&agent, folder.as_deref(), format),
         Command::MakeLauncher { name, program, folder, any_arguments, signed_by } => {
             launchers::make(&name, &program, &folder, any_arguments, signed_by.as_deref(), format)
         }

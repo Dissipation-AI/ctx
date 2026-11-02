@@ -98,13 +98,26 @@ your approval as the check. Each `integrations/<agent>/README.md` has the detail
 
 `integrations/ctx-skills` holds two Agent Skills: `using-ctx` (getting around ctx, reading the messages that make an agent think its shell is broken, long jobs in their own tab, finding earlier work, arranging tabs for you) and `interactive-programs` (consoles and CLIs that need a terminal, setup wizards, REPLs, debuggers, ssh, adb and database shells, run in a tab and typed into). The agent loads them only when a task needs them.
 
-`ctx install hooks for claude` and `ctx install hooks for antigravity` install the skills along with the hook (`ctx remove hooks` removes both). To install only the skills in Claude Code:
+They install on their own, separately from the hook, so you choose whether ctx changes what your agent loads:
 
 ```sh
-claude plugin install ctx-skills --marketplace Dissipation-AI/ctx
+ctx install skills for claude                 # for you; or antigravity, codex, cursor, pi, opencode
+ctx install skills for cursor at ~/code/site  # for one project only
+ctx remove skills for claude                  # undo (also with `at`)
 ```
 
-Other agents: see [integrations/ctx-skills/README.md](integrations/ctx-skills/README.md).
+`ctx install hooks for …` asks whether to add the skills too (yes by default) when you run it in a terminal; from a script or an agent it installs only the hook and prints the `ctx install skills` sentence.
+
+| Agent | For you | `at <folder>` |
+|---|---|---|
+| Claude Code | `claude plugin install ctx-skills` (user scope) | Claude's local scope |
+| Antigravity | `agy plugin install` | the project's `.agents/plugins.json` |
+| Codex | `codex plugin add ctx-skills@ctx` | copied into the project's `.agents/skills` |
+| Cursor CLI | copied into `~/.cursor/skills` | copied into the project's `.cursor/skills` |
+| pi | `pi install` | `pi install -l` |
+| opencode | copied into `~/.config/opencode/skills` | copied into the project's `.opencode/skills` |
+
+Copies don't update with ctx; run `ctx install skills` again after updating. Without ctx installed, Claude Code can take them straight from GitHub: `claude plugin install ctx-skills --marketplace Dissipation-AI/ctx`. See [integrations/ctx-skills/README.md](integrations/ctx-skills/README.md).
 
 ### Agents without a hookable shell: `ctx mcp`
 

@@ -91,6 +91,15 @@ pub enum Command {
         agent: String,
         folder: Option<String>,
     },
+    /// Install ctx's skills (`ctx-skills`) for the agent: for you, or at a project.
+    InstallSkills {
+        agent: String,
+        folder: Option<String>,
+    },
+    RemoveSkills {
+        agent: String,
+        folder: Option<String>,
+    },
     MakeLauncher {
         name: String,
         program: String,
@@ -1019,27 +1028,31 @@ fn to_command(parts: &Parts) -> Result<Command, ParseError> {
         }
         "show" => Command::Server(Request::Show { tab: object_tab(parts) }),
         "attach" => Command::Attach { tab: tab_phrase(parts, P::To) },
-        "install" | "remove" if noun(parts) == "hooks" => {
+        "install" | "remove" if matches!(noun(parts), "hooks" | "skills") => {
+            let what = noun(parts);
             let agent = match parts.phrases.get(&P::For) {
                 Some((Value::Agent(a), _)) if HOOK_AGENTS.contains(&a.as_str()) => a.clone(),
                 Some((Value::Agent(a), _)) => {
                     return Err(ParseError::new(format!(
-                        "ctx has hooks for {}, not {a}. For {a}, `ctx {verb} instructions for {a}`.",
+                        "ctx has {what} for {}, not {a}. For {a}, `ctx {verb} instructions for {a}`.",
                         HOOK_AGENTS.join(", ")
                     )));
                 }
                 _ => {
+                    let what = if what == "hooks" { "Hooks" } else { "Skills" };
                     return Err(ParseError::new(format!(
-                        "Hooks for which agent? `ctx {verb} hooks for claude` (or {}).",
+                        "{what} for which agent? `ctx {verb} {} for claude` (or {}).",
+                        what.to_lowercase(),
                         HOOK_AGENTS[1..].join(", ")
                     )));
                 }
             };
             let folder = folder_phrase(parts);
-            if verb == "install" {
-                Command::InstallHooks { agent, folder }
-            } else {
-                Command::RemoveHooks { agent, folder }
+            match (verb, what) {
+                ("install", "hooks") => Command::InstallHooks { agent, folder },
+                ("remove", "hooks") => Command::RemoveHooks { agent, folder },
+                ("install", _) => Command::InstallSkills { agent, folder },
+                _ => Command::RemoveSkills { agent, folder },
             }
         }
         "install" | "remove" if noun(parts) == "instructions" || verb == "install" => {
@@ -1601,6 +1614,15 @@ mod tests {
         );
         assert!(err("install hooks for gemini").message.contains("claude, antigravity, codex"));
         assert!(err("install hooks").message.contains("which agent"));
+        assert_eq!(
+            p("install skills for cursor").command,
+            Command::InstallSkills { agent: "cursor".into(), folder: None }
+        );
+        assert_eq!(
+            p("remove skills for codex at ~/code/site").command,
+            Command::RemoveSkills { agent: "codex".into(), folder: Some("/Users/c/code/site".into()) }
+        );
+        assert!(err("install skills").message.contains("Skills for which agent? `ctx install skills for claude`"));
         assert_eq!(
             p(r#"make launcher named "sysadmin" for ~/.local/bin/claude at ~/Agents/sys-admin"#).command,
             Command::MakeLauncher {
