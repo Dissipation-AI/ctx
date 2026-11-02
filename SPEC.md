@@ -1062,6 +1062,7 @@ ssh_integration_skip = []          # host patterns, e.g. ["router", "*.prod"]
 # agents
 run_max_lines = 400                # run has no default time limit
 agent_window_name = "Agents"
+separate_agent_history = true      # agents' tabs keep their own shell history, out of your ↑
 
 # assist: suggest a fix for sentences that don't parse (uses bro if installed)
 assist = true

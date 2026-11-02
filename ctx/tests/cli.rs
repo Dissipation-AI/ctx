@@ -539,6 +539,23 @@ fn an_agents_hook_never_reuses_a_tab_it_cant_drive() {
     assert_eq!(s.ctx_with(&dev, &args, None).ok().stdout, "hi\n");
 }
 
+#[test]
+fn agents_commands_stay_out_of_your_shell_history() {
+    let s = Server::start("agent-history");
+    std::fs::write(s.home.join(".zshrc"), "HISTFILE=~/.hist\nHISTSIZE=100\nSAVEHIST=100\nsetopt share_history\n")
+        .unwrap();
+    let ctx = common::ctx_bin().display().to_string();
+    // The test is an agent; it opens a tab for you from inside its own.
+    s.ctx(&["open", "tab", "named", "Agent", "at", "/tmp"]).ok();
+    s.ctx(&["run", "in", "Agent", &format!("env -u CTX_AGENT_NAME '{ctx}' open tab named Yours at /tmp")]).ok();
+    s.ctx(&["run", "in", "Agent", "echo agent-ran-this"]).ok();
+    s.ctx(&["run", "in", "Yours", "echo you-ran-this"]).ok();
+    let yours = std::fs::read_to_string(s.home.join(".hist")).unwrap_or_default();
+    assert!(yours.contains("you-ran-this") && !yours.contains("agent-ran-this"), "{yours}");
+    let agents = std::fs::read_to_string(s.dir.join("data/agent-history.zsh")).unwrap_or_default();
+    assert!(agents.contains("agent-ran-this") && !agents.contains("you-ran-this"), "{agents}");
+}
+
 /// The helper, unprivileged: the only account it can become is this one, which is enough to see
 /// the whole path (rules, the attached terminal, the door, the sandbox) work.
 #[test]

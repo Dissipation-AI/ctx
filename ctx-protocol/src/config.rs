@@ -132,6 +132,9 @@ pub struct Config {
 
     pub run_max_lines: u32,
     pub agent_window_name: String,
+    /// Commands in tabs agents open go to a shell history file of their own, so they never turn
+    /// up when you press ↑ in your tabs.
+    pub separate_agent_history: bool,
 
     pub assist: bool,
     pub assist_command: String,
@@ -239,6 +242,7 @@ impl Default for Config {
             ssh_integration_skip: Vec::new(),
             run_max_lines: 400,
             agent_window_name: "Agents".into(),
+            separate_agent_history: true,
             assist: true,
             assist_command: "bro".into(),
             ask: AskConfig::default(),
@@ -350,6 +354,7 @@ ssh_integration = true
 ssh_integration_skip = []
 run_max_lines = 400
 agent_window_name = "Agents"
+separate_agent_history = true
 assist = true
 assist_command = "bro"
 

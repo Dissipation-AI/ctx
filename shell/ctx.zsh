@@ -149,6 +149,12 @@ _ctx_deferred_init() {
         add-zle-hook-widget line-pre-redraw _ctx_line_redraw
         add-zle-hook-widget line-finish _ctx_line_finish
     }
+    # A tab an agent opened: its commands go to a history list and file of their own, not into
+    # yours (shared live between tabs by `setopt share_history`).
+    if [[ -n "$CTX_AGENT_HISTORY" ]]; then
+        builtin fc -p "$CTX_AGENT_HISTORY"
+    fi
+    builtin unset CTX_AGENT_HISTORY
     # A reopened tab: its own commands come first on up-arrow.
     if [[ -n "$CTX_REOPEN_HISTORY" && -r "$CTX_REOPEN_HISTORY" ]]; then
         builtin fc -R "$CTX_REOPEN_HISTORY"

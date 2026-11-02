@@ -1942,6 +1942,12 @@ impl Server {
         let opener = reopen.as_ref().map(|r| r.opened_by.as_str()).unwrap_or(opened_by);
         if opener != "you" {
             env.push(("CTX_NO_PAGER".into(), "1".into()));
+            // ...and its commands go to a history file of their own, not into yours (where ↑ in
+            // your tabs would bring them up).
+            if self.config.separate_agent_history {
+                let file = self.paths.data.join(format!("agent-history.{shell_name}"));
+                env.push(("CTX_AGENT_HISTORY".into(), file.display().to_string()));
+            }
         }
         let mut not_restored = Vec::new();
         if let Some(r) = &reopen {
@@ -2231,7 +2237,9 @@ impl Server {
             set(env, k, v.display().to_string());
         }
         // Your launchers, history and files aren't the agent's.
-        env.retain(|(k, _)| !matches!(k.as_str(), "CTX_LAUNCHERS" | "CTX_REOPEN_HISTORY" | "CTX_USER_ZDOTDIR"));
+        env.retain(|(k, _)| {
+            !matches!(k.as_str(), "CTX_LAUNCHERS" | "CTX_REOPEN_HISTORY" | "CTX_AGENT_HISTORY" | "CTX_USER_ZDOTDIR")
+        });
         if let Some(bin) = self.server_exe.parent()
             && let Some((_, p)) = env.iter_mut().find(|(k, _)| k == "PATH")
         {

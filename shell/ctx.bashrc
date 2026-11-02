@@ -8,4 +8,6 @@ elif [ -r "$HOME/.profile" ]; then . "$HOME/.profile"; fi
 [ -n "$CTX_PREFILL" ] && history -s "$CTX_PREFILL"
 # A tab an agent opened: no pager waits for a person to press q.
 [ -n "$CTX_NO_PAGER" ] && export PAGER=cat GIT_PAGER=cat MANPAGER=cat GH_PAGER=cat PSQL_PAGER=cat AWS_PAGER= SYSTEMD_PAGER=
-unset CTX_PREFILL CTX_INTEGRATION CTX_NO_PAGER
+# ...and its commands go to a history file of their own (bash reads it after this file).
+[ -n "$CTX_AGENT_HISTORY" ] && HISTFILE=$CTX_AGENT_HISTORY
+unset CTX_PREFILL CTX_INTEGRATION CTX_NO_PAGER CTX_AGENT_HISTORY
