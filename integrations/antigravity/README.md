@@ -18,5 +18,5 @@ A plugin that makes ctx Antigravity's shell:
 
 Install it with `ctx install hooks for antigravity` (runs `agy plugin install` on a copy of this
 folder that names your `ctx`), or for one project with `ctx install hooks for antigravity at
-<folder>` (an entry in that project's `.agents/plugins.json`). `ctx remove hooks for antigravity`
-undoes either.
+<folder>` (an entry in that project's `.agents/plugins.json`). Either way it also installs ctx's
+skills (`integrations/ctx-skills`). `ctx remove hooks for antigravity` undoes either.

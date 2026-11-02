@@ -96,7 +96,9 @@ your approval as the check. Each `integrations/<agent>/README.md` has the detail
 
 ### Skills: teaching agents to use ctx
 
-`integrations/ctx-skills` holds two Agent Skills: `using-ctx` (getting around ctx, reading the messages that make an agent think its shell is broken, long jobs in their own tab, finding earlier work, arranging tabs for you) and `interactive-programs` (consoles and CLIs that need a terminal, setup wizards, REPLs, debuggers, ssh, adb and database shells, run in a tab and typed into). They work with or without the hook.
+`integrations/ctx-skills` holds two Agent Skills: `using-ctx` (getting around ctx, reading the messages that make an agent think its shell is broken, long jobs in their own tab, finding earlier work, arranging tabs for you) and `interactive-programs` (consoles and CLIs that need a terminal, setup wizards, REPLs, debuggers, ssh, adb and database shells, run in a tab and typed into). The agent loads them only when a task needs them.
+
+`ctx install hooks for claude` and `ctx install hooks for antigravity` install the skills along with the hook (`ctx remove hooks` removes both). To install only the skills in Claude Code:
 
 ```sh
 claude plugin install ctx-skills --marketplace Dissipation-AI/ctx

@@ -11,7 +11,7 @@
     {
       "name": "ctx-skills",
       "source": "./ctx-skills",
-      "description": "Skills for agents working in ctx: getting around ctx tabs, and driving REPLs, debuggers, ssh, adb and database shells in persistent terminals."
+      "description": "Skills for agents working in ctx: getting around ctx tabs, and running interactive programs (consoles, setup wizards, REPLs, debuggers, ssh, adb, database shells) in ctx tabs."
     }
   ]
 }
