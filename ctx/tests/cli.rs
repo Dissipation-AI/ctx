@@ -81,6 +81,42 @@ fn unparseable_sentences_get_the_closest_valid_one() {
 }
 
 #[test]
+fn reopened_tabs_go_back_to_their_windows_and_agents_tabs_to_theirs() {
+    let mut s = Server::start("reopen-windows");
+    let ctx = common::ctx_bin().display().to_string();
+    // The test is an agent: "Seed" is an agent's tab; it opens two of yours, each in a window.
+    s.ctx(&["open", "tab", "named", "Seed", "at", "/tmp"]).ok();
+    for name in ["Left", "Right"] {
+        let you = format!("env -u CTX_AGENT_NAME '{ctx}' open tab in new window named {name} at /tmp");
+        s.ctx(&["run", "in", "Seed", &you]).ok();
+    }
+    let window_of = |list: &str, name: &str| {
+        list.lines()
+            .take_while(|l| !l.contains(&format!("\"{name}\"")))
+            .filter(|l| l.starts_with("window"))
+            .last()
+            .unwrap_or_default()
+            .to_string()
+    };
+    let before = s.ctx(&["list", "tabs"]).ok().stdout.clone();
+    let (a, b) = (window_of(&before, "Left"), window_of(&before, "Right"));
+    assert!(a != b && !a.is_empty(), "{before}");
+    let number = |name: &str| {
+        let l = before.lines().find(|l| l.contains(&format!("\"{name}\""))).unwrap();
+        l.split_whitespace().nth(1).unwrap().to_string()
+    };
+    let tabs: Vec<String> = ["Seed", "Left", "Right"].iter().map(|n| number(n)).collect();
+    s.kill_hard();
+    s.spawn();
+    for t in &tabs {
+        s.ctx(&["reopen", "tab", t]).ok();
+    }
+    let after = s.ctx(&["list", "tabs"]).ok().stdout.clone();
+    assert_eq!((window_of(&after, "Left"), window_of(&after, "Right")), (a, b), "{after}");
+    assert!(window_of(&after, "Seed").ends_with("\"Agents\""), "{after}");
+}
+
+#[test]
 fn saved_tabs_survive_a_crash_and_reopen() {
     let mut s = Server::start("crash");
     s.ctx(&["open", "tab", "named", "Keep", "at", "/tmp"]).ok();
