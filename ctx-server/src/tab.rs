@@ -176,6 +176,8 @@ pub struct Tab {
     pub log: TabLog,
     /// Bytes waiting to be written to the pseudo-terminal.
     pub to_pty: Vec<u8>,
+    /// The shell the tab was started with (a path), to check a command's syntax before typing it.
+    pub shell: String,
     /// Whether ctx's shell integration is loaded in this shell.
     pub integration_expected: bool,
     pub integration: bool,
