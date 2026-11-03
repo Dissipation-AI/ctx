@@ -17,6 +17,8 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 
 unsafe extern "C" {
+    #[cfg(target_os = "macos")]
+    fn sandbox_check(pid: libc::pid_t, operation: *const libc::c_char, filter: libc::c_int, ...) -> libc::c_int;
     fn sandbox_init(profile: *const libc::c_char, flags: u64, errorbuf: *mut *mut libc::c_char) -> libc::c_int;
 }
 
@@ -242,12 +244,48 @@ fn become_and_exec(req: &SpawnRequest, a: &Account, tty: RawFd) -> String {
     format!("couldn't start {}: {e}", req.program)
 }
 
+/// The process on the other end of the socket (as it was when it connected).
+#[cfg(target_os = "macos")]
+fn peer_pid(fd: RawFd) -> Option<libc::pid_t> {
+    const SOL_LOCAL: libc::c_int = 0;
+    const LOCAL_PEERPID: libc::c_int = 2;
+    let mut pid: libc::pid_t = 0;
+    let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+    // SAFETY: getsockopt with a pid-sized out-buffer.
+    let r = unsafe { libc::getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, (&mut pid as *mut libc::pid_t).cast(), &mut len) };
+    (r == 0 && pid > 0).then_some(pid)
+}
+
+/// Whether the caller is inside a Seatbelt sandbox. Agents that run as the owner's account do,
+/// and must not reach the helper: they would start themselves as another account, outside every
+/// sandbox, without the server. A sandbox can't be left, so a sandboxed caller stays one.
+/// Unknown counts as sandboxed.
+#[cfg(target_os = "macos")]
+fn caller_sandboxed(fd: RawFd) -> bool {
+    let Some(pid) = peer_pid(fd) else { return true };
+    // SAFETY: a null operation asks only whether the process is sandboxed.
+    unsafe { sandbox_check(pid, std::ptr::null(), 0) != 0 }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn caller_sandboxed(_fd: RawFd) -> bool {
+    false
+}
+
 fn serve_one(stream: UnixStream, rules: &HelperConfig, owner_uid: libc::uid_t) {
     let mut uid: libc::uid_t = 0;
     let mut gid: libc::gid_t = 0;
     // SAFETY: getpeereid with valid out-pointers.
     if unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) } != 0 || uid != owner_uid {
         return reply(&stream, &SpawnReply::Refused { message: "Only the ctx server's account may ask.".into() });
+    }
+    if caller_sandboxed(stream.as_raw_fd()) {
+        return reply(
+            &stream,
+            &SpawnReply::Refused {
+                message: "Processes in an agent's sandbox can't use the helper; the ctx server asks it.".into(),
+            },
+        );
     }
     let Some((line, tty)) = receive(&stream) else {
         return reply(

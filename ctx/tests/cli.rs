@@ -476,6 +476,60 @@ fn agents_see_and_drive_only_their_own_tabs_and_run_sandboxed() {
     assert!(!clients.is_empty() && clients.iter().all(|c| c.starts_with("dev: ")), "{clients:?}");
 }
 
+/// No agent gets more than it was given through ctx: it never drives your tabs (even when
+/// `drive_tabs_of` says so), never restarts the server, learns nothing about tabs it can't see,
+/// and a copy you make of its tab stays its own (its exported variables could be planted). From
+/// inside its sandbox the root helper's socket is closed.
+#[test]
+fn agents_cant_escalate_through_ctx() {
+    let sock = format!("/tmp/ctx-it-nohelper-{}.sock", std::process::id());
+    let _ = std::fs::remove_file(&sock);
+    let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+    let s = Server::start_with("escalate", &[("CTX_HELPER_SOCKET", &sock)]);
+    std::fs::create_dir_all(s.home.join("Secret")).unwrap();
+    std::fs::write(s.home.join("Secret/key"), "hunter2").unwrap();
+    std::fs::create_dir_all(s.home.join("Work")).unwrap();
+    std::fs::write(
+        s.dir.join("config.toml"),
+        "shell = \"/bin/zsh\"\n[agents.dev]\nfolders = [\"~/Work\"]\nwrite = [\"~/Work\"]\nsee_tabs_of = [\"you\"]\ndrive_tabs_of = [\"*\"]\n[agents.mail]\n",
+    )
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2500));
+    s.ctx(&["open", "tab", "named", "Mine", "at", "/tmp"]).ok();
+    let dev = |args: &[&str]| s.ctx_with(&[("CTX_AGENT_NAME", "dev")], args, None);
+    let mail = |args: &[&str]| s.ctx_with(&[("CTX_AGENT_NAME", "mail")], args, None);
+
+    // Seeing isn't driving: `drive_tabs_of = ["*"]` still leaves your tabs alone.
+    let o = dev(&["run", "in", "Mine", "echo hi"]);
+    assert!(o.code != 0 && o.stderr.contains("can't run commands"), "{}", o.stderr);
+    let o = dev(&["open", "tab", "like", "Mine"]);
+    assert!(o.code != 0, "a copy of your tab would be yours: {}", o.stdout);
+    let o = dev(&["restart", "server", "without", "asking"]);
+    assert!(o.code != 0 && o.stderr.contains("only you"), "{}", o.stderr);
+
+    // An agent that can't see your tab learns nothing about it, not even its number.
+    let o = mail(&["status"]).ok().stdout.clone();
+    assert!(!o.contains("Mine"), "{o}");
+    let o = mail(&["run", "in", "tab", "1", "echo hi"]);
+    assert!(o.stderr.contains("There is no tab 1") && !o.stderr.contains("Open tabs are 1"), "{}", o.stderr);
+
+    // You copy the agent's tab: the copy is the agent's, in its sandbox, planted variables and all.
+    let work = s.home.join("Work").display().to_string();
+    dev(&["open", "tab", "named", "Dev work", "at", &work]).ok();
+    dev(&["run", "in", "Dev work", "export PLANTED=1"]).ok();
+    s.ctx(&["open", "tab", "like", "Dev work", "named", "My copy"]).ok();
+    let o = s.ctx(&["list", "tabs"]).ok().stdout.clone();
+    let line = o.lines().find(|l| l.contains("My copy")).unwrap_or_default().to_string();
+    assert!(line.contains("belongs to the agent \"dev\""), "{o}");
+    let o = s.ctx(&["run", "in", "My copy", "echo $PLANTED; cat ~/Secret/key"]).stdout;
+    assert!(o.contains("Operation not permitted") && !o.contains("hunter2"), "{o}");
+
+    // The helper's socket is closed to the sandbox.
+    let o = dev(&["run", "in", "Dev work", &format!("/usr/bin/nc -U {sock} </dev/null; echo rc=$?")]).stdout;
+    assert!(!o.contains("rc=0"), "{o}");
+    let _ = std::fs::remove_file(&sock);
+}
+
 /// The real Claude Code, started in your tab, comes up as the agent inside its sandbox; in a folder
 /// that sandbox can't read, ctx says so instead of Claude's "low max file descriptors". Its binary
 /// goes by another name here: these tests often run under Claude Code, and a `ctx` with an agent
@@ -607,6 +661,17 @@ fn agent_accounts_start_through_the_helper() {
     std::thread::sleep(std::time::Duration::from_millis(2500));
     let o = s.ctx_with(&[("CTX_AGENT_NAME", "mail")], &["open", "tab", "named", "Mail"], None);
     assert!(o.stderr.contains("don't have the agent \"mail\""), "{}", o.stderr);
+    // A process of yours inside any sandbox is refused by the helper itself (agents that run as
+    // you are sandboxed), even when its profile leaves the socket open.
+    let probe = format!(
+        "import socket,os,json,array\nm,t=os.openpty()\nc=socket.socket(socket.AF_UNIX)\nc.connect('{sock}')\nr={{'agent':'dev','account':'{me}','folder':'/tmp','program':'/usr/bin/true','argv':['true'],'env':[],'sandbox':'','authorization':None}}\nc.sendmsg([(json.dumps(r)+'\\n').encode()],[(socket.SOL_SOCKET,socket.SCM_RIGHTS,array.array('i',[t]))])\nprint(c.recv(4096).decode())\n"
+    );
+    let o = std::process::Command::new("/usr/bin/sandbox-exec")
+        .args(["-p", "(version 1)(allow default)", "/usr/bin/python3", "-I", "-c", &probe])
+        .output()
+        .unwrap();
+    let out = String::from_utf8_lossy(&o.stdout);
+    assert!(out.contains("Refused") && out.contains("sandbox"), "{out} {}", String::from_utf8_lossy(&o.stderr));
     drop(h);
     let _ = std::fs::remove_file(&sock);
 }

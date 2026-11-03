@@ -281,6 +281,12 @@ pub fn sandbox_profile(name: &str, agent: &Agent, places: &Places) -> String {
     let markers = markers(&places.ctx_runtime);
     p.push_str(&format!("(deny file-read* (subpath {}))\n", quote(&real(&markers))));
     p.push_str(&format!("(allow file-read* (literal {}))\n", quote(&real(&markers).join(name))));
+    // The root helper starts processes as agents' accounts for the server; a sandboxed process
+    // asking it directly would leave its sandbox (the helper refuses sandboxed callers too).
+    p.push_str(&format!(
+        "(deny network-outbound (remote unix-socket (path-literal {})))\n",
+        quote(&real(&crate::helper::socket()))
+    ));
     p.push_str("(deny appleevent-send)\n");
     p.push_str("(deny mach-lookup (global-name \"com.apple.coreservices.launchservicesd\") (global-name-prefix \"com.apple.lsd.\"))\n");
     p
@@ -341,7 +347,8 @@ mod tests {
         // ctx's own rules come after every grant.
         assert!(at(";; ~/Library/Caches\n") < at("(deny appleevent-send)"));
         assert!(p.contains("(allow file-read* (literal \"/nonexistent/run/agents/dev\"))"));
-        assert!(!p.contains("network-outbound"), "network stays on by default");
+        assert!(!p.contains("network-outbound (remote ip)"), "network stays on by default");
+        assert!(p.contains("(deny network-outbound (remote unix-socket (path-literal"), "the helper socket is closed");
         // Agent programs read ctx's plugins (hooks, skills), though ctx's data is closed.
         let data = p.find("(deny file-read* (subpath \"/nonexistent/home/Library/Application Support/ctx\"))").unwrap();
         let plugins =

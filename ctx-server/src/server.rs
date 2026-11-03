@@ -1170,7 +1170,10 @@ impl Server {
         }
         let Some(a) = self.config.agents.get(p) else { return false };
         let owner = owner.unwrap_or(agents::YOU);
-        agents::covers(&a.drive_tabs_of, owner) || !drive && agents::covers(&a.see_tabs_of, owner)
+        // Driving a tab is running code as its account, so no agent drives yours, whatever
+        // `drive_tabs_of` says (`ctx list agents` points that out).
+        let drivable = owner != agents::YOU && agents::covers(&a.drive_tabs_of, owner);
+        drivable || !drive && agents::covers(&a.see_tabs_of, owner)
     }
 
     fn tab_owner(&self, n: u64) -> Option<String> {
@@ -1204,6 +1207,11 @@ impl Server {
                 "Only you reopen the last session's tabs, not the agent \"{p}\". Reopen one of your own with `ctx reopen tab <number>`."
             ));
         }
+        if matches!(r, Request::Restart { .. }) {
+            return no(format!(
+                "Restarting the server stops every tab's shell, so only you can do it, not the agent \"{p}\"."
+            ));
+        }
         let opens = matches!(r, Request::OpenTab { .. } | Request::OpenWindow { .. } | Request::Reopen { .. });
         if opens && !self.config.agents.contains_key(p) {
             return no(
@@ -1229,6 +1237,12 @@ impl Server {
             && let Some(n) = target
             && !self.may(key, self.tab_owner(n).as_deref(), true)
         {
+            if !self.sees(key, n) {
+                return Some(ErrorReply::new(
+                    ErrorKind::NoSuchTab,
+                    format!("There is no tab {n}. {} `ctx list tabs` shows them all.", self.open_tab_list_for(key)),
+                ));
+            }
             let whose = match self.tab_owner(n) {
                 Some(o) => format!("the agent \"{o}\""),
                 None => "the person at this Mac".into(),
@@ -1259,8 +1273,13 @@ impl Server {
         c.identity.in_tab.filter(|t| self.tabs.contains_key(t))
     }
 
-    fn open_tab_list(&self) -> String {
-        let nums: Vec<String> = self.tabs.keys().map(|n| n.to_string()).collect();
+    /// The open tabs this client may see, as a sentence.
+    fn open_tab_list_for(&self, key: usize) -> String {
+        self.tab_numbers(self.tabs.keys().copied().filter(|n| self.sees(key, *n)).collect())
+    }
+
+    fn tab_numbers(&self, nums: Vec<u64>) -> String {
+        let nums: Vec<String> = nums.iter().map(|n| n.to_string()).collect();
         match nums.len() {
             0 => "No tabs are open.".into(),
             1 => format!("The open tab is {}.", nums[0]),
@@ -1274,7 +1293,7 @@ impl Server {
             TabRef::This => self.client_tab(key).ok_or_else(|| {
                 ErrorReply::new(
                     ErrorKind::NoSuchTab,
-                    format!("Which tab? This isn't running inside a CTX tab, so say which one: in \"<name>\" or in tab <number>. {} `ctx list tabs` shows them.", self.open_tab_list()),
+                    format!("Which tab? This isn't running inside a CTX tab, so say which one: in \"<name>\" or in tab <number>. {} `ctx list tabs` shows them.", self.open_tab_list_for(key)),
                 )
             }),
             TabRef::Number(n) => {
@@ -1285,7 +1304,7 @@ impl Server {
                 } else {
                     Err(ErrorReply::new(
                         ErrorKind::NoSuchTab,
-                        format!("There is no tab {n}. {} `ctx list tabs` shows them all, and `ctx list closed tabs` shows ones that have been closed.", self.open_tab_list()),
+                        format!("There is no tab {n}. {} `ctx list tabs` shows them all, and `ctx list closed tabs` shows ones that have been closed.", self.open_tab_list_for(key)),
                     ))
                 }
             }
@@ -1317,7 +1336,7 @@ impl Server {
                     ));
                 }
                 let names: Vec<String> = visible().filter_map(|t| t.name.as_ref().map(|n| format!("\"{n}\""))).collect();
-                let listing = if names.is_empty() { self.open_tab_list() } else { format!("Open tabs with names: {}.", names.join(", ")) };
+                let listing = if names.is_empty() { self.open_tab_list_for(key) } else { format!("Open tabs with names: {}.", names.join(", ")) };
                 Err(ErrorReply::new(ErrorKind::NoSuchTab, format!("There's no tab named \"{name}\". {listing} `ctx list tabs` shows them all.")))
             }
         }
@@ -1412,7 +1431,7 @@ impl Server {
             Request::ListActivity { filter, limit } => self.list_activity(key, filter, limit),
             Request::Read { tab, what, colors, max_lines } => self.read(key, &tab, what, colors, max_lines),
             Request::Find { text, filter, limit } => self.find(key, &text, filter, limit),
-            Request::Status => ok(Output::Status(self.status())),
+            Request::Status => ok(Output::Status(self.status(key))),
             Request::OpenWindow { folder, name } => self.open_window(key, folder, name),
             Request::OpenTab { window, folder, name, agent, like } => {
                 self.open_tab(key, window, folder, name, agent, like)
@@ -1454,7 +1473,7 @@ impl Server {
             Request::Input { tab, input } => self.app_input(key, tab, input),
             Request::Records { tab } => self.records(key, &tab),
             Request::MatchingTabs { filter, limit } => self.matching_tabs(key, filter, limit),
-            Request::WhoRan { pid } => self.who_ran(pid),
+            Request::WhoRan { pid } => self.who_ran(key, pid),
             Request::Restart { without_asking } => self.restart_request(without_asking),
         }
     }
@@ -1691,10 +1710,11 @@ impl Server {
         ok(Output::Activity(ActivityList { entries: entries.iter().map(|l| l.entry()).collect() }))
     }
 
-    fn status(&self) -> Status {
+    fn status(&self, key: usize) -> Status {
         let tabs = self
             .tabs
             .values()
+            .filter(|t| self.sees(key, t.number))
             .map(|t| TabMemory {
                 number: t.number,
                 name: t.name.clone(),
@@ -1866,13 +1886,28 @@ impl Server {
                 .unwrap_or_else(sys::home)
         });
         let by = self.clients.get(&key).map(|c| c.identity.ran_by()).unwrap_or_else(|| "you".into());
-        let owner = agent.or_else(|| self.principal(key).map(str::to_string));
         if let Some(src) = source {
-            return match self.copy_tab(src, w, &folder, name, &by, owner) {
+            // A copy carries the tab's exported variables and history, which whoever owns the tab
+            // could have planted, so it runs as that owner (you may copy your agents' tabs; the
+            // copy is theirs). Nothing crosses from one account or sandbox into another's.
+            let src_owner = self.tab_owner(src);
+            if let Some(a) = &agent
+                && src_owner.as_deref() != Some(a.as_str())
+            {
+                return err(
+                    ErrorKind::NotAllowed,
+                    format!(
+                        "A copy of tab {src} runs as whoever owns tab {src} ({}), so it can't be the agent \"{a}\"'s.",
+                        src_owner.as_deref().map_or("you".to_string(), |o| format!("the agent \"{o}\""))
+                    ),
+                );
+            }
+            return match self.copy_tab(src, w, &folder, name, &by, src_owner) {
                 Ok(o) => self.when_ready(key, o),
                 Err(e) => Handled::Reply(Response::Error(e)),
             };
         }
+        let owner = agent.or_else(|| self.principal(key).map(str::to_string));
         match self.spawn_tab(None, w, &folder, name, &by, owner, None) {
             Ok(o) => self.when_ready(key, o),
             Err(e) => {
@@ -3111,10 +3146,10 @@ impl Server {
         ok(Output::TabNumbers(tabs))
     }
 
-    fn who_ran(&self, pid: i32) -> Handled {
-        // The tab whose process tree contains this pid.
+    fn who_ran(&self, key: usize, pid: i32) -> Handled {
+        // The tab whose process tree contains this pid (only among tabs the caller may see).
         let chain = sys::ancestors(pid);
-        let tab = chain.iter().find_map(|p| self.tab_of_pid(p.pid));
+        let tab = chain.iter().find_map(|p| self.tab_of_pid(p.pid)).filter(|n| self.sees(key, *n));
         let Some(n) = tab else {
             return ok(Output::RanBy(RanBy { tab: None, ran_by: "unknown".into(), agent_involved: false }));
         };
