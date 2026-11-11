@@ -190,6 +190,9 @@ pub struct Server {
     zdotdir: PathBuf,
     quit: bool,
     restart: bool,
+    /// The windows as the last server left them (number, name, tabs): a tab reopened from one
+    /// goes back into it.
+    last_windows: Vec<(u64, Option<String>, Vec<u64>)>,
     last_maintenance: Instant,
     last_config_check: Instant,
     pending_show: Option<u64>,
@@ -321,6 +324,7 @@ impl Server {
             zdotdir,
             quit: false,
             restart: false,
+            last_windows: Vec::new(),
             last_maintenance: Instant::now() - Duration::from_secs(86_400),
             last_config_check: Instant::now(),
             pending_show: None,
@@ -359,10 +363,10 @@ impl Server {
             interrupted.push((t.number, at));
         }
         // Windows as they were.
-        for (n, name, _) in &state.windows {
+        for (n, _, _) in &state.windows {
             let _ = self.index.reserve_above("window", *n);
-            let _ = name;
         }
+        self.last_windows = state.windows.clone();
         let mut to_reopen: Vec<(u64, String)> =
             state.reopen.iter().map(|n| (*n, "server restart".to_string())).collect();
         if to_reopen.is_empty() && self.config.reopen_on_launch == "always" {
@@ -1371,7 +1375,7 @@ impl Server {
             Request::Move { tab, to, position } => self.move_tab(key, &tab, &to, position),
             Request::Clear { tab } => self.clear(key, &tab),
             Request::Reopen { tab } => {
-                let window = self.default_window(key);
+                let window = self.reopen_window(key, tab);
                 let by = self.clients.get(&key).map(|c| c.identity.ran_by()).unwrap_or_else(|| "you".into());
                 match self.reopen_tab(tab, window, None, &by) {
                     Ok(o) => self.when_ready(key, o),
@@ -1702,6 +1706,33 @@ impl Server {
             return w.number;
         }
         self.new_window(None)
+    }
+
+    /// Where a reopened tab goes: back into its window (the same number and name, opened again if
+    /// it's gone), as the server does with tabs it reopens at launch. A tab an agent opened goes
+    /// to the Agents window, never into yours. Not known: as a new tab would.
+    fn reopen_window(&mut self, key: usize, tab: u64) -> u64 {
+        let row = self.index.tab(tab).ok().flatten();
+        if row.as_ref().is_some_and(|r| r.opened_by != "you") {
+            let name = self.config.agent_window_name.clone();
+            if let Some(w) = self.windows.iter().find(|w| w.name.as_deref() == Some(name.as_str())) {
+                return w.number;
+            }
+            return self.new_window(Some(name));
+        }
+        let was = self
+            .last_windows
+            .iter()
+            .find(|(_, _, tabs)| tabs.contains(&tab))
+            .map(|(w, name, _)| (*w, name.clone()))
+            .or_else(|| row.map(|r| (r.window, None)))
+            .filter(|(w, _)| *w != 0);
+        let Some((w, name)) = was else { return self.default_window(key) };
+        if !self.windows.iter().any(|x| x.number == w) {
+            let _ = self.index.reserve_above("window", w);
+            self.windows.push(Window { number: w, name, tabs: Vec::new() });
+        }
+        w
     }
 
     /// Answer `open` once the new shell is ready for commands (its first prompt), so a `run`
