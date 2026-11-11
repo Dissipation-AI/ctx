@@ -11,7 +11,11 @@ __ctx_prompt() {
     __ctx_osc "6973;where;${USER:-$(id -un)}@${HOSTNAME%%.*}"
     local p=${PWD//%/%25}
     __ctx_osc "7;file://${HOSTNAME}${p// /%20}"
-    case "$PS1" in *'133;A'*) ;; *) PS1='\[\033]133;A\007\]'"$PS1"'\[\033]133;B\007\]' ;; esac
+    # The marks go back to the ends each time: the terminal starts a new line at a prompt mark, so
+    # anything put in front of it (conda's "(base) ") would sit on a line of its own. The patterns
+    # are escaped by hand: bash 3.2 doesn't match backslashes in a quoted "$pattern".
+    local ps=${PS1//\\\[\\033]133;A\\007\\\]/}
+    PS1='\[\033]133;A\007\]'${ps//\\\[\\033]133;B\\007\\\]/}'\[\033]133;B\007\]'
 }
 __ctx_cmd() {
     local c
