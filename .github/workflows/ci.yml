@@ -82,7 +82,7 @@ jobs:
           sleep 2
           $ctx open tab named Probe || true
           sleep 3
-          $ctx read tab named Probe || true
+          $ctx read "Probe" || true
           $ctx list tabs || true
           ls -la "$CTX_HOME/run" || true
           cat "$CTX_HOME/server.log"
