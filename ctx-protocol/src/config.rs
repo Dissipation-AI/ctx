@@ -156,8 +156,50 @@ pub struct Config {
     /// toolchains), so each agent lists only what's its own.
     pub agent_base: AgentBase,
 
+    /// The CTX folders: where agents live, shared context documents, and workspaces.
+    pub folders: Folders,
+
     /// CTX.app's own settings. The server ignores them; the app reads them.
     pub app: toml::Table,
+}
+
+/// `[folders]`: the three CTX folders. ctx makes them when the server starts and puts them in
+/// every tab's environment as `CTX_AGENTS`, `CTX_CONTEXT` and `CTX_WORKSPACES`.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Folders {
+    /// One folder per agent; each is that agent's home.
+    pub agents: String,
+    /// Documents agents may need (resumes, tickets, calendars…). None is shared by default.
+    pub context: String,
+    /// Monorepos of related projects, where a developer agent starts.
+    pub workspaces: String,
+}
+
+impl Default for Folders {
+    fn default() -> Self {
+        Folders { agents: "~/Agents".into(), context: "~/Context".into(), workspaces: "~/Workspaces".into() }
+    }
+}
+
+impl Folders {
+    /// `(variable, path)` for each folder, `~` expanded against `home`.
+    pub fn env(&self, home: &str) -> [(&'static str, String); 3] {
+        let expand = |p: &str| {
+            if p == "~" {
+                home.to_string()
+            } else if let Some(rest) = p.strip_prefix("~/") {
+                format!("{}/{rest}", home.trim_end_matches('/'))
+            } else {
+                p.to_string()
+            }
+        };
+        [
+            ("CTX_AGENTS", expand(&self.agents)),
+            ("CTX_CONTEXT", expand(&self.context)),
+            ("CTX_WORKSPACES", expand(&self.workspaces)),
+        ]
+    }
 }
 
 /// One agent's profile.
@@ -254,6 +296,7 @@ impl Default for Config {
             default_agent: String::new(),
             agent_programs: AGENT_PROGRAMS.iter().map(|s| s.to_string()).collect(),
             agent_base: AgentBase::default(),
+            folders: Folders::default(),
             app: toml::Table::new(),
         }
     }
@@ -294,6 +337,13 @@ impl Config {
                 || !name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
             {
                 return Err(format!("agents.{name}: an agent's name uses letters, digits, - and _, and isn't \"you\""));
+            }
+        }
+        for (k, v) in
+            [("agents", &c.folders.agents), ("context", &c.folders.context), ("workspaces", &c.folders.workspaces)]
+        {
+            if !(v == "~" || v.starts_with("~/") || v.starts_with('/')) {
+                return Err(format!("folders.{k} = \"{v}\": give a full path or one starting with ~/"));
             }
         }
         if !c.default_agent.is_empty() && !c.agents.contains_key(&c.default_agent) {
@@ -377,6 +427,19 @@ time_limit = "1 minute"
         assert!(Config::parse("nonsense = 1").is_err());
         let with_app = Config::parse("[app]\nfont = \"SF Mono\"\nfont_size = 13\n").unwrap();
         assert_eq!(with_app.app.get("font_size").and_then(|v| v.as_integer()), Some(13));
+    }
+
+    #[test]
+    fn folders_default_to_the_ctx_folders_and_expand_home() {
+        let c = Config::parse("").unwrap();
+        let env = c.folders.env("/Users/x");
+        assert_eq!(env[0], ("CTX_AGENTS", "/Users/x/Agents".to_string()));
+        assert_eq!(env[1], ("CTX_CONTEXT", "/Users/x/Context".to_string()));
+        assert_eq!(env[2], ("CTX_WORKSPACES", "/Users/x/Workspaces".to_string()));
+        let moved = Config::parse("[folders]\nworkspaces = \"/Volumes/code\"\n").unwrap();
+        assert_eq!(moved.folders.env("/h")[2].1, "/Volumes/code");
+        assert_eq!(moved.folders.env("/h")[0].1, "/h/Agents");
+        assert!(Config::parse("[folders]\nagents = \"Agents\"\n").unwrap_err().contains("folders.agents"));
     }
 
     #[test]

@@ -809,3 +809,15 @@ fn reopen_tabs_from_last_session_after_a_crash_and_a_clean_stop() {
     s.ctx(&["reopen", "tab", "3"]).ok();
     assert!(s.ctx(&["list", "tabs"]).ok().stdout.contains("tab 3 \"Two\""));
 }
+
+#[test]
+fn ctx_folders_are_made_and_in_every_tabs_environment() {
+    let s = Server::start("folders");
+    for f in ["Agents", "Context", "Workspaces"] {
+        assert!(s.home.join(f).is_dir(), "{f} wasn't made");
+    }
+    s.ctx(&["open", "tab", "named", "Env", "at", "/tmp"]).ok();
+    let o = s.ctx(&["run", "in", "Env", "echo $CTX_AGENTS $CTX_CONTEXT $CTX_WORKSPACES"]).ok().stdout.clone();
+    let h = s.home.display();
+    assert_eq!(o, format!("{h}/Agents {h}/Context {h}/Workspaces\n"));
+}
