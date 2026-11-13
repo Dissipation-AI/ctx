@@ -1,5 +1,5 @@
 //! `ctx make agent`, `allow`, `forbid`, `switch to agent`, `limit`, `reset`, `show`, `remove`,
-//! `rename`: agents as accounts. Every change to files is made as whoever runs ctx, so the OS's
+//! `rename`: agents as accounts; and spaces (`make space`, `add agent … to space`). Every change to files is made as whoever runs ctx, so the OS's
 //! rule holds: only a file's owner shares it. Account changes go to the ctx helper (root), which
 //! does them only for the person who owns the ctx server.
 
@@ -19,8 +19,7 @@ use std::path::{Path, PathBuf};
 pub fn run(cmd: AgentCommand, canonical: String, format: Format, interactive: bool) -> Out {
     let mut out = Out::default();
     let r = match cmd {
-        AgentCommand::Make { name, home } => make(&name, home.as_deref()),
-        AgentCommand::Adopt { account } => adopt(&account),
+        AgentCommand::Make { name } => make(&name),
         AgentCommand::Remove { name, with_files } => remove(&name, with_files, interactive),
         AgentCommand::Rename { name, full_name } => rename(&name, &full_name),
         AgentCommand::Show { name } => return show(&name, format),
@@ -28,8 +27,10 @@ pub fn run(cmd: AgentCommand, canonical: String, format: Format, interactive: bo
         AgentCommand::Switch { name } => return switch(&name, canonical, interactive),
         AgentCommand::Limit { name, limit } => set_limit(&name, limit),
         AgentCommand::Reset { name } => reset(&name),
-        AgentCommand::MakeShared { with } => make_shared(&with),
-        AgentCommand::MoveToAccounts => crate::migrate::run(interactive),
+        AgentCommand::MakeSpace { name } => make_space(&name),
+        AgentCommand::RemoveSpace { name, with_files } => remove_space(&name, with_files, interactive),
+        AgentCommand::SpaceMember { agent, space, member } => space_member(&agent, &space, member),
+        AgentCommand::ListSpaces => return list_spaces(format),
     };
     match r {
         Ok(lines) => {
@@ -78,9 +79,7 @@ fn agent(name: &str) -> Result<Account, String> {
         )
     })?;
     if !accounts::is_agent(&a) {
-        return Err(format!(
-            "\"{name}\" is an account but not an agent. To make it one: ctx make agent from account \"{name}\""
-        ));
+        return Err(format!("\"{name}\" is an account, but not an agent's."));
     }
     Ok(a)
 }
@@ -112,7 +111,8 @@ pub fn starter_instructions(name: &str) -> String {
         "# {name}\n\n\
 You are the agent \"{name}\". You run as your own account, `{name}`, and this folder is your home. Write your instructions for yourself here.\n\n\
 ## Where things are\n\n\
-- `$CTX_AGENTS`: one folder per agent; each is that agent's home (the person sees them as ~/Agents). `$CTX_AGENTS/Shared/everyone` is shared by every agent and the person.\n\
+- Your home is private: no other agent may use it unless the person lets one.\n\
+- `$CTX_SPACES`: spaces, folders you work in with other agents. You may use the ones the person added you to (`ctx show agent \"{name}\"` lists them).\n\
 - `$CTX_CONTEXT` (~/Context): the person's documents. You see only what they shared with you.\n\
 - `$CTX_WORKSPACES` (~/Workspaces): code projects.\n\n\
 ## Permissions\n\n\
@@ -132,30 +132,15 @@ fn starter_files(name: &str) -> Vec<StarterFile> {
     ]
 }
 
-fn make(name: &str, home: Option<&str>) -> Lines {
+fn make(name: &str) -> Lines {
     only_you("make agents")?;
-    helper(HelperRequest::MakeAgentHomes)?;
-    let mut lines = Vec::new();
-    let home = match home.map(PathBuf::from) {
-        // A folder in your home moves out of it: an agent must never pass through your home.
-        Some(from) if from.starts_with(ctx_server::sys::home()) && from != agent_homes().join(name) => {
-            let to = agent_homes().join(name);
-            move_out(&from, &to)?;
-            lines.push(format!("Moved {} to {}; the old path links to it.", from.display(), to.display()));
-            to
-        }
-        Some(h) => h,
-        None => agent_homes().join(name),
-    };
-    let full_name = name.to_string();
-    lines.push(helper(HelperRequest::MakeAccount {
+    let mut lines = vec![helper(HelperRequest::MakeAccount {
         name: name.into(),
-        full_name,
-        home: home.display().to_string(),
+        full_name: name.into(),
         files: starter_files(name),
-    })?);
-    lines.extend(link_in_agents(name, &home));
-    lines.extend(shared_everyone()?);
+    })?];
+    let home = accounts::by_name(name).map(|a| a.home).unwrap_or_else(|| accounts::home_of(name));
+    lines.extend(link_in_agents(name, Path::new(&home)));
     lines.extend(open_home());
     lines.push(format!("Talk to it: ctx switch to agent {}", quote(name)));
     Ok(lines)
@@ -175,16 +160,11 @@ fn open_home() -> Option<String> {
     })
 }
 
-/// Where agents' homes are (outside your home; see `ctx_protocol::helper::agent_homes`).
-pub fn agent_homes() -> PathBuf {
-    ctx_protocol::helper::agent_homes()
-}
-
 /// `~/Agents/<name>` links to the agent's home (what's there already is left alone).
 fn link_in_agents(name: &str, home: &Path) -> Option<String> {
     let dir = agents_dir();
     let link = dir.join(name);
-    if dir == agent_homes() || link == home || std::fs::symlink_metadata(&link).is_ok() {
+    if link == home || std::fs::symlink_metadata(&link).is_ok() {
         return None;
     }
     let made = std::fs::create_dir_all(&dir).and_then(|_| std::os::unix::fs::symlink(home, &link));
@@ -192,23 +172,6 @@ fn link_in_agents(name: &str, home: &Path) -> Option<String> {
         Ok(()) => format!("{} links to it.", link.display()),
         Err(e) => format!("couldn't link {} to it: {e}", link.display()),
     })
-}
-
-/// Move an agent's folder out of your home into agents' homes, leaving a link at the old path.
-/// A rename only: the files stay as they are (on another disk it stops and says so).
-pub(crate) fn move_out(from: &Path, to: &Path) -> Result<(), String> {
-    helper(ctx_protocol::helper::HelperRequest::MakeAgentHomes)?;
-    if std::fs::symlink_metadata(to).is_ok() {
-        return Err(format!("{} is there already; move or remove it first.", to.display()));
-    }
-    std::fs::rename(from, to).map_err(|e| {
-        if e.raw_os_error() == Some(libc::EXDEV) {
-            format!("{} is on another disk than {}, so it can't just be renamed; move it there yourself and run this again.", from.display(), to.display())
-        } else {
-            format!("couldn't move {} to {}: {e}", from.display(), to.display())
-        }
-    })?;
-    std::os::unix::fs::symlink(to, from).map_err(|e| format!("moved, but couldn't link {} to it: {e}", from.display()))
 }
 
 /// The `~/Agents/<name>` link to `home`, if that's what it is.
@@ -219,27 +182,8 @@ fn unlink_in_agents(name: &str, home: &str) {
     }
 }
 
-/// `Shared/everyone` beside agents' homes: yours, and every agent may read and write it.
-fn shared_everyone() -> Lines {
-    let _ = link_in_agents("Shared", &agent_homes().join("Shared"));
-    let dir = agent_homes().join("Shared").join("everyone");
-    let made = !dir.exists();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("couldn't make {}: {e}", dir.display()))?;
-    let Some((gid, _)) = accounts::group(accounts::AGENTS_GROUP) else { return Ok(Vec::new()) };
-    acl::apply(&dir, Who::Group(gid), Some(Access::Write))
-        .map_err(|e| format!("couldn't share {}: {e}", dir.display()))?;
-    pass_through(&dir, Who::Group(gid));
-    Ok(if made { vec![format!("Made {}, shared by every agent and you.", dir.display())] } else { Vec::new() })
-}
-
 fn pass_through(path: &Path, who: Who) {
     ctx_accounts::shared::pass_through(path, who)
-}
-
-fn adopt(account: &str) -> Lines {
-    only_you("make agents")?;
-    let msg = helper(HelperRequest::AdoptAccount { name: account.into() })?;
-    Ok(vec![msg, format!("Talk to it: ctx switch to agent {}", quote(account))])
 }
 
 fn remove(name: &str, with_files: bool, interactive: bool) -> Lines {
@@ -251,11 +195,7 @@ fn remove(name: &str, with_files: bool, interactive: bool) -> Lines {
         } else {
             format!("the account \"{name}\" (its home {} stays)", a.home)
         };
-        eprint!("Delete {what}? [y/N] ");
-        let _ = std::io::stderr().flush();
-        let mut answer = String::new();
-        let _ = std::io::stdin().read_line(&mut answer);
-        if !answer.trim().eq_ignore_ascii_case("y") {
+        if !confirm(&format!("Delete {what}?")) {
             return Ok(vec!["Kept it.".into()]);
         }
     }
@@ -529,6 +469,8 @@ pub struct AgentShown {
     /// What it was granted with ctx, each checked against the OS now.
     grants: Vec<GrantShown>,
     limits: Option<ctx_protocol::helper::Limits>,
+    /// The spaces it's in.
+    spaces: Vec<String>,
     colour: Option<String>,
     /// Problems: a ctx-agent.toml the agent replaced, a grant that no longer holds.
     warnings: Vec<String>,
@@ -603,6 +545,7 @@ pub fn shown(a: &Account) -> AgentShown {
         home_access,
         grants,
         limits,
+        spaces: accounts::spaces_of(&a.name).into_iter().map(|s| s.name).collect(),
         colour,
         warnings,
         tabs,
@@ -684,6 +627,9 @@ fn show(name: &str, format: Format) -> Out {
                     if g.holds { "" } else { " (no longer holds)" }
                 ));
             }
+            if !s.spaces.is_empty() {
+                out.line(format!("  In the spaces: {}", s.spaces.join(", ")));
+            }
             if let Some(l) = &s.limits {
                 let mut parts = Vec::new();
                 if l.memory_mb > 0 {
@@ -709,7 +655,7 @@ fn show(name: &str, format: Format) -> Out {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Switching and shared folders
+// Switching
 // ---------------------------------------------------------------------------------------------
 
 fn switch(name: &str, canonical: String, interactive: bool) -> Out {
@@ -758,26 +704,62 @@ fn switch(name: &str, canonical: String, interactive: bool) -> Out {
     }
 }
 
-fn make_shared(with: &[String]) -> Lines {
-    let mut names: Vec<String> = with.to_vec();
-    let runner = me();
-    let as_agent = accounts::is_agent(&runner);
-    if as_agent && !names.contains(&runner.name) {
-        names.push(runner.name.clone());
+fn confirm(question: &str) -> bool {
+    eprint!("{question} [y/N] ");
+    let _ = std::io::stderr().flush();
+    let mut answer = String::new();
+    let _ = std::io::stdin().read_line(&mut answer);
+    answer.trim().eq_ignore_ascii_case("y")
+}
+
+// ---------------------------------------------------------------------------------------------
+// Spaces
+// ---------------------------------------------------------------------------------------------
+
+fn make_space(name: &str) -> Lines {
+    only_you("make spaces")?;
+    let mut lines = vec![helper(HelperRequest::MakeSpace { name: name.into() })?];
+    // ~/Agents/Spaces shows them all.
+    lines.extend(link_in_agents("Spaces", &accounts::spaces_dir()));
+    Ok(lines)
+}
+
+fn remove_space(name: &str, with_files: bool, interactive: bool) -> Lines {
+    only_you("remove spaces")?;
+    let s =
+        accounts::space(name).ok_or_else(|| format!("There's no space \"{name}\". `ctx list spaces` shows them."))?;
+    if interactive && std::io::stdin().is_terminal() {
+        let what = if with_files {
+            format!("the space \"{name}\", and move its folder {} to your Trash", s.folder)
+        } else {
+            format!("the space \"{name}\" (its folder {} stays, yours only)", s.folder)
+        };
+        if !confirm(&format!("Delete {what}?")) {
+            return Ok(vec!["Kept it.".into()]);
+        }
     }
-    names.sort();
-    names.dedup();
-    if as_agent {
-        // Made by the person's server, so no agent can make one in someone else's name.
-        return crate::exec::server_lines(
-            format!(
-                "ctx make shared folder with {}",
-                with.iter().map(|n| format!("agent {}", quote(n))).collect::<Vec<_>>().join(" and ")
-            ),
-            Request::MakeSharedFolder { with: names },
-        );
+    Ok(vec![helper(HelperRequest::RemoveSpace { name: name.into(), trash_folder: with_files })?])
+}
+
+fn space_member(who: &str, space: &str, member: bool) -> Lines {
+    only_you("change who is in a space")?;
+    agent(who)?;
+    Ok(vec![helper(HelperRequest::SetSpaceMember { space: space.into(), agent: who.into(), member })?])
+}
+
+fn list_spaces(format: Format) -> Out {
+    let mut out = Out::default();
+    let spaces = accounts::spaces();
+    match format {
+        Format::Json => out.line(serde_json::to_string_pretty(&spaces).unwrap_or_default()),
+        Format::Toon => out.line(ctx_protocol::toon::encode(&serde_json::to_value(&spaces).unwrap_or_default())),
+        Format::Text if spaces.is_empty() => out.line("No spaces. `ctx make space named \"<name>\"` makes one."),
+        Format::Text => {
+            for s in &spaces {
+                let who = if s.members.is_empty() { "no agents yet".to_string() } else { s.members.join(", ") };
+                out.line(format!("{}: {} ({who})", s.name, s.folder));
+            }
+        }
     }
-    let uids: Vec<u32> = names.iter().map(|n| agent(n).map(|a| a.uid)).collect::<Result<_, _>>()?;
-    let dir = ctx_accounts::shared::make(&agent_homes(), &names, &uids)?;
-    Ok(vec![format!("{} is shared by {} and you.", dir.display(), names.join(", "))])
+    out
 }

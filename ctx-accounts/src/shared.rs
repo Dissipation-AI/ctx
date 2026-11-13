@@ -1,33 +1,9 @@
-//! Shared folders in `$CTX_AGENTS/Shared`: `everyone` for every agent, and `a+b` for a few.
+//! The way to something shared: the folders above it are opened for passing through, toward it
+//! only.
 
-use crate::acl::{self, Access, Who};
+use crate::acl::{self, Who};
 use std::os::unix::fs::MetadataExt;
-use std::path::{Path, PathBuf};
-
-/// Make `<agents>/Shared/<a+b…>` (names sorted) and let each uid read and write it. Run as its
-/// owner (the person).
-pub fn make(agents: &Path, names: &[String], uids: &[u32]) -> Result<PathBuf, String> {
-    if names.is_empty() {
-        return Err("A shared folder needs at least one agent.".into());
-    }
-    let mut sorted = names.to_vec();
-    sorted.sort();
-    let dir = agents.join("Shared").join(sorted.join("+"));
-    std::fs::create_dir_all(&dir).map_err(|e| format!("couldn't make {}: {e}", dir.display()))?;
-    {
-        // Only its agents (through the access list) and you; on Linux new files keep the folder's
-        // group.
-        use std::os::unix::fs::PermissionsExt;
-        let mode = if cfg!(target_os = "macos") { 0o700 } else { 0o2770 };
-        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(mode));
-    }
-    for &u in uids {
-        acl::apply(&dir, Who::User(u), Some(Access::Write))
-            .map_err(|e| format!("couldn't share {}: {e}", dir.display()))?;
-        pass_through(&dir, Who::User(u));
-    }
-    Ok(dir)
-}
+use std::path::Path;
 
 /// Let `who` pass through the folders above `path` that the caller owns, toward `path` only:
 /// everything else in those folders is closed to it (see [`acl::pass_only`]). Entries that name an

@@ -386,11 +386,6 @@ pub enum Request {
     /// `ctx reopen tabs from last session`: every tab that was open when the server last stopped
     /// (reboot, crash or restart) and isn't open now, back in its window.
     ReopenLastSession,
-    /// `ctx make shared folder with agent "b"`, asked by an agent: the server makes
-    /// `$CTX_AGENTS/Shared/<a+b>` as you, for the agent asking, those agents and you.
-    MakeSharedFolder {
-        with: Vec<String>,
-    },
     /// `open`, `xdg-open` and `pbcopy` in an agent's tab: hand something to your session, which
     /// the agent's account can't reach.
     Hand {

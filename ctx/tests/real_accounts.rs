@@ -24,7 +24,8 @@ fn helper_bin() -> PathBuf {
 struct RootHelper {
     child: Child,
     accounts: Vec<String>,
-    /// root's folder holding agents' homes, removed at the end.
+    spaces: Vec<String>,
+    /// root's folder for the test's spaces and ctx, removed at the end.
     sys: PathBuf,
 }
 
@@ -33,8 +34,18 @@ impl Drop for RootHelper {
         for a in &self.accounts {
             if cfg!(target_os = "macos") {
                 let _ = Command::new("sudo").args(["-n", "dscl", ".", "-delete", &format!("/Users/{a}")]).status();
+                let _ = Command::new("sudo").args(["-n", "rm", "-rf", &format!("/Users/{a}")]).status();
             } else {
                 let _ = Command::new("sudo").args(["-n", "userdel", a]).status();
+                let _ = Command::new("sudo").args(["-n", "rm", "-rf", &format!("/home/{a}")]).status();
+            }
+        }
+        for g in &self.spaces {
+            let g = format!("ctx-space-{g}");
+            if cfg!(target_os = "macos") {
+                let _ = Command::new("sudo").args(["-n", "dseditgroup", "-o", "delete", &g]).status();
+            } else {
+                let _ = Command::new("sudo").args(["-n", "groupdel", &g]).status();
             }
         }
         let _ = Command::new("sudo").args(["-n", "rm", "-rf"]).arg(&self.sys).status();
@@ -75,12 +86,15 @@ fn agents_are_accounts_and_the_os_decides_what_they_reach() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let sock = format!("/tmp/ctx-real-{tag}.sock");
-    // Agents' homes: made by the helper, outside your home, in a folder of root's (as
-    // /Users/Shared and /home are).
+    // Agents' homes are where every account's is; spaces go in a folder of root's for the test
+    // (as /Users/Shared and /srv are root's).
     let sys = PathBuf::from(format!("/tmp/ctx-real-sys-{tag}"));
     assert!(Command::new("sudo").args(["-n", "mkdir", "-p", "-m", "755"]).arg(&sys).status().unwrap().success());
-    let homes = sys.join("homes");
-    let homes_env = format!("CTX_AGENT_HOMES={}", homes.display());
+    let spaces = sys.join("spaces");
+    let spaces_env = format!("CTX_SPACES_DIR={}", spaces.display());
+    let home_of =
+        |n: &str| PathBuf::from(if cfg!(target_os = "macos") { format!("/Users/{n}") } else { format!("/home/{n}") });
+    let space = format!("t{tag}");
     let rules = dir.join("helper.toml");
     std::fs::write(&rules, format!("owner = \"{}\"\n", me())).unwrap();
     let child = Command::new("sudo")
@@ -89,15 +103,18 @@ fn agents_are_accounts_and_the_os_decides_what_they_reach() {
             "env",
             &format!("CTX_HELPER_SOCKET={sock}"),
             &format!("CTX_HELPER_CONFIG={}", rules.display()),
-            &homes_env,
+            &spaces_env,
         ])
         .arg(helper_bin())
         .stdout(Stdio::null())
         .stderr(Stdio::from(std::fs::File::create(dir.join("helper.log")).unwrap()))
         .spawn()
         .unwrap();
-    let _h = RootHelper { child, accounts: vec![a.clone(), b.clone(), format!("ctxt-c{tag}")], sys: sys.clone() };
+    let _h = RootHelper { child, accounts: vec![a.clone(), b.clone()], spaces: vec![space.clone()], sys: sys.clone() };
     assert!(wait_for(|| Path::new(&sock).exists()), "the helper didn't start");
+    let helper_log = dir.join("helper.log");
+    // What the helper said, when a step fails.
+    let log = || std::fs::read_to_string(&helper_log).unwrap_or_default();
 
     // The test's ctx server lives under /tmp, not the per-user temporary folder (mode 700). ctx
     // itself is installed where agents can run it: a folder of root's, as an install puts it
@@ -120,37 +137,26 @@ fn agents_are_accounts_and_the_os_decides_what_they_reach() {
     assert!(ok, "couldn't install ctx for the agents");
     // SAFETY: the only test in this file; nothing else reads the environment concurrently.
     unsafe { std::env::set_var("TMPDIR", &open_dir) };
-    let s = Server::start_with("real", &[("CTX_HELPER_SOCKET", &sock), ("CTX_AGENT_HOMES", homes.to_str().unwrap())]);
+    let s = Server::start_with("real", &[("CTX_HELPER_SOCKET", &sock), ("CTX_SPACES_DIR", spaces.to_str().unwrap())]);
     // A home other accounts can enter is reported; a real home is private (macOS 700, Linux 750).
     std::fs::set_permissions(&s.home, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-    let o = s.ctx(&["make", "agent", "named", &a]).ok().stdout.clone();
-    assert!(o.contains("lets every account in"), "{o}");
+    let o = s.ctx(&["make", "agent", "named", &a]);
+    assert!(o.code == 0 && o.stdout.contains("lets every account in"), "{} {}\nhelper: {}", o.stdout, o.stderr, log());
     s.ctx(&["remove", "agent", &a, "with", "its", "files"]).ok();
     std::fs::set_permissions(&s.home, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
     let agents = s.home.join("Agents");
     let ctx_path = ctx_copy.display().to_string();
 
-    // Making agents: accounts, homes outside yours with the starter files (~/Agents links to
-    // them), and a shared folder.
+    // Making agents: accounts, private homes where every account's is, with the starter files
+    // (~/Agents links to them).
     let o = s.ctx(&["make", "agent", "named", &a]).ok().stdout.clone();
     assert!(o.contains(&format!("Made the agent \"{a}\"")) && o.contains("ctx switch to agent"), "{o}");
     assert!(!o.contains("lets every account in"), "{o}");
     s.ctx(&["make", "agent", "named", &b]).ok();
     for f in ["CLAUDE.md", "AGENTS.md", "ctx-agent.toml"] {
-        assert!(homes.join(&a).join(f).exists(), "{f}");
+        assert!(home_of(&a).join(f).exists(), "{f}");
     }
-    assert_eq!(std::fs::read_link(agents.join(&a)).unwrap(), homes.join(&a));
-    // A folder of yours as a home moves out of your home, leaving a link.
-    let c = format!("ctxt-c{tag}");
-    std::fs::create_dir_all(s.home.join("old-c")).unwrap();
-    std::fs::write(s.home.join("old-c/notes.md"), "kept").unwrap();
-    let o =
-        s.ctx(&["make", "agent", "named", &c, "from", &s.home.join("old-c").display().to_string()]).ok().stdout.clone();
-    assert!(o.contains("Moved"), "{o}");
-    assert_eq!(std::fs::read_link(s.home.join("old-c")).unwrap(), homes.join(&c));
-    assert_eq!(std::fs::read_to_string(homes.join(&c).join("notes.md")).unwrap(), "kept");
-    s.ctx(&["remove", "agent", &c, "with", "its", "files"]).ok();
-    assert!(agents.join("Shared/everyone").is_dir());
+    assert_eq!(std::fs::read_link(agents.join(&a)).unwrap(), home_of(&a));
     let o = s.ctx(&["show", "agent", &a]).ok().stdout.clone();
     assert!(o.contains("you may read and write its home"), "{o}");
 
@@ -158,11 +164,14 @@ fn agents_are_accounts_and_the_os_decides_what_they_reach() {
     let ta = opened(&s.ctx(&["switch", "to", "agent", &a]).ok().stdout);
     let tb = opened(&s.ctx(&["switch", "to", "agent", &b]).ok().stdout);
     s.ctx(&["open", "tab", "named", "Mine", "at", "/tmp"]).ok();
-    let o = s.ctx(&["run", "in", "tab", &ta, "id -un; pwd; echo $CTX_AGENTS"]).ok().stdout.clone();
+    let o = s.ctx(&["run", "in", "tab", &ta, "id -un; pwd; echo $CTX_SPACES"]).ok().stdout.clone();
     let lines: Vec<&str> = o.lines().collect();
     assert_eq!(lines.first(), Some(&a.as_str()), "{o}");
-    assert_eq!(lines.get(1).copied(), Some(homes.join(&a).to_str().unwrap()), "{o}");
-    assert_eq!(lines.get(2).copied(), Some(homes.to_str().unwrap()), "{o}");
+    assert_eq!(lines.get(1).copied(), Some(home_of(&a).to_str().unwrap()), "{o}");
+    assert_eq!(lines.get(2).copied(), Some(spaces.to_str().unwrap()), "{o}");
+    // Homes are private: b can't look in a's.
+    let o = s.ctx(&["run", "in", "tab", &tb, &format!("cat '{}/CLAUDE.md'", home_of(&a).display())]).stdout;
+    assert!(o.contains("ermission denied"), "{o}");
     let list = s.ctx(&["list", "tabs"]).ok().stdout.clone();
     assert!(list.contains(&format!("as {a}")), "{list}");
 
@@ -228,31 +237,53 @@ fn agents_are_accounts_and_the_os_decides_what_they_reach() {
     s.ctx(&["reset", "agent", &a]).ok();
     s.ctx(&["switch", "to", "agent", &a]).ok();
 
-    // A shared folder an agent asks for: made by the server, for it, b and you.
-    let o = in_a(&format!("make shared folder with agent {b}"));
-    assert_eq!(o.code, 0, "{}", o.stderr);
-    let shared = homes.join("Shared").join({
-        let mut v = [a.clone(), b.clone()];
-        v.sort();
-        v.join("+")
-    });
-    assert!(shared.is_dir(), "{}", o.stdout);
+    // Spaces: a group and its folder. Only agents in it (and you) may use it; agents can't make
+    // spaces or add themselves.
+    let o = s.ctx(&["make", "space", "named", &space]);
+    assert_eq!(o.code, 0, "{}\nhelper: {}", o.stderr, log());
+    let folder = spaces.join(&space);
+    assert!(folder.is_dir());
+    assert!(in_a(&format!("make space named {space}x")).code != 0);
+    assert!(in_a(&format!("add agent {a} to space {space}")).code != 0);
+    for who in [&a, &b] {
+        s.ctx(&["add", "agent", who, "to", "space", &space]).ok();
+    }
+    let o = s.ctx(&["show", "agent", &a]).ok().stdout.clone();
+    assert!(o.contains(&format!("In the spaces: {space}")), "{o}");
+    // Group membership counts in tabs started after it.
+    let ta2 = opened(&s.ctx(&["switch", "to", "agent", &a]).ok().stdout);
+    let tb2 = opened(&s.ctx(&["switch", "to", "agent", &b]).ok().stdout);
     let o = s.ctx(&[
         "run",
         "in",
         "tab",
-        &tb,
-        &format!("echo hi > '{}/note' && cat '{}/note'", shared.display(), shared.display()),
+        &tb2,
+        &format!("echo hi > '{}/note' && cat '{}/note'", folder.display(), folder.display()),
     ]);
     assert_eq!(o.ok().stdout, "hi\n");
+    let o = s.ctx(&[
+        "run",
+        "in",
+        "tab",
+        &ta2,
+        &format!("echo more >> '{}/note' && cat '{}/note'", folder.display(), folder.display()),
+    ]);
+    assert_eq!(o.ok().stdout, "hi\nmore\n", "an agent in the space writes what another made");
+    assert_eq!(std::fs::read_to_string(folder.join("note")).unwrap(), "hi\nmore\n", "you may read it");
+    s.ctx(&["take", "agent", &a, "out", "of", "space", &space]).ok();
+    let ta3 = opened(&s.ctx(&["switch", "to", "agent", &a]).ok().stdout);
+    let o = s.ctx(&["run", "in", "tab", &ta3, &format!("cat '{}/note'", folder.display())]).stdout;
+    assert!(o.contains("ermission denied"), "out of the space: {o}");
+    let o = s.ctx(&["list", "spaces"]).ok().stdout.clone();
+    assert!(o.contains(&space) && o.contains(&b) && !o.contains(&a), "{o}");
+    s.ctx(&["remove", "space", &space, "with", "its", "files"]).ok();
+    assert!(!folder.exists());
 
     // Removing: accounts go, homes to the Trash with `with its files`.
-    for t in [&ta, &tb] {
-        s.ctx(&["close", "tab", t, "without", "asking"]);
-    }
     s.ctx(&["remove", "agent", &a, "with", "its", "files"]).ok();
     s.ctx(&["remove", "agent", &b]).ok();
     assert!(Command::new("id").arg(&a).output().unwrap().stdout.is_empty());
+    assert!(!home_of(&a).exists(), "its home is in the Trash");
     assert!(std::fs::symlink_metadata(agents.join(&a)).is_err(), "its link goes with its home");
-    assert!(agents.join(&b).exists(), "a kept home keeps its link");
+    assert!(home_of(&b).exists() && agents.join(&b).exists(), "a kept home keeps its link");
 }

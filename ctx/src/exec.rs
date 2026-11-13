@@ -305,17 +305,6 @@ fn execute(s: Sentence, caller: Caller) -> Out {
     }
 }
 
-/// Send one request and give back its message lines, for sentences ctx mostly handles itself.
-pub fn server_lines(sentence: String, req: Request) -> Result<Vec<String>, String> {
-    let mut conn = Connection::open(ClientKind::Cli).map_err(|client::NoServer(m)| m)?;
-    match conn.request(&Envelope { sentence, request: req }) {
-        Ok(Response::Ok(Output::Done(d))) => Ok(vec![d.message]),
-        Ok(Response::Ok(other)) => Ok(vec![format!("{other:?}")]),
-        Ok(Response::Error(e)) => Err(e.message),
-        Err(e) => Err(format!("Lost the connection to the ctx server: {e}")),
-    }
-}
-
 fn server_request(sentence: String, mut req: Request, format: Format, caller: Caller) -> Out {
     let mut out = Out::default();
     // `ctx run` with no command reads it from standard input (a heredoc).

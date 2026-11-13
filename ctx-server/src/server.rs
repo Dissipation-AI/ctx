@@ -1455,7 +1455,6 @@ impl Server {
             Request::ListClosedTabs { limit } => self.list_closed(key, limit),
             Request::Starters { limit } => self.starters(key, limit),
             Request::ReopenLastSession => self.reopen_last_session(key),
-            Request::MakeSharedFolder { with } => self.make_shared_folder(key, with),
             Request::Hand { what } => self.hand(key, what),
             Request::Processes { tab } => self.processes(key, &tab),
             Request::ListCommands { tab, limit } => self.list_commands(key, &tab, limit),
@@ -2139,10 +2138,9 @@ impl Server {
             rc_dir = door.join("shell");
             as_account = Some((o.clone(), acct.name.clone(), sandbox));
             limits = file.limits;
+            // Your ~/Agents isn't the agent's to reach: its spaces are in CTX_SPACES.
             env.retain(|(k, _)| k != "CTX_AGENT" && k != "CTX_AGENTS");
             env.push(("CTX_AGENT".into(), o.clone()));
-            // Agents reach agents' homes where they are, not through your ~/Agents links.
-            env.push(("CTX_AGENTS".into(), ctx_protocol::helper::agent_homes().display().to_string()));
         } else if let Some(o) = &owner {
             let Some(agent) = self.config.agents.get(o).cloned() else {
                 return Err(failed(format!(
@@ -2509,6 +2507,8 @@ impl Server {
         for (k, v) in self.config.folders.env(&sys::home()) {
             set(&mut env, k, v);
         }
+        // Spaces agents work in together (each a group and a folder here).
+        set(&mut env, "CTX_SPACES", ctx_accounts::accounts::spaces_dir().display().to_string());
         if self.config.ssh_integration {
             set(&mut env, "CTX_SSH_COMMAND", ssh_command());
         }
@@ -2787,33 +2787,6 @@ impl Server {
 
     // ----- reopening -----
 
-    /// Every tab of the last session that isn't open now, each back in its window (a window
-    /// that's gone comes back with its number, and its name when that's free).
-    /// A shared folder for the agent asking and the agents it names (and you). Made by the
-    /// server as you, so no agent can make one in another's name: the asker is always in it.
-    fn make_shared_folder(&mut self, key: usize, with: Vec<String>) -> Handled {
-        let mut names = with;
-        if let Some(p) = self.principal(key) {
-            names.push(p.to_string());
-        }
-        names.sort();
-        names.dedup();
-        let mut uids = Vec::new();
-        for n in &names {
-            match crate::accounts::agent(n) {
-                Some(a) => uids.push(a.uid),
-                None => return err(ErrorKind::NotAllowed, format!("There's no agent account \"{n}\".")),
-            }
-        }
-        match ctx_accounts::shared::make(&ctx_protocol::helper::agent_homes(), &names, &uids) {
-            Ok(dir) => {
-                self.access.borrow_mut().forget();
-                done(format!("{} is shared by {} and the person.", dir.display(), names.join(", ")))
-            }
-            Err(e) => err(ErrorKind::Failed, e),
-        }
-    }
-
     /// A link, file or text an agent hands to your session (its `open`, `xdg-open`, `pbcopy`).
     fn hand(&mut self, key: usize, what: ctx_protocol::Handed) -> Handled {
         use ctx_protocol::Handed;
@@ -2858,6 +2831,8 @@ impl Server {
         }
     }
 
+    /// Every tab of the last session that isn't open now, each back in its window (a window
+    /// that's gone comes back with its number, and its name when that's free).
     fn reopen_last_session(&mut self, key: usize) -> Handled {
         let session: LastSession = std::fs::read(self.paths.last_session())
             .ok()

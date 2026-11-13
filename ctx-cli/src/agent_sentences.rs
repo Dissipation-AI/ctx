@@ -1,4 +1,5 @@
-//! Sentences about agents' accounts: making, sharing with, limiting and switching to agents.
+//! Sentences about agents' accounts and spaces: making, sharing with, limiting and switching to
+//! agents, and the spaces (groups and their folders) agents work in together.
 //!
 //! These share verbs with the main grammar (`make`, `remove`, `rename`, `show`) but have their
 //! own shape, `<verb> agent "<name>" …`, so they're read here first and fall through to the main
@@ -31,14 +32,9 @@ pub enum LimitSpec {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum AgentCommand {
-    /// A new account; `home` is an existing folder to use as its home.
+    /// A new account, with its home where every account's is.
     Make {
         name: String,
-        home: Option<String>,
-    },
-    /// An existing standard account becomes an agent.
-    Adopt {
-        account: String,
     },
     Remove {
         name: String,
@@ -68,30 +64,35 @@ pub enum AgentCommand {
     Reset {
         name: String,
     },
-    MakeShared {
-        with: Vec<String>,
+    MakeSpace {
+        name: String,
     },
-    MoveToAccounts,
+    RemoveSpace {
+        name: String,
+        with_files: bool,
+    },
+    /// Put an agent in a space (`member`) or take it out.
+    SpaceMember {
+        agent: String,
+        space: String,
+        member: bool,
+    },
+    ListSpaces,
 }
 
 /// Example sentences with what they do, for `ctx help`, docs/grammar.md and tests.
 pub const EXAMPLES: &[(&str, &str)] = &[
     (
         "ctx make agent named \"email-agent\"",
-        "A new agent: its own account, its home beside other agents' (outside yours), and ~/Agents/email-agent linking to it.",
+        "A new agent: its own account and private home (/Users/email-agent; ~/Agents/email-agent links to it).",
     ),
-    (
-        "ctx make agent named \"email-agent\" from ~/Agents/email-agent",
-        "The same, with an existing folder as its home (one in your home moves out, leaving a link).",
-    ),
-    ("ctx make agent from account \"vibe-daemon\"", "An existing standard account becomes an agent."),
     (
         "ctx switch to agent \"email-agent\"",
         "Open a tab as the agent, in its home (like su). Run claude, codex, pi… there.",
     ),
     ("ctx allow agent \"email-agent\" to read ~/Context/career", "Let it read that folder (an access-list entry)."),
     ("ctx allow agent \"foreman\" to write agent \"email-agent\"", "Make foreman an administrator of email-agent."),
-    ("ctx allow every agent to read ~/.local/bin", "Every agent may read it."),
+    ("ctx allow every agent to read ~/Context/style-guide.md", "Every agent may read it."),
     ("ctx forbid agent \"email-agent\" to write ~/Context/career", "Take write back; reading stays."),
     ("ctx forbid agent \"email-agent\" to read ~/Context/career", "Take all access back."),
     ("ctx show agent \"email-agent\"", "Its account, administrators, grants, limits and tabs."),
@@ -103,10 +104,13 @@ pub const EXAMPLES: &[(&str, &str)] = &[
     ("ctx reset agent \"email-agent\"", "Rewrite its ctx-agent.toml as yours, with the defaults."),
     ("ctx remove agent \"email-agent\"", "Delete the account; its home stays. Add `with its files` to trash it too."),
     (
-        "ctx make shared folder with agent \"email-agent\"",
-        "A folder in ~/Agents/Shared for the agent running this, that agent and you.",
+        "ctx make space named \"research\"",
+        "A folder agents work in together: only the agents you add, and you, may use it.",
     ),
-    ("ctx move agents to accounts", "Turn the [agents] sections of config.toml into accounts. Shows the plan first."),
+    ("ctx add agent \"email-agent\" to space \"research\"", "It may read and write the space (its new tabs)."),
+    ("ctx take agent \"email-agent\" out of space \"research\"", "It may no longer use the space."),
+    ("ctx list spaces", "Every space, its folder and the agents in it."),
+    ("ctx remove space \"research\"", "Delete the space's group; its folder stays. Add `with its files` to trash it."),
 ];
 
 pub struct Parsed {
@@ -201,12 +205,14 @@ pub fn parse(tokens: &[Token], cwd: &crate::parse::Context) -> Option<Result<Par
     let first = w.first()?.as_str();
     let second = w.get(1).map(String::as_str);
     let third = w.get(2).map(String::as_str);
+    let _ = third;
     let is_ours = match first {
-        "make" => second == Some("agent") || (second == Some("shared") && third == Some("folder")),
-        "remove" | "rename" | "show" | "limit" | "reset" => second == Some("agent"),
+        "make" | "remove" => matches!(second, Some("agent" | "space")),
+        "rename" | "show" | "limit" | "reset" => second == Some("agent"),
+        "add" | "take" => second == Some("agent"),
+        "list" => second == Some("spaces"),
         "allow" | "forbid" => true,
         "switch" => true,
-        "move" => second == Some("agents") && third == Some("to"),
         _ => false,
     };
     if !is_ours {
@@ -223,53 +229,60 @@ pub fn parse(tokens: &[Token], cwd: &crate::parse::Context) -> Option<Result<Par
 fn sentence(t: &[Token], w: &[String], cwd: &crate::parse::Context) -> Result<(AgentCommand, String), ParseError> {
     let s = |i: usize| w.get(i).map(String::as_str);
     match s(0).unwrap_or("") {
-        "make" if s(1) == Some("shared") => {
-            // make shared folder with agent "b" [and agent "c"]…
-            let mut with = Vec::new();
-            let mut i = 3;
-            if s(i) != Some("with") {
-                return Err(ParseError::new("With whom? `ctx make shared folder with agent \"<name>\"`."));
-            }
-            i += 1;
-            loop {
-                if s(i) != Some("agent") {
-                    return Err(ParseError::new("With whom? `ctx make shared folder with agent \"<name>\"`."));
-                }
-                with.push(name_at(t, i + 1, "agent", "ctx make shared folder with agent \"b\"")?);
-                i += 2;
-                if s(i) == Some("and") {
-                    i += 1;
-                    continue;
-                }
-                break;
-            }
-            no_more(t, i)?;
-            let shown = with.iter().map(|a| format!("agent {}", quote(a))).collect::<Vec<_>>().join(" and ");
-            Ok((AgentCommand::MakeShared { with }, format!("ctx make shared folder with {shown}")))
+        "make" if s(1) == Some("space") => {
+            let at = if s(2) == Some("named") { 3 } else { 2 };
+            let name = name_at(t, at, "name", "ctx make space named \"research\"")?;
+            no_more(t, at + 1)?;
+            let c = format!("ctx make space named {}", quote(&name));
+            Ok((AgentCommand::MakeSpace { name }, c))
         }
         "make" => {
-            // make agent named "b" [from <folder>] | make agent "b" | make agent from account "x"
-            if s(2) == Some("from") && s(3) == Some("account") {
-                let account = name_at(t, 4, "account", "ctx make agent from account \"vibe-daemon\"")?;
-                no_more(t, 5)?;
-                let c = format!("ctx make agent from account {}", quote(&account));
-                return Ok((AgentCommand::Adopt { account }, c));
-            }
+            // make agent named "b" | make agent "b"
             let at = if s(2) == Some("named") { 3 } else { 2 };
             let name = name_at(t, at, "name", "ctx make agent named \"email-agent\"")?;
-            let mut home = None;
-            let mut i = at + 1;
-            if s(i) == Some("from") {
-                let f = t.get(i + 1).ok_or_else(|| ParseError::new("From which folder? `from ~/Agents/<name>`."))?;
-                home = Some(resolve_path(&f.text, cwd));
-                i += 2;
+            no_more(t, at + 1)?;
+            let c = format!("ctx make agent named {}", quote(&name));
+            Ok((AgentCommand::Make { name }, c))
+        }
+        "remove" if s(1) == Some("space") => {
+            let name = name_at(t, 2, "space", "ctx remove space \"research\"")?;
+            let with_files = w[3..].join(" ") == "with its files" || w[3..].join(" ") == "with files";
+            if !with_files {
+                no_more(t, 3)?;
             }
-            no_more(t, i)?;
-            let mut c = format!("ctx make agent named {}", quote(&name));
-            if let Some(h) = &home {
-                c.push_str(&format!(" from {}", quote(h)));
+            let mut c = format!("ctx remove space {}", quote(&name));
+            if with_files {
+                c.push_str(" with its files");
             }
-            Ok((AgentCommand::Make { name, home }, c))
+            Ok((AgentCommand::RemoveSpace { name, with_files }, c))
+        }
+        verb @ ("add" | "take") => {
+            // add agent "a" to space "s" | take agent "a" out of space "s"
+            let agent = name_at(t, 2, "agent", "ctx add agent \"email-agent\" to space \"research\"")?;
+            let (words_needed, at): (&[&str], usize) =
+                if verb == "add" { (&["to", "space"], 3) } else { (&["out", "of", "space"], 3) };
+            let example = if verb == "add" {
+                format!("ctx add agent {} to space \"research\"", quote(&agent))
+            } else {
+                format!("ctx take agent {} out of space \"research\"", quote(&agent))
+            };
+            if words_needed.iter().enumerate().any(|(k, x)| s(at + k) != Some(x)) {
+                return Err(ParseError::new(format!("Which space? `{example}`")));
+            }
+            let i = at + words_needed.len();
+            let space = name_at(t, i, "space", &example)?;
+            no_more(t, i + 1)?;
+            let member = verb == "add";
+            let c = if member {
+                format!("ctx add agent {} to space {}", quote(&agent), quote(&space))
+            } else {
+                format!("ctx take agent {} out of space {}", quote(&agent), quote(&space))
+            };
+            Ok((AgentCommand::SpaceMember { agent, space, member }, c))
+        }
+        "list" => {
+            no_more(t, 2)?;
+            Ok((AgentCommand::ListSpaces, "ctx list spaces".into()))
         }
         "remove" => {
             let name = name_at(t, 2, "agent", "ctx remove agent \"email-agent\"")?;
@@ -317,12 +330,6 @@ fn sentence(t: &[Token], w: &[String], cwd: &crate::parse::Context) -> Result<(A
             no_more(t, 4)?;
             let c = format!("ctx switch to agent {}", quote(&name));
             Ok((AgentCommand::Switch { name }, c))
-        }
-        "move" => {
-            if w[1..].join(" ") != "agents to accounts" {
-                return Err(ParseError::new("`ctx move agents to accounts`."));
-            }
-            Ok((AgentCommand::MoveToAccounts, "ctx move agents to accounts".into()))
         }
         "limit" => {
             let name = name_at(t, 2, "agent", "ctx limit agent \"email-agent\" to 8 GB of memory")?;
@@ -430,11 +437,8 @@ mod tests {
 
     #[test]
     fn forms() {
-        assert_eq!(p("make agent named b").unwrap().command, AgentCommand::Make { name: "b".into(), home: None });
-        assert_eq!(
-            p("make agent b from ~/Agents/b").unwrap().command,
-            AgentCommand::Make { name: "b".into(), home: Some("/Users/c/Agents/b".into()) }
-        );
+        assert_eq!(p("make agent named b").unwrap().command, AgentCommand::Make { name: "b".into() });
+        assert!(p("make agent b from ~/Agents/b").is_err());
         assert_eq!(
             p("allow every agent to read ~/.local/bin").unwrap().command,
             AgentCommand::Grant {
@@ -465,10 +469,20 @@ mod tests {
             p("remove agent b with its files").unwrap().command,
             AgentCommand::Remove { name: "b".into(), with_files: true }
         );
+        assert_eq!(p("make space research").unwrap().command, AgentCommand::MakeSpace { name: "research".into() });
         assert_eq!(
-            p("make shared folder with agent b and agent c").unwrap().command,
-            AgentCommand::MakeShared { with: vec!["b".into(), "c".into()] }
+            p("add agent b to space research").unwrap().command,
+            AgentCommand::SpaceMember { agent: "b".into(), space: "research".into(), member: true }
         );
+        assert_eq!(
+            p("take agent b out of space research").unwrap().command,
+            AgentCommand::SpaceMember { agent: "b".into(), space: "research".into(), member: false }
+        );
+        assert_eq!(
+            p("remove space research with its files").unwrap().command,
+            AgentCommand::RemoveSpace { name: "research".into(), with_files: true }
+        );
+        assert!(p("add agent b to research").is_err());
         assert_eq!(p("show agent b as json").unwrap().format, Format::Json);
         assert!(p("limit agent b to lots").is_err());
         assert!(p("allow agent b to eat ~/x").is_err());

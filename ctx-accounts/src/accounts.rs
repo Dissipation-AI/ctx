@@ -1,9 +1,13 @@
-//! Accounts and the `ctx-agents` group: looking them up (anyone), and making, adopting and
+//! Accounts, the `ctx-agents` group and spaces: looking them up (anyone), and making and
 //! removing them (root only; the helper does it).
 //!
 //! An agent is an account in the group [`AGENTS_GROUP`]. Agents' accounts are hidden from the
 //! login window, standard (never administrators), have no password (nobody logs in as them;
-//! the helper starts their processes), and use `ctx-agents` as their primary group.
+//! the helper starts their processes), use `ctx-agents` as their primary group, and have their
+//! home where every account's home is ([`home_of`]).
+//!
+//! A space is a folder some agents work in together: a group `ctx-space-<name>` (its members are
+//! the agents in it) and a folder in [`spaces_dir`] that the group may read and write.
 
 use std::ffi::{CStr, CString};
 use std::process::Command;
@@ -17,6 +21,110 @@ pub fn valid_name(name: &str) -> bool {
     matches!(chars.next(), Some('a'..='z'))
         && name.len() <= 31
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// Where an account called `name` has its home: where every account's is.
+pub fn home_of(name: &str) -> String {
+    if cfg!(target_os = "macos") { format!("/Users/{name}") } else { format!("/home/{name}") }
+}
+
+/// The group name of a space.
+pub const SPACE_PREFIX: &str = "ctx-space-";
+
+/// Space names: as account names, at most 21 long (the group name is at most 31).
+pub fn valid_space_name(name: &str) -> bool {
+    valid_name(name) && name.len() <= 21 && name != "agents"
+}
+
+/// Where spaces' folders are: outside every home, so reaching one passes through no one's.
+/// `CTX_SPACES_DIR` moves it (tests).
+pub fn spaces_dir() -> std::path::PathBuf {
+    if let Some(d) = std::env::var_os("CTX_SPACES_DIR").filter(|d| !d.is_empty()) {
+        return d.into();
+    }
+    if cfg!(target_os = "macos") { "/Users/Shared/Spaces".into() } else { "/srv/spaces".into() }
+}
+
+/// A space: its name, group id, the agents in it and its folder.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Space {
+    pub name: String,
+    pub gid: u32,
+    pub members: Vec<String>,
+    pub folder: String,
+}
+
+pub fn space(name: &str) -> Option<Space> {
+    let (gid, members) = group(&format!("{SPACE_PREFIX}{name}"))?;
+    Some(Space { name: name.into(), gid, members, folder: spaces_dir().join(name).display().to_string() })
+}
+
+/// Every space, by name.
+pub fn spaces() -> Vec<Space> {
+    let mut names = Vec::new();
+    // SAFETY: the getgrent walk; names copied out at once.
+    unsafe {
+        libc::setgrent();
+        loop {
+            let g = libc::getgrent();
+            if g.is_null() {
+                break;
+            }
+            let n = CStr::from_ptr((*g).gr_name).to_string_lossy().into_owned();
+            if let Some(s) = n.strip_prefix(SPACE_PREFIX)
+                && !names.iter().any(|x: &String| x == s)
+            {
+                names.push(s.to_string());
+            }
+        }
+        libc::endgrent();
+    }
+    names.sort();
+    names.iter().filter_map(|n| space(n)).collect()
+}
+
+/// The spaces `agent` is in.
+pub fn spaces_of(agent: &str) -> Vec<Space> {
+    spaces().into_iter().filter(|s| s.members.iter().any(|m| m == agent)).collect()
+}
+
+/// A space's group, made. Root only.
+pub fn make_space_group(name: &str) -> Result<u32, String> {
+    if !valid_space_name(name) {
+        return Err(format!(
+            "\"{name}\" can't be a space's name: up to 21 lowercase letters, digits and -, starting with a letter."
+        ));
+    }
+    let g = format!("{SPACE_PREFIX}{name}");
+    if group(&g).is_some() {
+        return Err(format!("There's already a space \"{name}\"."));
+    }
+    if cfg!(target_os = "macos") {
+        let gid = free_id(true)?;
+        run("dseditgroup", &["-o", "create", "-r", &format!("CTX space {name}"), "-i", &gid.to_string(), &g])?;
+    } else {
+        run("groupadd", &["--system", &g])?;
+    }
+    group(&g).map(|(gid, _)| gid).ok_or_else(|| format!("the group {g} didn't appear"))
+}
+
+pub fn remove_space_group(name: &str) -> Result<(), String> {
+    let g = format!("{SPACE_PREFIX}{name}");
+    if cfg!(target_os = "macos") {
+        run("dseditgroup", &["-o", "delete", &g]).map(|_| ())
+    } else {
+        run("groupdel", &[&g]).map(|_| ())
+    }
+}
+
+/// Put `agent` in the space or take it out. Root only.
+pub fn set_space_member(name: &str, agent: &str, member: bool) -> Result<(), String> {
+    let g = format!("{SPACE_PREFIX}{name}");
+    if cfg!(target_os = "macos") {
+        run("dseditgroup", &["-o", "edit", if member { "-a" } else { "-d" }, agent, "-t", "user", &g]).map(|_| ())
+    } else {
+        run("gpasswd", &[if member { "-a" } else { "-d" }, agent, &g]).map(|_| ())
+    }
 }
 
 /// Names that are never agents.
@@ -164,16 +272,16 @@ fn free_id(_for_group: bool) -> Result<u32, String> {
 }
 
 /// Make a new agent account. Root only. The home folder itself is made by the caller.
-pub fn make(name: &str, full_name: &str, home: &str) -> Result<Account, String> {
+pub fn make(name: &str, full_name: &str) -> Result<Account, String> {
+    let home = home_of(name);
+    let home = home.as_str();
     if !valid_name(name) || RESERVED.contains(&name) {
         return Err(format!(
             "\"{name}\" can't be an agent's name: use lowercase letters, digits and -, starting with a letter."
         ));
     }
     if by_name(name).is_some() {
-        return Err(format!(
-            "There's already an account \"{name}\". To make it an agent: ctx make agent from account \"{name}\"."
-        ));
+        return Err(format!("There's already an account \"{name}\"; choose another name."));
     }
     let gid = ensure_agents_group()?;
     let full = if full_name.is_empty() { name } else { full_name };
@@ -220,23 +328,6 @@ pub fn make(name: &str, full_name: &str, home: &str) -> Result<Account, String> 
 }
 
 /// Make an existing standard account an agent. Root only.
-pub fn adopt(name: &str) -> Result<Account, String> {
-    let a = by_name(name).ok_or_else(|| format!("There's no account \"{name}\"."))?;
-    if a.uid == 0 || is_admin(name) {
-        return Err(format!(
-            "\"{name}\" is an administrator. An agent's account is standard; make it standard first, or make a new agent."
-        ));
-    }
-    ensure_agents_group()?;
-    if cfg!(target_os = "macos") {
-        run("dseditgroup", &["-o", "edit", "-a", name, "-t", "user", AGENTS_GROUP])?;
-    } else {
-        run("usermod", &["-aG", AGENTS_GROUP, name])?;
-    }
-    Ok(a)
-}
-
-/// Delete an agent account (not its home). Root only.
 pub fn remove(name: &str) -> Result<(), String> {
     let a = by_name(name).ok_or_else(|| format!("There's no account \"{name}\"."))?;
     if !is_agent(&a) {
@@ -273,6 +364,14 @@ mod tests {
         assert!(!valid_name("a b"));
         assert!(!valid_name(""));
         assert!(!valid_name(&"a".repeat(32)));
+    }
+
+    #[test]
+    fn space_names_fit_their_group() {
+        assert!(valid_space_name("research"));
+        assert!(!valid_space_name("agents"));
+        assert!(!valid_space_name(&"a".repeat(22)));
+        assert!((SPACE_PREFIX.len() + 21) <= 31);
     }
 
     #[test]

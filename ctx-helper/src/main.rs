@@ -423,13 +423,18 @@ fn serve_one(stream: UnixStream, rules: &HelperConfig, owner_uid: libc::uid_t) {
 fn handle(req: HelperRequest, owner: libc::uid_t) -> HelperReply {
     let r = match req {
         HelperRequest::Version => return HelperReply::Version { version: HELPER_VERSION },
-        HelperRequest::MakeAgentHomes => make_agent_homes(owner),
-        HelperRequest::MakeAccount { name, full_name, home, files } => {
-            make_account(&name, &full_name, &home, &files, owner)
-        }
-        HelperRequest::AdoptAccount { name } => {
-            accounts::adopt(&name).map(|a| format!("\"{}\" is an agent now.", a.name))
-        }
+        HelperRequest::MakeAccount { name, full_name, files } => make_account(&name, &full_name, &files, owner),
+        HelperRequest::MakeSpace { name } => make_space(&name, owner),
+        HelperRequest::RemoveSpace { name, trash_folder } => remove_space(&name, trash_folder, owner),
+        HelperRequest::SetSpaceMember { space, agent: who, member } => agent(&who, owner).and_then(|_| {
+            let s = accounts::space(&space).ok_or_else(|| format!("There's no space \"{space}\"."))?;
+            accounts::set_space_member(&space, &who, member)?;
+            Ok(if member {
+                format!("\"{who}\" is in the space \"{space}\" ({}). Its new tabs can use it.", s.folder)
+            } else {
+                format!("\"{who}\" is out of the space \"{space}\". Tabs it has open keep it until they close.")
+            })
+        }),
         HelperRequest::RemoveAccount { name, trash_home } => remove_account(&name, trash_home, owner),
         HelperRequest::SetFullName { name, full_name } => agent(&name, owner)
             .and_then(|_| accounts::set_full_name(&name, &full_name))
@@ -471,82 +476,21 @@ fn chown(p: &Path, uid: u32, gid: u32) -> std::io::Result<()> {
     std::os::unix::fs::lchown(p, Some(uid), Some(gid))
 }
 
-/// The folder agents' homes go in: yours, others may pass through it but not list it.
-fn make_agent_homes(owner: libc::uid_t) -> Result<String, String> {
+fn make_account(name: &str, full_name: &str, files: &[StarterFile], owner: libc::uid_t) -> Result<String, String> {
     use std::os::unix::fs::PermissionsExt;
-    let dir = ctx_protocol::helper::agent_homes();
-    if let Some(m) = lstat(&dir) {
-        return if m.is_dir() && std::os::unix::fs::MetadataExt::uid(&m) == owner {
-            Ok(format!("{} is there.", dir.display()))
-        } else {
-            Err(format!("{} exists and isn't a folder of yours.", dir.display()))
-        };
+    let home = accounts::home_of(name);
+    let home_path = PathBuf::from(&home);
+    if lstat(&home_path).is_some() {
+        return Err(format!("{home} exists already; move it away or choose another name."));
     }
-    std::fs::create_dir(&dir).map_err(|e| format!("couldn't make {}: {e}", dir.display()))?;
-    let gid = accounts::by_uid(owner).map(|o| o.gid).unwrap_or(0);
-    chown(&dir, owner, gid).map_err(|e| format!("couldn't give {} to you: {e}", dir.display()))?;
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o711))
-        .map_err(|e| format!("couldn't set {}'s permissions: {e}", dir.display()))?;
-    Ok(format!("Made {} for agents' homes.", dir.display()))
-}
-
-fn make_account(
-    name: &str,
-    full_name: &str,
-    home: &str,
-    files: &[StarterFile],
-    owner: libc::uid_t,
-) -> Result<String, String> {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    let home_path = PathBuf::from(home);
-    if !home_path.is_absolute() || home.contains("/../") || home.ends_with("/..") {
-        return Err(format!("The home folder must be a full path, not \"{home}\"."));
-    }
-    let parent = home_path.parent().ok_or("The home folder needs a parent folder.")?;
-    let your_home = accounts::by_uid(owner).map(|o| PathBuf::from(o.home)).unwrap_or_default();
-    if !your_home.as_os_str().is_empty() && home_path.starts_with(&your_home) {
-        return Err(format!(
-            "An agent's home can't be inside your home folder ({}): the agent would have to pass through it, and could then read anything in it that other accounts may. Agents' homes go in {}.",
-            your_home.display(),
-            ctx_protocol::helper::agent_homes().display()
-        ));
-    }
-    if !owned_folder(parent, owner) {
-        return Err(format!("{} must be a folder of yours.", parent.display()));
-    }
-    let existing = lstat(&home_path);
-    if let Some(m) = &existing
-        && !(m.is_dir() && m.uid() == owner)
-    {
-        return Err(format!("{home} exists and isn't a folder of yours."));
-    }
-    let a = accounts::make(name, full_name, home)?;
+    let a = accounts::make(name, full_name)?;
     let undo = |e: String| {
         let _ = accounts::remove(name);
         e
     };
-    if existing.is_none() {
-        // Made here, as root: it's the agent's from the start.
-        std::fs::create_dir(&home_path).map_err(|e| undo(format!("couldn't make {home}: {e}")))?;
-        chown(&home_path, a.uid, a.gid).map_err(|e| undo(format!("couldn't give {home} to the agent: {e}")))?;
-    }
-    // Your files in it become the agent's: only files you own, not through links, and no file
-    // with other hard links (it would be someone else's file too).
-    let mut skipped = 0;
-    let mut give = |p: &Path| {
-        if let Some(m) = lstat(p)
-            && m.uid() == owner
-            && (m.is_dir() || m.nlink() == 1)
-        {
-            let _ = chown(p, a.uid, a.gid);
-        } else {
-            skipped += 1;
-        }
-    };
-    if existing.is_some() {
-        give(&home_path);
-    }
-    acl::each_inside(&home_path, &mut give);
+    // Made here, as root: the agent's from the start, private to it.
+    std::fs::create_dir(&home_path).map_err(|e| undo(format!("couldn't make {home}: {e}")))?;
+    chown(&home_path, a.uid, a.gid).map_err(|e| undo(format!("couldn't give {home} to the agent: {e}")))?;
     let _ = std::fs::set_permissions(&home_path, std::fs::Permissions::from_mode(0o700));
     for f in files {
         let rel = Path::new(&f.path);
@@ -554,9 +498,6 @@ fn make_account(
             continue;
         }
         let p = home_path.join(rel);
-        if lstat(&p).is_some() {
-            continue;
-        }
         if let Some(dir) = p.parent()
             && lstat(dir).is_none()
         {
@@ -573,24 +514,73 @@ fn make_account(
     // You keep full access to everything in it, now and later.
     acl::apply(&home_path, acl::Who::User(owner), Some(acl::Access::Write))
         .map_err(|e| undo(format!("couldn't give you access to {home}: {e}")))?;
-    // Agents pass through the folders of yours above it (never your home: see above).
-    let gid = accounts::group(accounts::AGENTS_GROUP).map(|(g, _)| g).unwrap_or(a.gid);
-    let mut up = parent.to_path_buf();
-    loop {
-        if !owned_folder(&up, owner) || up == your_home {
-            break;
-        }
-        let _ = acl::allow_passing(&up, acl::Who::Group(gid));
-        match up.parent() {
-            Some(p) => up = p.to_path_buf(),
-            None => break,
-        }
+    Ok(format!("Made the agent \"{name}\" (account {}, uid {}) with its home at {home}.", a.name, a.uid))
+}
+
+/// A space: its group, and its folder in the spaces folder (root's), yours, closed to everyone
+/// but the group, which may read and write everything in it. You may too, whoever made a file.
+fn make_space(name: &str, owner: libc::uid_t) -> Result<String, String> {
+    use std::os::unix::fs::PermissionsExt;
+    let root = accounts::spaces_dir();
+    if lstat(&root).is_none() {
+        std::fs::create_dir_all(&root).map_err(|e| format!("couldn't make {}: {e}", root.display()))?;
+        let _ = std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755));
     }
-    let mut msg = format!("Made the agent \"{name}\" (account {}, uid {}) with its home at {home}.", a.name, a.uid);
-    if skipped > 0 {
-        msg.push_str(&format!(" {skipped} files in it weren't yours (or had other links) and kept their owner."));
+    let dir = root.join(name);
+    if lstat(&dir).is_some() {
+        return Err(format!("{} exists already; move it away or choose another name.", dir.display()));
     }
-    Ok(msg)
+    let gid = accounts::make_space_group(name)?;
+    let undo = |e: String| {
+        let _ = accounts::remove_space_group(name);
+        e
+    };
+    std::fs::create_dir(&dir).map_err(|e| undo(format!("couldn't make {}: {e}", dir.display())))?;
+    chown(&dir, owner, gid).map_err(|e| undo(format!("couldn't give {} to you: {e}", dir.display())))?;
+    // New files keep the space's group (setgid: Linux needs it, macOS does it anyway).
+    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o2770));
+    for who in [acl::Who::Group(gid), acl::Who::User(owner)] {
+        acl::apply(&dir, who, Some(acl::Access::Write))
+            .map_err(|e| undo(format!("couldn't open {} to the space: {e}", dir.display())))?;
+    }
+    Ok(format!(
+        "Made the space \"{name}\" at {}. Add agents to it: ctx add agent \"<name>\" to space \"{name}\"",
+        dir.display()
+    ))
+}
+
+fn remove_space(name: &str, trash_folder: bool, owner: libc::uid_t) -> Result<String, String> {
+    let s = accounts::space(name).ok_or_else(|| format!("There's no space \"{name}\"."))?;
+    let mut msg = String::new();
+    let dir = PathBuf::from(&s.folder);
+    if trash_folder && owned_folder(&dir, owner) {
+        let to = to_trash(&dir, name, owner)?;
+        msg = format!(" Its folder is in your Trash ({}).", to.display());
+    }
+    accounts::remove_space_group(name)?;
+    Ok(format!("Removed the space \"{name}\".{msg}"))
+}
+
+/// Move `path` to your Trash as `<name>-<time>`; what agents made in it becomes yours.
+fn to_trash(path: &Path, name: &str, owner: libc::uid_t) -> Result<PathBuf, String> {
+    use std::os::unix::fs::MetadataExt;
+    let you = accounts::by_uid(owner).ok_or("There's no owner account.")?;
+    let trash = PathBuf::from(&you.home).join(".Trash");
+    let _ = std::fs::create_dir_all(&trash);
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let to = trash.join(format!("{name}-{stamp}"));
+    std::fs::rename(path, &to).map_err(|e| format!("couldn't move {} to the Trash: {e}", path.display()))?;
+    let mut take = |p: &Path| {
+        if let Some(m) = lstat(p)
+            && (m.is_dir() || m.nlink() == 1)
+            && accounts::by_uid(m.uid()).is_some_and(|a| accounts::is_agent(&a))
+        {
+            let _ = chown(p, owner, you.gid);
+        }
+    };
+    take(&to);
+    acl::each_inside(&to, &mut take);
+    Ok(to)
 }
 
 /// End every process of the account: as the account, signal everything it may signal (only its
@@ -643,26 +633,13 @@ fn remove_account(name: &str, trash_home: bool, owner: libc::uid_t) -> Result<St
     stop_everything_of(&a);
     let mut msg = String::new();
     let home = PathBuf::from(&a.home);
-    if trash_home && lstat(&home).is_some_and(|m| m.is_dir() && m.uid() == a.uid) {
-        let you = accounts::by_uid(owner).ok_or("There's no owner account.")?;
-        if !home.parent().is_some_and(|p| owned_folder(p, owner)) {
-            return Err(format!("{} isn't in a folder of yours, so ctx won't move it.", home.display()));
-        }
-        let trash = PathBuf::from(&you.home).join(".Trash");
-        let _ = std::fs::create_dir_all(&trash);
-        let stamp =
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-        let to = trash.join(format!("{name}-{stamp}"));
-        std::fs::rename(&home, &to).map_err(|e| format!("couldn't move {} to the Trash: {e}", home.display()))?;
-        // Everything the agent owned in it becomes yours.
-        let mut take = |p: &Path| {
-            if lstat(p).is_some_and(|m| m.uid() == a.uid && (m.is_dir() || m.nlink() == 1)) {
-                let _ = chown(p, owner, you.gid);
-            }
-        };
-        take(&to);
-        acl::each_inside(&to, &mut take);
+    // Only the home ctx made for it, where every home is.
+    if trash_home && a.home == accounts::home_of(name) && lstat(&home).is_some_and(|m| m.is_dir() && m.uid() == a.uid) {
+        let to = to_trash(&home, name, owner)?;
         msg = format!(" Its home is in your Trash ({}).", to.display());
+    }
+    for s in accounts::spaces_of(name) {
+        let _ = accounts::set_space_member(&s.name, name, false);
     }
     accounts::remove(name)?;
     Ok(format!("Removed the agent \"{name}\".{msg}"))
