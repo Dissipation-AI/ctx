@@ -1,5 +1,5 @@
-//! `ctx list agents`: the agents in config.toml and what each may reach (see
-//! `ctx-protocol/src/agents.rs` for how they're enforced).
+//! `ctx list agents`: agents' accounts (accounts in ctx-agents), and the older agents in
+//! config.toml with what each may reach (see `ctx-protocol/src/agents.rs` for those).
 
 use crate::exec::Out;
 use ctx_cli::parse::Format;
@@ -27,6 +27,9 @@ struct AgentInfo {
 #[derive(Serialize)]
 struct AgentList {
     schema: u32,
+    /// Agents that are accounts.
+    accounts: Vec<crate::accounts::AgentShown>,
+    /// Agents in config.toml (before `ctx move agents to accounts`).
     agents: Vec<AgentInfo>,
     default_agent: Option<String>,
     agent_programs: Vec<String>,
@@ -46,6 +49,7 @@ pub fn list(format: Format) -> Out {
     let helper_running = std::os::unix::net::UnixStream::connect(ctx_protocol::helper::socket()).is_ok();
     let list = AgentList {
         schema: ctx_protocol::SCHEMA_VERSION,
+        accounts: ctx_accounts::accounts::agents().iter().map(crate::accounts::shown).collect(),
         agents: config
             .agents
             .iter()
@@ -79,11 +83,19 @@ pub fn list(format: Format) -> Out {
         });
         return out;
     }
+    for a in &list.accounts {
+        out.line(crate::accounts::summary(a));
+    }
     if list.agents.is_empty() {
-        out.line(
-            "No agents yet: agent programs run as you. Add [agents.<name>] to config.toml (see README, \"Agents\").",
-        );
+        if list.accounts.is_empty() {
+            out.line("No agents yet. Make one: ctx make agent named \"<name>\" (its own account, home in ~/Agents).");
+        } else if !list.helper_running {
+            out.line("The ctx helper isn't running, so agents' tabs can't start. An administrator installs it once: sudo scripts/install-helper.sh <you>");
+        }
         return out;
+    }
+    if !list.accounts.is_empty() {
+        out.line("In config.toml (`ctx move agents to accounts` makes these accounts):");
     }
     for a in &list.agents {
         let mut head = a.name.clone();

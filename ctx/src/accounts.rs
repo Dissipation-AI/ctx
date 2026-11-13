@@ -524,6 +524,27 @@ pub fn shown(a: &Account) -> AgentShown {
     }
 }
 
+/// One line for `ctx list agents`.
+pub fn summary(s: &AgentShown) -> String {
+    let full =
+        if s.full_name.is_empty() || s.full_name == s.name { String::new() } else { format!(" ({})", s.full_name) };
+    let admins: Vec<&str> =
+        s.home_access.iter().filter(|h| h.access.contains("write") && h.who != "you").map(|h| h.who.as_str()).collect();
+    let mut line = format!("{}{full}: home {}", s.name, s.home);
+    if !admins.is_empty() {
+        line.push_str(&format!(", administered by {}", admins.join(", ")));
+    }
+    match s.tabs.len() {
+        0 => {}
+        1 => line.push_str(", 1 tab"),
+        n => line.push_str(&format!(", {n} tabs")),
+    }
+    if !s.warnings.is_empty() {
+        line.push_str(&format!(" ({} warnings: ctx show agent {})", s.warnings.len(), quote(&s.name)));
+    }
+    line
+}
+
 fn tabs_of(name: &str) -> Vec<u64> {
     let Ok(mut c) = Connection::open(ClientKind::Cli) else { return Vec::new() };
     let env = Envelope { sentence: "ctx list tabs".into(), request: Request::ListTabs };
