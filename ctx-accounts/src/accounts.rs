@@ -3,8 +3,10 @@
 //!
 //! An agent is an account in the group [`AGENTS_GROUP`]. Agents' accounts are hidden from the
 //! login window, standard (never administrators), have no password (nobody logs in as them;
-//! the helper starts their processes), use `ctx-agents` as their primary group, and have their
-//! home where every account's home is ([`home_of`]).
+//! the helper starts their processes), and have their home where every account's home is
+//! ([`home_of`]), closed to other agents. On macOS `ctx-agents` is their primary group (homes
+//! are mode 700 there); on Linux each has a group of its own, as Linux accounts usually do, since
+//! access lists there put the owning group's bits into the folder's mask.
 //!
 //! A space is a folder some agents work in together: a group `ctx-space-<name>` (its members are
 //! the agents in it) and a folder in [`spaces_dir`] that the group may read and write.
@@ -320,19 +322,20 @@ pub fn make(name: &str, full_name: &str) -> Result<Account, String> {
                 home,
                 "--shell",
                 "/bin/bash",
-                "--gid",
+                // Its own group, so its home and files aren't open to every agent by group.
+                "--user-group",
+                "--groups",
                 AGENTS_GROUP,
                 "--comment",
                 full,
                 name,
             ],
         )?;
-        let _ = run("usermod", &["-aG", AGENTS_GROUP, name]);
     }
     appeared(|| by_name(name)).ok_or_else(|| format!("the account \"{name}\" didn't appear"))
 }
 
-/// What `look` finds once a new account or group shows up. macOS's directory service can take a
+/// What `look` finds once a change to accounts or groups shows up. macOS's directory service can take a
 /// moment to answer for a record it has just made (its lookup cache), so this flushes the cache
 /// and asks again for up to ten seconds.
 fn appeared<T>(look: impl Fn() -> Option<T>) -> Option<T> {
@@ -363,7 +366,9 @@ pub fn remove(name: &str) -> Result<(), String> {
     } else {
         run("userdel", &[name])?;
     }
-    Ok(())
+    // Gone once the directory service says so (macOS answers from its cache for a moment).
+    appeared(|| by_name(name).is_none().then_some(()))
+        .ok_or_else(|| format!("the account \"{name}\" was deleted but still shows"))
 }
 
 /// Change the full name shown beside the account name. Root only.
