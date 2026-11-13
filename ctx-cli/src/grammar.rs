@@ -401,10 +401,13 @@ pub const VERBS: &[Verb] = &[
         summary: "Bring back a closed tab with its number, name, folder and environment.",
         object: Object::Kind(Kind::Tab),
         order: &[O, Ph(AS)],
-        examples: &[(
-            "ctx reopen tab 40",
-            "Bring back closed tab 40 as tab 40, with its name, folder and environment.",
-        )],
+        examples: &[
+            ("ctx reopen tab 40", "Bring back closed tab 40 as tab 40, with its name, folder and environment."),
+            (
+                "ctx reopen tabs from last session",
+                "Every tab that was open when the server last stopped (reboot, crash, restart), back in its window.",
+            ),
+        ],
         hidden: false,
     },
     Verb {
