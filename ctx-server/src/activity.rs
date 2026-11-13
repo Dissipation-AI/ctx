@@ -33,6 +33,10 @@ pub struct Identity {
     pub via_hook: bool,
 }
 
+/// Ends `ran_by` for an agent's shell call that its hook routed into a tab. A tab opened that way
+/// stands in for the agent's own shell.
+pub const THROUGH_HOOK: &str = ", through its hook";
+
 impl Identity {
     /// `dev: claude (pid 5512) in tab 2`.
     pub fn describe(&self) -> String {
@@ -47,7 +51,7 @@ impl Identity {
             s.push_str(&format!(", calling itself \"{d}\""));
         }
         if self.via_hook {
-            s.push_str(", through its hook");
+            s.push_str(THROUGH_HOOK);
         }
         s
     }
@@ -55,12 +59,16 @@ impl Identity {
     /// What `ran_by` records: `you` for a person, else the agent and its program, as
     /// `dev (claude, pid 5512)` (or `claude (pid 5512)` for an agent program no rule names).
     pub fn ran_by(&self) -> String {
-        match &self.principal {
+        let mut s = match &self.principal {
             Some(p) if p != &self.program => format!("{p} ({}, pid {})", self.program, self.pid),
             Some(p) => format!("{p} (pid {})", self.pid),
             None if self.is_agent => format!("{} (pid {})", self.program, self.pid),
             None => "you".into(),
+        };
+        if self.via_hook {
+            s.push_str(THROUGH_HOOK);
         }
+        s
     }
 
     pub fn unknown() -> Identity {
@@ -320,6 +328,7 @@ mod tests {
         assert_eq!(id.ran_by(), "dev (claude, pid 5512)");
         id.via_hook = true;
         assert_eq!(id.describe(), "dev: claude (pid 5512), through its hook");
+        assert_eq!(id.ran_by(), "dev (claude, pid 5512), through its hook");
     }
 
     #[test]

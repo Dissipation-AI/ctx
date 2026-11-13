@@ -1959,6 +1959,11 @@ impl Server {
         if opener != "you" {
             env.push(("CTX_NO_PAGER".into(), "1".into()));
         }
+        // A tab a hook opened stands in for the agent's own shell (`bash -c`), which has no job
+        // control: `cmd &` there prints no "[1] 12345" and no "done" line later.
+        if opener.ends_with(crate::activity::THROUGH_HOOK) {
+            env.push(("CTX_NO_JOBS".into(), "1".into()));
+        }
         let mut not_restored = Vec::new();
         if let Some(r) = &reopen {
             for (k, v) in &r.env {
