@@ -170,8 +170,20 @@ fn agents_are_accounts_and_the_os_decides_what_they_reach() {
     assert_eq!(lines.get(1).copied(), Some(home_of(&a).to_str().unwrap()), "{o}");
     assert_eq!(lines.get(2).copied(), Some(spaces.to_str().unwrap()), "{o}");
     // Homes are private: b can't look in a's.
+    let o = s.ctx(&["run", "in", "tab", &tb, "id -un"]).ok().stdout.clone();
+    assert_eq!(o.trim(), b, "b's tab runs as b");
     let o = s.ctx(&["run", "in", "tab", &tb, &format!("cat '{}/CLAUDE.md'", home_of(&a).display())]).stdout;
-    assert!(o.contains("ermission denied"), "{o}");
+    let why = || {
+        let h = home_of(&a);
+        let acl = if cfg!(target_os = "macos") {
+            format!("ls -lde '{}'", h.display())
+        } else {
+            format!("ls -ld '{0}'; getfacl '{0}'; id", h.display())
+        };
+        String::from_utf8_lossy(&Command::new("sh").args(["-c", &format!("{acl}; id {b}")]).output().unwrap().stdout)
+            .into_owned()
+    };
+    assert!(o.contains("ermission denied"), "{o}\n{}", why());
     let list = s.ctx(&["list", "tabs"]).ok().stdout.clone();
     assert!(list.contains(&format!("as {a}")), "{list}");
 

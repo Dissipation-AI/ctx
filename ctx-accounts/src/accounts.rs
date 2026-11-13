@@ -183,9 +183,14 @@ pub fn group(name: &str) -> Option<(u32, Vec<String>)> {
             return None;
         }
         let mut members = Vec::new();
+        // macOS packs the entry into one buffer, so `gr_mem` may not be pointer-aligned.
         let mut m = (*g).gr_mem;
-        while !m.is_null() && !(*m).is_null() {
-            members.push(CStr::from_ptr(*m).to_string_lossy().into_owned());
+        while !m.is_null() {
+            let p = m.read_unaligned();
+            if p.is_null() {
+                break;
+            }
+            members.push(CStr::from_ptr(p).to_string_lossy().into_owned());
             m = m.add(1);
         }
         Some(((*g).gr_gid, members))
