@@ -161,6 +161,9 @@ _ctx_deferred_init() {
         builtin setopt no_bang_hist
     fi
     builtin unset CTX_NO_PAGER
+    # A tab standing in for an agent's own shell: no job control, as in `bash -c` (no job notices).
+    [[ -n "$CTX_NO_JOBS" ]] && builtin unsetopt monitor
+    builtin unset CTX_NO_JOBS
     # A command that was running when the tab ended: pre-filled, not run.
     if [[ -n "$CTX_PREFILL" ]]; then
         builtin print -z -- "$CTX_PREFILL"
