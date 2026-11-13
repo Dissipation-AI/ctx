@@ -392,6 +392,10 @@ fn set_limit(name: &str, limit: LimitSpec) -> Lines {
             f.limits.low_priority = true;
             "low priority".into()
         }
+        LimitSpec::NormalPriority => {
+            f.limits.low_priority = false;
+            "normal priority".into()
+        }
         LimitSpec::Processes(n) => {
             f.limits.processes = n;
             format!("at most {n} processes")

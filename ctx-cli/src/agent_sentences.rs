@@ -25,6 +25,7 @@ pub enum LimitSpec {
     MemoryMb(u64),
     Processes(u64),
     LowPriority,
+    NormalPriority,
     Nothing,
 }
 
@@ -91,7 +92,7 @@ pub const EXAMPLES: &[(&str, &str)] = &[
     ("ctx forbid agent \"email-agent\" to write ~/Context/career", "Take write back; reading stays."),
     ("ctx forbid agent \"email-agent\" to read ~/Context/career", "Take all access back."),
     ("ctx show agent \"email-agent\"", "Its account, administrators, grants, limits and tabs."),
-    ("ctx limit agent \"email-agent\" to 8 GB of memory", "Also: 200 processes, low priority, nothing."),
+    ("ctx limit agent \"email-agent\" to 8 GB of memory", "Also: 200 processes, low priority, normal priority, nothing."),
     ("ctx rename agent \"email-agent\" to \"Email\"", "The full name shown beside the account name."),
     ("ctx reset agent \"email-agent\"", "Rewrite its ctx-agent.toml as yours, with the defaults."),
     ("ctx remove agent \"email-agent\"", "Delete the account; its home stays. Add `with its files` to trash it too."),
@@ -341,6 +342,7 @@ fn sentence(t: &[Token], w: &[String], cwd: &crate::parse::Context) -> Result<(A
             let limit = match r.as_slice() {
                 ["nothing"] | ["no", "limits"] => LimitSpec::Nothing,
                 ["low", "priority"] => LimitSpec::LowPriority,
+                ["normal", "priority"] => LimitSpec::NormalPriority,
                 [n, "processes"] => LimitSpec::Processes(
                     n.parse()
                         .ok()
@@ -354,13 +356,14 @@ fn sentence(t: &[Token], w: &[String], cwd: &crate::parse::Context) -> Result<(A
                 }
                 _ => {
                     return Err(ParseError::new(
-                        "Limit it to what? `8 GB of memory`, `200 processes`, `low priority` or `nothing`.",
+                        "Limit it to what? `8 GB of memory`, `200 processes`, `low priority`, `normal priority` or `nothing`.",
                     ));
                 }
             };
             let shown = match &limit {
                 LimitSpec::Nothing => "nothing".to_string(),
                 LimitSpec::LowPriority => "low priority".into(),
+                LimitSpec::NormalPriority => "normal priority".into(),
                 LimitSpec::Processes(n) => format!("{n} processes"),
                 LimitSpec::MemoryMb(m) if m.is_multiple_of(1024) => format!("{} GB of memory", m / 1024),
                 LimitSpec::MemoryMb(m) => format!("{m} MB of memory"),
