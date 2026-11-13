@@ -198,6 +198,11 @@ fn home_short(p: &str) -> String {
 }
 
 pub fn make(name: &str, program: &str, folder: &str, any: bool, signed_by: Option<&str>, format: Format) -> Out {
+    if !cfg!(target_os = "macos") {
+        return failed(
+            "A launcher holds a macOS privacy permission for one program; other systems have no such permission to hold.",
+        );
+    }
     if let Err(e) = check_name(name) {
         return failed(e);
     }

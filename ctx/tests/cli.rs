@@ -218,6 +218,15 @@ fn restart_keeps_tabs() {
     assert_eq!(o, "1\n/usr\n");
 }
 
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn launchers_are_macos_only() {
+    let s = Server::start("launcher");
+    let o = s.ctx(&["make", "launcher", "named", "echoer", "for", "/bin/echo", "at", "/tmp"]);
+    assert!(o.code != 0 && o.stderr.contains("macOS"), "{}", o.stderr);
+}
+
+#[cfg(target_os = "macos")]
 #[test]
 fn launchers_are_built_and_refuse_agents_arguments() {
     if !std::path::Path::new("/usr/bin/clang").exists() {

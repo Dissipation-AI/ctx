@@ -105,7 +105,7 @@ pub fn make_space_group(name: &str) -> Result<u32, String> {
     } else {
         run("groupadd", &["--system", &g])?;
     }
-    group(&g).map(|(gid, _)| gid).ok_or_else(|| format!("the group {g} didn't appear"))
+    appeared(|| group(&g).map(|(gid, _)| gid)).ok_or_else(|| format!("the group {g} didn't appear"))
 }
 
 pub fn remove_space_group(name: &str) -> Result<(), String> {
@@ -251,7 +251,7 @@ pub fn ensure_agents_group() -> Result<u32, String> {
     } else {
         run("groupadd", &["--system", AGENTS_GROUP])?;
     }
-    group(AGENTS_GROUP).map(|(g, _)| g).ok_or_else(|| "the ctx-agents group didn't appear".into())
+    appeared(|| group(AGENTS_GROUP).map(|(g, _)| g)).ok_or_else(|| "the ctx-agents group didn't appear".into())
 }
 
 /// An unused id from 600 up (below macOS's 501+ people range is taken by the system; 600-899 is
@@ -324,7 +324,26 @@ pub fn make(name: &str, full_name: &str) -> Result<Account, String> {
         )?;
         let _ = run("usermod", &["-aG", AGENTS_GROUP, name]);
     }
-    by_name(name).ok_or_else(|| format!("the account \"{name}\" didn't appear"))
+    appeared(|| by_name(name)).ok_or_else(|| format!("the account \"{name}\" didn't appear"))
+}
+
+/// What `look` finds once a new account or group shows up. macOS's directory service can take a
+/// moment to answer for a record it has just made (its lookup cache), so this flushes the cache
+/// and asks again for up to ten seconds.
+fn appeared<T>(look: impl Fn() -> Option<T>) -> Option<T> {
+    let start = std::time::Instant::now();
+    loop {
+        if let Some(t) = look() {
+            return Some(t);
+        }
+        if start.elapsed() > std::time::Duration::from_secs(10) {
+            return None;
+        }
+        if cfg!(target_os = "macos") {
+            let _ = Command::new("dscacheutil").arg("-flushcache").status();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
 }
 
 /// Make an existing standard account an agent. Root only.
