@@ -23,7 +23,7 @@ ctx list tabs|closed tabs|commands|activity|launchers|agents [in "<tab>"] [by me
 - `ctx list commands in "Dev server"`: Commands run in that tab: where, exit status, start time, duration. No output.
 - `ctx list activity by claude since 1 hour ago`: The activity log: who did what to which tab, newest first.
 - `ctx list launchers`: Scoped launchers ctx made, and which tabs are running them now.
-- `ctx list agents`: The agents in config.toml: where each works, the account it runs as, what its sandbox gives it, whose tabs it may use.
+- `ctx list agents`: The agents (accounts in ctx-agents): administrators, grants, spaces, limits and tabs.
 
 ### `read`
 

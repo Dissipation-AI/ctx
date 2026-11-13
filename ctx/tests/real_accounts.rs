@@ -191,6 +191,24 @@ fn agents_are_accounts_and_the_os_decides_what_they_reach() {
     assert!(wait_for(|| !in_a("list tabs").stdout.contains(&format!("as {b}"))), "a lost b's tabs");
     assert!(!in_a("list tabs").stdout.contains("Mine"), "no agent ever sees your tabs");
 
+    // Nothing more through ctx: no restart, no copy of your tab, nothing about tabs it can't see,
+    // and a copy you make of its tab stays its own (its exported variables could be planted).
+    let o = in_a("restart server without asking");
+    assert!(o.code != 0 && o.stdout.contains("only you"), "{} {}", o.code, o.stdout);
+    assert!(in_a("reopen tabs from last session").code != 0);
+    assert!(in_a("open tab like Mine").code != 0, "a copy of your tab would be yours");
+    let mine = s.ctx(&["list", "tabs"]).ok().stdout.clone();
+    let mine = mine.lines().find(|l| l.contains("Mine")).and_then(|l| l.split_whitespace().nth(1)).unwrap().to_string();
+    let o = in_a(&format!("run in tab {mine} 'echo hi'")).stdout;
+    assert!(o.contains(&format!("There is no tab {mine}")) && !o.contains("Open tabs are"), "{o}");
+    s.ctx(&["run", "in", "tab", &ta, "export PLANTED=1"]).ok();
+    s.ctx(&["open", "tab", "like", "tab", &ta, "named", "My copy"]).ok();
+    let o = s.ctx(&["list", "tabs"]).ok().stdout.clone();
+    assert!(o.lines().any(|l| l.contains("My copy") && l.contains(&format!("as {a}"))), "{o}");
+    let o = s.ctx(&["run", "in", "My copy", "id -un; echo $PLANTED"]).ok().stdout.clone();
+    assert_eq!(o, format!("{a}\n1\n"));
+    s.ctx(&["close", "My copy", "without", "asking"]).ok();
+
     // Your files: closed until shared, and only while shared. Files beside what's shared stay
     // closed even though anyone may read them by their mode.
     std::fs::create_dir_all(s.home.join("Context/career")).unwrap();

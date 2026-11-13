@@ -220,7 +220,7 @@ pub const VERBS: &[Verb] = &[
             ("ctx list launchers", "Scoped launchers ctx made, and which tabs are running them now."),
             (
                 "ctx list agents",
-                "The agents in config.toml: where each works, the account it runs as, what its sandbox gives it, whose tabs it may use.",
+                "The agents (accounts in ctx-agents): administrators, grants, spaces, limits and tabs.",
             ),
         ],
         hidden: false,

@@ -1,17 +1,14 @@
 //! The ctx helper: a small root daemon (`ctx-helper`), the only part of ctx with root. It starts
-//! an agent's tab as the agent's own account, and makes, adopts and removes agents' accounts.
+//! an agent's tab as the agent's own account, and makes and removes agents' accounts and spaces.
 //!
-//! Its rules live in a root-owned file, so nothing running as you can widen them: which account
-//! may ask (the one the ctx server runs as) and which account each agent runs as. An agent that
-//! runs as root also needs an administrator's approval every time it starts: the request carries
-//! an Authorization (macOS asks an admin for their password or Touch ID), and the helper uses
-//! it up.
+//! Its one rule lives in a root-owned file, so nothing running as you can change it: which
+//! account may ask (the one the ctx server runs as). It starts tabs only as agents' accounts
+//! (in ctx-agents, standard, never the owner's or an administrator's).
 //!
 //! On the wire: one JSON line each way. The request comes with the tab's terminal as an attached
 //! file descriptor (`SCM_RIGHTS`).
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Where the helper listens, unless `CTX_HELPER_SOCKET` says otherwise (tests).
@@ -35,8 +32,6 @@ pub fn config_path() -> PathBuf {
 pub struct HelperConfig {
     /// The account allowed to ask (the one the ctx server runs as).
     pub owner: String,
-    /// Agent name → the account it runs as.
-    pub accounts: BTreeMap<String, String>,
 }
 
 impl HelperConfig {
@@ -51,22 +46,15 @@ impl HelperConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SpawnRequest {
+    /// The agent, whose account (of the same name) the tab runs as.
     pub agent: String,
-    /// The account the server expects; the helper checks it against its own rules.
-    pub account: String,
     pub folder: String,
     pub program: String,
     /// argv, `argv[0]` included.
     pub argv: Vec<String>,
     /// The environment; the helper sets HOME, USER, LOGNAME, SHELL and TMPDIR for the account.
     pub env: Vec<(String, String)>,
-    /// A Seatbelt profile to apply before the program starts (empty: none).
-    pub sandbox: String,
-    /// An Authorization's external form (32 bytes) granting `system.privilege.admin`, needed for
-    /// root.
-    pub authorization: Option<Vec<u8>>,
-    /// The agent's limits (absent from older servers).
-    #[serde(default)]
+    /// The agent's limits.
     pub limits: Limits,
 }
 
@@ -207,9 +195,6 @@ pub struct AgentFile {
     /// picked from the name.
     pub colour: String,
     pub limits: Limits,
-    /// macOS only: paths the agent may not touch even where the OS would let it (a Seatbelt deny
-    /// list on top of the account).
-    pub deny: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
@@ -256,8 +241,8 @@ mod tests {
 
     #[test]
     fn rules_parse() {
-        let c = HelperConfig::parse("owner = \"c\"\n[accounts]\ndev = \"vibe-daemon\"\nsysadmin = \"root\"\n").unwrap();
-        assert_eq!(c.accounts["dev"], "vibe-daemon");
-        assert!(HelperConfig::parse("[accounts]\n").is_err());
+        assert_eq!(HelperConfig::parse("owner = \"c\"\n").unwrap().owner, "c");
+        assert!(HelperConfig::parse("").is_err());
+        assert!(HelperConfig::parse("owner = \"c\"\n[accounts]\ndev = \"x\"\n").is_err(), "no other rules");
     }
 }

@@ -11,7 +11,6 @@ mod hook;
 mod instructions;
 mod integrations;
 mod launchers;
-mod shim;
 
 use std::io::Write;
 

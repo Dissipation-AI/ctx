@@ -26,7 +26,7 @@ pub struct Identity {
     pub client_pid: i32,
     /// The scoped launcher it runs under (`ctx make launcher`), if any.
     pub launcher: Option<String>,
-    /// The agent it is (`[agents.<name>]`), or `unknown agent` for a sandbox ctx didn't make.
+    /// The agent it is: the agent account it runs as.
     /// `None`: no agent rule applies, so it has your access.
     pub principal: Option<String>,
     /// It's an agent integration's hook running a tool call.

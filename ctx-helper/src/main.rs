@@ -1,14 +1,14 @@
-//! `ctx-helper`: starts an agent's tab as the agent's own account, and makes, adopts and removes
-//! agents' accounts. See `ctx-protocol/src/helper.rs` for the rules and the wire format.
+//! `ctx-helper`: starts an agent's tab as the agent's own account, and makes and removes agents'
+//! accounts and spaces. See `ctx-protocol/src/helper.rs` for the rules and the wire format.
 //!
 //! Installed as a launchd daemon (root). It listens on one socket, answers only the account in
-//! its root-owned `helper.toml`, and for each request: checks the agent and account against that
-//! file (and an administrator's approval for root), forks, and in the child takes the attached
-//! terminal, becomes the account (groups, gid, uid, in that order, checked), applies the agent's
-//! sandbox and runs the program. The parent replies with the pid and goes back to listening.
+//! its root-owned `helper.toml`, and for each request to start a tab: checks that the agent is an
+//! agent's account (in ctx-agents, standard, not the owner), forks, and in the child takes the
+//! attached terminal, becomes the account (groups, gid, uid, in that order, checked) and runs the
+//! program. The parent replies with the pid and goes back to listening.
 //!
-//! Usage: `ctx-helper` (by launchd). With `CTX_HELPER_SOCKET` and `CTX_HELPER_CONFIG` it can run
-//! unprivileged for tests, where the only account it can become is its own.
+//! Usage: `ctx-helper` (by launchd or systemd). `CTX_HELPER_SOCKET` and `CTX_HELPER_CONFIG` move
+//! its socket and rules (tests).
 
 use ctx_accounts::{accounts, acl};
 use ctx_protocol::helper::{
@@ -24,67 +24,7 @@ use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 unsafe extern "C" {
     fn sandbox_check(pid: libc::pid_t, operation: *const libc::c_char, filter: libc::c_int, ...) -> libc::c_int;
-    fn sandbox_init(profile: *const libc::c_char, flags: u64, errorbuf: *mut *mut libc::c_char) -> libc::c_int;
     fn setiopolicy_np(iotype: libc::c_int, scope: libc::c_int, policy: libc::c_int) -> libc::c_int;
-}
-
-/// Linux has no administrator approval of this kind; root agents are refused there.
-#[cfg(not(target_os = "macos"))]
-mod auth {
-    pub fn admin_approved(_ext: &[u8]) -> bool {
-        false
-    }
-}
-
-/// macOS Authorization, enough to check (and use up) an administrator's approval.
-#[cfg(target_os = "macos")]
-mod auth {
-    #[repr(C)]
-    struct Item {
-        name: *const libc::c_char,
-        value_length: usize,
-        value: *mut libc::c_void,
-        flags: u32,
-    }
-    #[repr(C)]
-    struct Rights {
-        count: u32,
-        items: *mut Item,
-    }
-    #[link(name = "Security", kind = "framework")]
-    unsafe extern "C" {
-        fn AuthorizationCreateFromExternalForm(ext: *const [u8; 32], auth: *mut *mut libc::c_void) -> i32;
-        fn AuthorizationCopyRights(
-            auth: *mut libc::c_void,
-            rights: *const Rights,
-            env: *const libc::c_void,
-            flags: u32,
-            out: *mut *mut Rights,
-        ) -> i32;
-        fn AuthorizationFree(auth: *mut libc::c_void, flags: u32) -> i32;
-    }
-    const EXTEND_RIGHTS: u32 = 1 << 1;
-    const DESTROY_RIGHTS: u32 = 1 << 3;
-
-    /// Whether `ext` holds `system.privilege.admin` already granted (no new prompt). The rights
-    /// are destroyed afterwards, so each approval starts one agent.
-    pub fn admin_approved(ext: &[u8]) -> bool {
-        let Ok(ext): Result<[u8; 32], _> = ext.try_into() else { return false };
-        let mut a: *mut libc::c_void = std::ptr::null_mut();
-        // SAFETY: a 32-byte external form and an out-pointer.
-        if unsafe { AuthorizationCreateFromExternalForm(&ext, &mut a) } != 0 {
-            return false;
-        }
-        let mut item =
-            Item { name: c"system.privilege.admin".as_ptr(), value_length: 0, value: std::ptr::null_mut(), flags: 0 };
-        let rights = Rights { count: 1, items: &mut item };
-        // SAFETY: valid rights for a live authorization; no interaction is allowed here.
-        let ok =
-            unsafe { AuthorizationCopyRights(a, &rights, std::ptr::null(), EXTEND_RIGHTS, std::ptr::null_mut()) } == 0;
-        // SAFETY: frees the authorization we created.
-        unsafe { AuthorizationFree(a, DESTROY_RIGHTS) };
-        ok
-    }
 }
 
 #[derive(Debug)]
@@ -111,6 +51,7 @@ fn account(name: &str) -> Option<Account> {
     }
 }
 
+#[cfg(test)]
 fn account_name(uid: libc::uid_t) -> Option<String> {
     // SAFETY: getpwuid returns static storage or null; copied out at once.
     unsafe {
@@ -168,58 +109,18 @@ fn reply(mut stream: &UnixStream, r: &SpawnReply) {
     }
 }
 
-/// Check a request against the rules. `Ok` gives the account to become.
-fn check(req: &SpawnRequest, rules: &HelperConfig) -> Result<Account, String> {
-    // An agent that is an account: its name is the account's, and the account is in ctx-agents,
-    // standard, and not the owner's.
-    if !rules.accounts.contains_key(&req.agent) && req.agent == req.account {
-        let a = account(&req.account).ok_or_else(|| format!("There's no account \"{}\".", req.account))?;
-        let info = accounts::by_name(&req.account).ok_or_else(|| format!("There's no account \"{}\".", req.account))?;
-        if !accounts::is_agent(&info) {
-            return Err(format!(
-                "\"{}\" isn't an agent's account (it isn't in {}).",
-                req.account,
-                accounts::AGENTS_GROUP
-            ));
-        }
-        if a.uid == 0 || accounts::is_admin(&req.account) || account(&rules.owner).is_some_and(|o| o.uid == a.uid) {
-            return Err(format!(
-                "\"{}\" is an administrator or the owner; agents' accounts are standard.",
-                req.account
-            ));
-        }
-        if req.program.is_empty() || req.argv.is_empty() {
-            return Err("No program to start.".into());
-        }
-        return Ok(a);
-    }
-    let Some(want) = rules.accounts.get(&req.agent) else {
-        return Err(format!(
-            "The helper's rules ({}) don't have the agent \"{}\".",
-            config_path().display(),
-            req.agent
-        ));
-    };
-    if *want != req.account {
-        return Err(format!(
-            "The helper's rules say the agent \"{}\" runs as \"{want}\", not \"{}\".",
-            req.agent, req.account
-        ));
-    }
-    let a = account(want).ok_or_else(|| format!("There's no account \"{want}\" on this Mac."))?;
-    if a.uid == 0 && !req.authorization.as_deref().is_some_and(auth::admin_approved) {
-        return Err(format!(
-            "The agent \"{}\" runs as root, and an administrator didn't approve this start.",
-            req.agent
-        ));
-    }
+/// Check a request to start a tab. `Ok` gives the account to become: the agent's, which is in
+/// ctx-agents, standard, and not the owner's.
+fn check(req: &SpawnRequest, owner: libc::uid_t) -> Result<Account, String> {
+    agent(&req.agent, owner)?;
+    let a = account(&req.agent).ok_or_else(|| format!("There's no account \"{}\".", req.agent))?;
     if req.program.is_empty() || req.argv.is_empty() {
         return Err("No program to start.".into());
     }
     Ok(a)
 }
 
-/// The child: take the terminal, become the account, apply the sandbox, run the program.
+/// The child: take the terminal, become the account, run the program.
 /// Only returns (with a message) if something failed; the caller exits.
 fn become_and_exec(req: &SpawnRequest, a: &Account, tty: RawFd) -> String {
     // SAFETY: plain system calls in a freshly forked, single-threaded child.
@@ -284,19 +185,6 @@ fn become_and_exec(req: &SpawnRequest, a: &Account, tty: RawFd) -> String {
             libc::chdir(home.as_ptr());
         }
     }
-    if !req.sandbox.is_empty() {
-        #[cfg(target_os = "macos")]
-        {
-            let Ok(profile) = CString::new(req.sandbox.clone()) else { return "the sandbox has a NUL byte".into() };
-            let mut err: *mut libc::c_char = std::ptr::null_mut();
-            // SAFETY: a valid C string and an out-pointer.
-            if unsafe { sandbox_init(profile.as_ptr(), 0, &mut err) } != 0 {
-                return "couldn't apply the agent's sandbox".into();
-            }
-        }
-        #[cfg(not(target_os = "macos"))]
-        return "the agent sandbox is macOS only".into();
-    }
     use std::os::unix::process::CommandExt;
     let e =
         std::process::Command::new(&req.program).arg0(&req.argv[0]).args(&req.argv[1..]).env_clear().envs(env).exec();
@@ -329,9 +217,8 @@ fn peer_pid(fd: RawFd) -> Option<libc::pid_t> {
     (r == 0 && pid > 0).then_some(pid)
 }
 
-/// Whether the caller is inside a Seatbelt sandbox. Agents that run as the owner's account do,
-/// and must not reach the helper: they would start themselves as another account, outside every
-/// sandbox, without the server. A sandbox can't be left, so a sandboxed caller stays one.
+/// Whether the caller is inside a Seatbelt sandbox (a program of the owner's that something
+/// fenced in, such as a coding agent's own sandbox): it gets no root help to step outside it.
 /// Unknown counts as sandboxed.
 #[cfg(target_os = "macos")]
 fn caller_sandboxed(fd: RawFd) -> bool {
@@ -365,7 +252,7 @@ fn peer_uid(fd: RawFd) -> Option<libc::uid_t> {
     }
 }
 
-fn serve_one(stream: UnixStream, rules: &HelperConfig, owner_uid: libc::uid_t) {
+fn serve_one(stream: UnixStream, owner_uid: libc::uid_t) {
     if peer_uid(stream.as_raw_fd()) != Some(owner_uid) {
         return reply(&stream, &SpawnReply::Refused { message: "Only the ctx server's account may ask.".into() });
     }
@@ -373,7 +260,7 @@ fn serve_one(stream: UnixStream, rules: &HelperConfig, owner_uid: libc::uid_t) {
         return reply(
             &stream,
             &SpawnReply::Refused {
-                message: "Processes in an agent's sandbox can't use the helper; the ctx server asks it.".into(),
+                message: "Sandboxed processes can't use the helper; the ctx server asks it.".into(),
             },
         );
     }
@@ -396,7 +283,7 @@ fn serve_one(stream: UnixStream, rules: &HelperConfig, owner_uid: libc::uid_t) {
             );
         }
     };
-    let a = match check(&req, rules) {
+    let a = match check(&req, owner_uid) {
         Ok(a) => a,
         Err(message) => return reply(&stream, &SpawnReply::Refused { message }),
     };
@@ -731,18 +618,6 @@ fn main() {
         eprintln!("ctx-helper: there's no account \"{}\"", rules.owner);
         std::process::exit(1);
     };
-    // SAFETY: getuid can't fail.
-    let me = unsafe { libc::getuid() };
-    if me == 0 && rules.accounts.values().any(|a| *a == rules.owner) {
-        eprintln!("ctx-helper: an agent can't run as the owner's own account ({}); fix the rules", rules.owner);
-        std::process::exit(1);
-    }
-    if me != 0 && rules.accounts.values().any(|a| account(a).is_none_or(|x| x.uid != me)) {
-        eprintln!(
-            "ctx-helper: running as {} (not root), so it can only start processes as itself; check the rules",
-            account_name(me).unwrap_or_default()
-        );
-    }
     let path = socket();
     let _ = std::fs::remove_file(&path);
     let listener = match UnixListener::bind(&path) {
@@ -760,7 +635,7 @@ fn main() {
     // reaped before each one, while none of the helper's own programs are running.
     for stream in listener.incoming().flatten() {
         reap_ended_tabs();
-        serve_one(stream, &rules, owner.uid);
+        serve_one(stream, owner.uid);
     }
 }
 
@@ -769,31 +644,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn requests_are_checked_against_the_rules() {
-        let me = account_name(unsafe { libc::getuid() }).unwrap();
-        let rules =
-            HelperConfig::parse(&format!("owner = \"nobody\"\n[accounts]\ndev = \"{me}\"\nsysadmin = \"root\"\n"))
-                .unwrap();
-        let req = |agent: &str, account: &str| SpawnRequest {
+    fn only_agents_accounts_start() {
+        let me = unsafe { libc::getuid() };
+        let req = |agent: &str| SpawnRequest {
             agent: agent.into(),
-            account: account.into(),
             folder: "/tmp".into(),
             program: "/bin/sh".into(),
             argv: vec!["-sh".into()],
             env: vec![],
-            sandbox: String::new(),
-            authorization: None,
             limits: Default::default(),
         };
-        assert!(check(&req("dev", &me), &rules).is_ok());
-        // An agent account must be in ctx-agents: this account (the test's) isn't.
-        assert!(check(&req(&me, &me), &rules).is_err());
-        assert!(check(&req("dev", "root"), &rules).unwrap_err().contains("runs as"));
-        assert!(check(&req("email", &me), &rules).unwrap_err().contains("don't have the agent"));
-        let root = check(&req("sysadmin", "root"), &rules).err().unwrap();
-        assert!(root.contains("administrator didn't approve"), "{root}");
-        let mut fake = req("sysadmin", "root");
-        fake.authorization = Some(vec![0; 32]);
-        assert!(check(&fake, &rules).is_err(), "a made-up authorization isn't an approval");
+        // Not in ctx-agents: the test's own account, root, and no account at all.
+        let mine = account_name(me).unwrap();
+        assert!(check(&req(&mine), me).is_err());
+        assert!(check(&req("root"), me).is_err());
+        assert!(check(&req("no-such-account-here"), me).is_err());
     }
 }

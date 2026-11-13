@@ -20,10 +20,6 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// The principal of a sandboxed process whose sandbox ctx didn't make: it sees only its own
-/// tabs and can't open any (ctx couldn't give a new tab the same sandbox).
-const UNKNOWN_AGENT: &str = "unknown agent";
-
 const LISTENER: usize = 0;
 const SIGNALS: usize = 1;
 const TAB_KEY_BASE: usize = 1 << 40;
@@ -177,8 +173,6 @@ pub struct Server {
     /// The window layout last written to disk (see `save_layout`).
     saved_layout: Vec<(u64, Option<String>, Vec<u64>)>,
     config: Config,
-    /// The sandbox the server itself runs in (see `sys::sandbox_root`); every tab inherits it.
-    own_sandbox: Option<(i32, u64)>,
     /// What agents' accounts may do with each other's homes, as the OS answers it.
     access: std::cell::RefCell<crate::accounts::Access>,
     config_mtime: Option<std::time::SystemTime>,
@@ -310,7 +304,6 @@ impl Server {
         let launch_path = exe.parent().map(|d| d.join("ctx-launch")).unwrap_or_else(|| PathBuf::from("ctx-launch"));
 
         let mut server = Server {
-            own_sandbox: sys::sandbox_root(std::process::id() as i32),
             access: Default::default(),
             config_mtime: std::fs::metadata(&paths.config).and_then(|m| m.modified()).ok(),
             paths,
@@ -655,7 +648,7 @@ impl Server {
                     let fd = stream.as_raw_fd();
                     // Our own user, and the accounts of configured agents.
                     match sys::peer_uid(fd) {
-                        Some(u) if u == sys::uid() || self.agent_for_uid(u).is_some() => {}
+                        Some(u) if u == sys::uid() || self.principal_for(u).is_some() => {}
                         _ => continue,
                     }
                     let _ = stream.set_nonblocking(true);
@@ -876,7 +869,7 @@ impl Server {
                     &|p| tabs.values().find(|t| t.launch_pid == p).map(|t| t.number),
                 )
             };
-            identity.principal = self.principal_for(uid, pid, &identity, &hello.folder);
+            identity.principal = self.principal_for(uid);
             identity.via_hook = hello.kind == ClientKind::Hook;
             if identity.principal.is_some() {
                 identity.is_agent = true;
@@ -1117,66 +1110,17 @@ impl Server {
     // Agents
     // -----------------------------------------------------------------------------------------
 
-    /// The agent whose account has this uid: an account in `ctx-agents` (its name is the
-    /// agent's), or one an `[agents.*]` section of config.toml names.
-    fn agent_for_uid(&self, uid: u32) -> Option<String> {
-        self.config
-            .agents
-            .iter()
-            .find(|(_, a)| !a.account.is_empty() && sys::account(&a.account).is_some_and(|(u, _)| u == uid))
-            .map(|(n, _)| n.clone())
-            .or_else(|| crate::accounts::agent_by_uid(uid).map(|a| a.name))
-    }
-
-    /// Whether `name` is an agent whose account is in `ctx-agents` (and not in config.toml).
+    /// Whether `name` is an agent: an account in `ctx-agents`.
     fn account_agent(&self, name: &str) -> Option<ctx_accounts::accounts::Account> {
-        if self.config.agents.contains_key(name) {
-            return None;
-        }
         crate::accounts::agent(name)
     }
 
-    fn is_agent(&self, name: &str) -> bool {
-        self.config.agents.contains_key(name) || self.account_agent(name).is_some()
-    }
-
-    /// The agent a client is, most trustworthy evidence first: the account it runs as; the
-    /// marker its sandbox lets it read (a sandboxed process can't leave its sandbox, however it
-    /// was started); the scoped launcher it runs under; the agent program above it and the folder
-    /// it works in; the tab it runs in; the agent it says it is. `None`: no rule applies, so it's
-    /// you (or a program you run).
-    fn principal_for(&self, uid: u32, pid: i32, id: &Identity, folder: &str) -> Option<String> {
-        if uid != sys::uid() {
-            return self.agent_for_uid(uid);
+    /// The agent a client is: the agent account it runs as. `None`: it runs as you.
+    fn principal_for(&self, uid: u32) -> Option<String> {
+        if uid == sys::uid() {
+            return None;
         }
-        // A process in the server's own sandbox is no more limited than the tabs the server opens
-        // (a server started from inside an agent's sandbox, as when an agent runs ctx's tests).
-        if sys::sandboxed(pid) && (self.own_sandbox.is_none() || sys::sandbox_root(pid) != self.own_sandbox) {
-            let markers = agents::real(&agents::markers(&self.paths.runtime));
-            return Some(
-                self.config
-                    .agents
-                    .keys()
-                    .find(|name| sys::sandbox_allows_read(pid, &markers.join(name)))
-                    .cloned()
-                    .unwrap_or_else(|| UNKNOWN_AGENT.into()),
-            );
-        }
-        if let Some(l) = &id.launcher
-            && let Some(a) = agents::agent_for_launcher(&self.config, l)
-        {
-            return Some(a.into());
-        }
-        if id.is_agent
-            && self.config.agent_programs.contains(&id.program)
-            && let Some(a) = agents::agent_for_folder(&self.config, Path::new(folder), Path::new(&sys::home()))
-        {
-            return Some(a.into());
-        }
-        if let Some(o) = id.in_tab.and_then(|t| self.tabs.get(&t)).and_then(|t| t.owner.clone()) {
-            return Some(o);
-        }
-        id.declared.as_ref().filter(|d| self.config.agents.contains_key(*d)).cloned()
+        crate::accounts::agent_by_uid(uid).map(|a| a.name)
     }
 
     fn principal(&self, key: usize) -> Option<&str> {
@@ -1193,16 +1137,9 @@ impl Server {
         // An agent account: the OS decides. Reading the owner's home lets it see the tab;
         // writing it lets it drive the tab. Your tabs run as you, and no agent can write your
         // home's access list, so no agent sees or drives yours.
-        if let Some(me) = self.account_agent(p) {
-            let Some(o) = owner.and_then(|o| self.account_agent(o)) else { return false };
-            return self.access.borrow_mut().may(&me, &o, drive);
-        }
-        let Some(a) = self.config.agents.get(p) else { return false };
-        let owner = owner.unwrap_or(agents::YOU);
-        // Driving a tab is running code as its account, so no agent drives yours, whatever
-        // `drive_tabs_of` says (`ctx list agents` points that out).
-        let drivable = owner != agents::YOU && agents::covers(&a.drive_tabs_of, owner);
-        drivable || !drive && agents::covers(&a.see_tabs_of, owner)
+        let Some(me) = self.account_agent(p) else { return false };
+        let Some(o) = owner.and_then(|o| self.account_agent(o)) else { return false };
+        self.access.borrow_mut().may(&me, &o, drive)
     }
 
     fn tab_owner(&self, n: u64) -> Option<String> {
@@ -1240,12 +1177,6 @@ impl Server {
             return no(format!(
                 "Restarting the server stops every tab's shell, so only you can do it, not the agent \"{p}\"."
             ));
-        }
-        let opens = matches!(r, Request::OpenTab { .. } | Request::OpenWindow { .. } | Request::Reopen { .. });
-        if opens && !self.is_agent(p) {
-            return no(
-                "This process runs in a sandbox ctx didn't make, so ctx can't give a new tab the same limits, and it can't open tabs. Its own commands still run where it is.".into(),
-            );
         }
         let drives = matches!(
             r,
@@ -1875,7 +1806,7 @@ impl Server {
         };
         // A tab for a named agent: you may open one for any agent, an agent only for itself.
         if let Some(a) = &agent {
-            if !self.is_agent(a) {
+            if self.account_agent(a).is_none() {
                 return err(
                     ErrorKind::NotAllowed,
                     format!(
@@ -1930,7 +1861,7 @@ impl Server {
         if let Some(src) = source {
             // A copy carries the tab's exported variables and history, which whoever owns the tab
             // could have planted, so it runs as that owner (you may copy your agents' tabs; the
-            // copy is theirs). Nothing crosses from one account or sandbox into another's.
+            // copy is theirs). Nothing crosses from one account into another's.
             let src_owner = self.tab_owner(src);
             if let Some(a) = &agent
                 && src_owner.as_deref() != Some(a.as_str())
@@ -2119,76 +2050,25 @@ impl Server {
             }
         }
         let mut args = vec!["ctx-launch".to_string()];
-        // An agent with its own account: (agent, account, sandbox text), for the ctx helper.
-        let mut as_account: Option<(String, String, String)> = None;
+        // An agent's tab, started as its account by the ctx helper.
+        let mut as_agent: Option<String> = None;
         let mut limits = ctx_protocol::helper::Limits::default();
         let mut rc_dir = self.paths.runtime.clone();
-        let account_agent = owner.as_deref().and_then(|o| self.account_agent(o));
-        if let (Some(o), Some(acct)) = (&owner, &account_agent) {
-            let file =
-                crate::accounts::file(acct).map_err(|e| failed(format!("The agent \"{o}\"'s tab didn't open: {e}")))?;
-            let sandbox = if file.deny.is_empty() || !cfg!(target_os = "macos") {
-                String::new()
-            } else {
-                agents::deny_only_profile(&file.deny, &sys::home())
-            };
+        if let Some(o) = &owner {
+            let acct = self.account_agent(o).ok_or_else(|| {
+                failed(format!("This tab belongs to the agent \"{o}\", which has no account on this computer now."))
+            })?;
+            let file = crate::accounts::file(&acct)
+                .map_err(|e| failed(format!("The agent \"{o}\"'s tab didn't open: {e}")))?;
             let door =
                 self.open_door().map_err(|e| failed(format!("couldn't open the way in for agent accounts: {e}")))?;
             self.door_env(&mut env, &door);
             rc_dir = door.join("shell");
-            as_account = Some((o.clone(), acct.name.clone(), sandbox));
+            as_agent = Some(o.clone());
             limits = file.limits;
             // Your ~/Agents isn't the agent's to reach: its spaces are in CTX_SPACES.
             env.retain(|(k, _)| k != "CTX_AGENT" && k != "CTX_AGENTS");
             env.push(("CTX_AGENT".into(), o.clone()));
-        } else if let Some(o) = &owner {
-            let Some(agent) = self.config.agents.get(o).cloned() else {
-                return Err(failed(format!(
-                    "This tab belongs to the agent \"{o}\", and config.toml has no [agents.{o}], so it can't start without that agent's limits."
-                )));
-            };
-            if agent.sandbox && !cfg!(target_os = "macos") {
-                return Err(failed(format!(
-                    "The agent \"{o}\" is set up in config.toml, which sandboxes it with macOS's Seatbelt; this system has none. Make it an account instead: ctx move agents to accounts"
-                )));
-            }
-            if agent.sandbox && self.own_sandbox.is_some() {
-                return Err(failed(format!(
-                    "The ctx server runs inside a sandbox, and macOS can't start a sandbox inside one, so it can't open tabs for the agent \"{o}\". Run the server outside any sandbox."
-                )));
-            }
-            let sandbox = match agent.sandbox {
-                true => Some(
-                    self.write_sandbox(o, number)
-                        .map_err(|e| failed(format!("couldn't write the agent's sandbox: {e}")))?,
-                ),
-                false => None,
-            };
-            if !agent.account.is_empty() {
-                let door = self
-                    .open_door()
-                    .map_err(|e| failed(format!("couldn't open the way in for agent accounts: {e}")))?;
-                self.door_env(&mut env, &door);
-                rc_dir = door.join("shell");
-                let text = sandbox.map(|f| std::fs::read_to_string(f).unwrap_or_default()).unwrap_or_default();
-                as_account = Some((o.clone(), agent.account.clone(), text));
-            } else if let Some(f) = sandbox {
-                args.extend(["--sandbox".to_string(), f.display().to_string()]);
-                // Its sandbox keeps it from your clipboard and Launch Services: hand them over.
-                let bridges = self.paths.runtime.join("bridge");
-                if write_bridges(&bridges, &self.server_exe).is_ok() {
-                    prepend_path(&mut env, &bridges);
-                    env.push(("CTX_BRIDGES".into(), bridges.display().to_string()));
-                }
-            }
-            env.retain(|(k, _)| k != "CTX_AGENT");
-            env.push(("CTX_AGENT".into(), o.clone()));
-        } else if !self.config.agents.is_empty() {
-            // Your tab: agent programs started in it run as their agent.
-            match self.write_shims() {
-                Ok(dir) => env.push(("CTX_SHIMS".into(), dir.display().to_string())),
-                Err(e) => eprintln!("ctx server: couldn't write the agent shims: {e}"),
-            }
         }
         let shell_argv = if shell_name == "bash" {
             // A login bash can't take an rc file; this one reads the login files itself.
@@ -2199,23 +2079,14 @@ impl Server {
         };
         args.extend([folder.clone(), shell.clone()]);
         args.extend(shell_argv.iter().cloned());
-        let pid = match as_account {
-            Some((agent, account, sandbox)) => {
-                let authorization = match sys::account(&account) {
-                    Some((0, _)) => Some(sys::admin_approval().map_err(|e| {
-                        failed(format!("The agent \"{agent}\" runs as root and {e}, so its tab didn't open."))
-                    })?),
-                    _ => None,
-                };
+        let pid = match as_agent {
+            Some(agent) => {
                 let req = ctx_protocol::helper::SpawnRequest {
                     agent: agent.clone(),
-                    account,
                     folder: folder.clone(),
                     program: shell.clone(),
                     argv: shell_argv,
                     env: env.clone(),
-                    sandbox,
-                    authorization,
                     limits,
                 };
                 sys::helper_spawn(&req, slave.as_raw_fd())
@@ -2425,51 +2296,6 @@ impl Server {
             env.retain(|(k, _)| k != "CTX_BRIDGES");
             env.push(("CTX_BRIDGES".into(), bridges.display().to_string()));
         }
-    }
-
-    /// The shims that make agent programs run as their agent (see the `ctx` crate's shim.rs).
-    fn write_shims(&self) -> io::Result<PathBuf> {
-        let dir = agents::shims_dir(&self.paths.runtime);
-        std::fs::create_dir_all(&dir)?;
-        for program in &self.config.agent_programs {
-            if program.is_empty() || program.contains('/') {
-                continue;
-            }
-            let path = dir.join(program);
-            let text = agents::shim_script(&self.server_exe, program);
-            if std::fs::read(&path).ok().as_deref() != Some(text.as_bytes()) {
-                std::fs::write(&path, text)?;
-            }
-            set_mode(&path, 0o755);
-        }
-        Ok(dir)
-    }
-
-    /// Write agent `name`'s sandbox for tab `number`; `ctx-launch` applies it before the shell.
-    fn write_sandbox(&self, name: &str, number: u64) -> io::Result<PathBuf> {
-        let agent = &agents::profile(&self.config, name).ok_or_else(|| io::Error::other("no such agent"))?;
-        let places = agents::Places {
-            home: PathBuf::from(sys::home()),
-            agent_home: Some(&agent.account).filter(|a| !a.is_empty()).and_then(|a| sys::account(a)).map(|(_, h)| h),
-            ctx_data: self.paths.data.clone(),
-            // The folder holding config.toml (with CTX_HOME, that folder holds everything else
-            // too, so only the file).
-            ctx_config: match self.paths.config.parent() {
-                Some(d) if !Paths::is_custom() => d.to_path_buf(),
-                _ => self.paths.config.clone(),
-            },
-            ctx_runtime: self.paths.runtime.clone(),
-            own_files: vec![self.paths.tab_history(number)],
-            programs: vec![],
-        };
-        agents::ensure_marker(&self.paths.runtime, name)?;
-        let dir = self.paths.runtime.join("sandbox");
-        std::fs::create_dir_all(&dir)?;
-        set_mode(&dir, 0o700);
-        let file = dir.join(format!("{number}.sb"));
-        std::fs::write(&file, agents::sandbox_profile(name, agent, &places))?;
-        set_mode(&file, 0o600);
-        Ok(file)
     }
 
     fn shell_env(&self, tab: u64, window: u64, is_zsh: bool) -> Vec<(String, String)> {

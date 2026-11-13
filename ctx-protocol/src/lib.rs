@@ -543,7 +543,7 @@ pub struct TabInfo {
     pub window: u64,
     /// `you`, or an agent such as `claude (pid 5512)`.
     pub opened_by: String,
-    /// The agent the tab belongs to (`config.toml`'s `[agents.<name>]`); `None`: it's yours.
+    /// The agent the tab belongs to (its account runs the shell); `None`: it's yours.
     pub owner: Option<String>,
     /// The title a program set (OSC 0/2), shown second to the name.
     pub title: Option<String>,

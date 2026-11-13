@@ -4,7 +4,6 @@
 //! and for trying ctx without touching your real tabs.
 
 use serde::Deserialize;
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
@@ -153,15 +152,9 @@ pub struct Config {
 
     pub ask: AskConfig,
 
-    /// Agents: the principals other than you, `[agents.<name>]`. See `agents.rs`.
-    pub agents: BTreeMap<String, Agent>,
-    /// The agent an agent program becomes outside every agent's `folders`. Empty: it runs as you.
-    pub default_agent: String,
-    /// Programs that are agents. Started in a ctx tab, each runs as the agent for its folder.
+    /// Programs that are agents: the activity log names them, and `ctx` called from one counts
+    /// as an agent's call.
     pub agent_programs: Vec<String>,
-    /// `read`, `write` and `deny` entries every agent's sandbox gets too (shell startup files,
-    /// toolchains), so each agent lists only what's its own.
-    pub agent_base: AgentBase,
 
     /// The CTX folders: where agents live, shared context documents, and workspaces.
     pub folders: Folders,
@@ -209,60 +202,6 @@ impl Folders {
     }
 }
 
-/// One agent's profile.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-#[serde(default, deny_unknown_fields)]
-pub struct Agent {
-    /// Folders it works in: an agent program started inside one is this agent.
-    pub folders: Vec<String>,
-    /// The scoped launcher (`ctx make launcher`) that starts it.
-    pub launcher: String,
-    /// The macOS account it runs as (through the ctx helper). Empty: it runs as you.
-    pub account: String,
-    /// Whether it runs in a Seatbelt sandbox built from `read`, `write` and `deny`.
-    pub sandbox: bool,
-    /// In your home (closed otherwise): what it may read, read and write, and never touch.
-    /// Outside your home everything stays readable and only temporary folders are writable.
-    pub read: Vec<String>,
-    pub write: Vec<String>,
-    pub deny: Vec<String>,
-    pub network: bool,
-    /// Programs that run outside the sandbox: setuid tools macOS won't start inside one (`/bin/ps`).
-    /// Only root-owned files count, so an agent can't add its own. Never a shell or `sudo`.
-    pub unsandboxed: Vec<String>,
-    /// Whose tabs it may see (list, read, find) and drive (run, type, press, close), besides its
-    /// own: `you`, agent names, or `*`.
-    pub see_tabs_of: Vec<String>,
-    pub drive_tabs_of: Vec<String>,
-}
-
-impl Default for Agent {
-    fn default() -> Self {
-        Agent {
-            folders: Vec::new(),
-            launcher: String::new(),
-            account: String::new(),
-            sandbox: true,
-            read: Vec::new(),
-            write: Vec::new(),
-            deny: Vec::new(),
-            network: true,
-            unsandboxed: Vec::new(),
-            see_tabs_of: Vec::new(),
-            drive_tabs_of: Vec::new(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
-#[serde(default, deny_unknown_fields)]
-pub struct AgentBase {
-    pub read: Vec<String>,
-    pub write: Vec<String>,
-    pub deny: Vec<String>,
-    pub unsandboxed: Vec<String>,
-}
-
 /// Programs ctx treats as agents unless `agent_programs` says otherwise.
 pub const AGENT_PROGRAMS: &[&str] =
     &["claude", "codex", "gemini", "agy", "antigravity", "cursor-agent", "aider", "opencode", "goose"];
@@ -299,10 +238,7 @@ impl Default for Config {
             assist: true,
             assist_command: "bro".into(),
             ask: AskConfig::default(),
-            agents: BTreeMap::new(),
-            default_agent: String::new(),
             agent_programs: AGENT_PROGRAMS.iter().map(|s| s.to_string()).collect(),
-            agent_base: AgentBase::default(),
             folders: Folders::default(),
             app: toml::Table::new(),
         }
@@ -338,23 +274,12 @@ impl Config {
         if !["ask", "always", "never"].contains(&c.reopen_on_launch.as_str()) {
             return Err("reopen_on_launch must be \"ask\", \"always\" or \"never\"".into());
         }
-        for name in c.agents.keys() {
-            if name.is_empty()
-                || name == crate::agents::YOU
-                || !name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
-            {
-                return Err(format!("agents.{name}: an agent's name uses letters, digits, - and _, and isn't \"you\""));
-            }
-        }
         for (k, v) in
             [("agents", &c.folders.agents), ("context", &c.folders.context), ("workspaces", &c.folders.workspaces)]
         {
             if !(v == "~" || v.starts_with("~/") || v.starts_with('/')) {
                 return Err(format!("folders.{k} = \"{v}\": give a full path or one starting with ~/"));
             }
-        }
-        if !c.default_agent.is_empty() && !c.agents.contains_key(&c.default_agent) {
-            return Err(format!("default_agent = \"{}\", but there's no [agents.{0}]", c.default_agent));
         }
         Ok(c)
     }

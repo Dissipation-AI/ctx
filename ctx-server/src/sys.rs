@@ -8,14 +8,14 @@ use std::ffi::{CStr, CString};
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 fn cvt(r: libc::c_int) -> io::Result<libc::c_int> {
     if r < 0 { Err(io::Error::last_os_error()) } else { Ok(r) }
 }
 
 /// The per-user temporary folder (`/var/folders/…/T/`), from the OS rather than `$TMPDIR`,
-/// which agents' sandboxes sometimes change.
+/// which programs sometimes change.
 #[cfg(target_os = "linux")]
 pub fn user_temp_dir() -> PathBuf {
     match std::env::var_os("XDG_RUNTIME_DIR") {
@@ -242,40 +242,6 @@ pub fn peer_uid(fd: RawFd) -> Option<u32> {
     if r == 0 { Some(uid) } else { None }
 }
 
-#[cfg(target_os = "macos")]
-unsafe extern "C" {
-    fn sandbox_check(pid: libc::pid_t, operation: *const libc::c_char, filter: libc::c_int, ...) -> libc::c_int;
-}
-
-/// Whether a process runs in a Seatbelt sandbox.
-#[cfg(target_os = "macos")]
-pub fn sandboxed(pid: i32) -> bool {
-    // SAFETY: a null operation asks only whether the process is sandboxed.
-    unsafe { sandbox_check(pid, std::ptr::null(), 0) == 1 }
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn sandboxed(_pid: i32) -> bool {
-    false
-}
-
-/// Whether a sandboxed process may read `path` (its profile decides; the file needn't exist).
-#[cfg(target_os = "macos")]
-pub fn sandbox_allows_read(pid: i32, path: &Path) -> bool {
-    const SANDBOX_FILTER_PATH: libc::c_int = 1;
-    const SANDBOX_CHECK_NO_REPORT: libc::c_int = 0x4000_0000;
-    let Ok(p) = CString::new(path.as_os_str().as_encoded_bytes()) else { return false };
-    // SAFETY: valid C strings for the operation and the path filter argument.
-    unsafe {
-        sandbox_check(pid, c"file-read-data".as_ptr(), SANDBOX_FILTER_PATH | SANDBOX_CHECK_NO_REPORT, p.as_ptr()) == 0
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn sandbox_allows_read(_pid: i32, _path: &Path) -> bool {
-    false
-}
-
 /// A macOS account's user id and home folder.
 pub fn account(name: &str) -> Option<(u32, PathBuf)> {
     let n = CString::new(name).ok()?;
@@ -326,98 +292,6 @@ pub fn helper_spawn(req: &ctx_protocol::helper::SpawnRequest, tty: RawFd) -> Res
         Ok(SpawnReply::Refused { message }) => Err(format!("the ctx helper refused: {message}")),
         Err(e) => Err(format!("the ctx helper's answer didn't make sense: {e}")),
     }
-}
-
-/// A function in Security.framework, which stays loaded once opened.
-#[cfg(target_os = "macos")]
-fn security_symbol(name: &std::ffi::CStr) -> Option<*mut libc::c_void> {
-    // SAFETY: dlopen and dlsym with NUL-terminated strings; a null result is checked.
-    unsafe {
-        let lib = libc::dlopen(c"/System/Library/Frameworks/Security.framework/Security".as_ptr(), libc::RTLD_LAZY);
-        if lib.is_null() {
-            return None;
-        }
-        let p = libc::dlsym(lib, name.as_ptr());
-        (!p.is_null()).then_some(p)
-    }
-}
-
-/// An administrator's approval (`system.privilege.admin`): macOS asks for an admin's password or
-/// Touch ID. Returns the approval's 32-byte external form, for the ctx helper.
-#[cfg(target_os = "macos")]
-pub fn admin_approval() -> Result<Vec<u8>, String> {
-    #[repr(C)]
-    struct Item {
-        name: *const libc::c_char,
-        value_length: usize,
-        value: *mut libc::c_void,
-        flags: u32,
-    }
-    #[repr(C)]
-    struct Rights {
-        count: u32,
-        items: *mut Item,
-    }
-    // Security.framework is opened here, not linked: linking it makes every `ctx` command load it
-    // (and CoreFoundation) at launch, about a millisecond, for a call only the sysadmin launch makes.
-    type Create = unsafe extern "C" fn(*const Rights, *const libc::c_void, u32, *mut *mut libc::c_void) -> i32;
-    type CopyRights =
-        unsafe extern "C" fn(*mut libc::c_void, *const Rights, *const libc::c_void, u32, *mut *mut Rights) -> i32;
-    type MakeExternalForm = unsafe extern "C" fn(*mut libc::c_void, *mut [u8; 32]) -> i32;
-    type Free = unsafe extern "C" fn(*mut libc::c_void, u32) -> i32;
-    // SAFETY: each symbol is cast to its documented C signature (Authorization.h).
-    let (create, copy_rights, make_external_form, free) = match (
-        security_symbol(c"AuthorizationCreate"),
-        security_symbol(c"AuthorizationCopyRights"),
-        security_symbol(c"AuthorizationMakeExternalForm"),
-        security_symbol(c"AuthorizationFree"),
-    ) {
-        (Some(a), Some(b), Some(c), Some(d)) => unsafe {
-            (
-                std::mem::transmute::<*mut libc::c_void, Create>(a),
-                std::mem::transmute::<*mut libc::c_void, CopyRights>(b),
-                std::mem::transmute::<*mut libc::c_void, MakeExternalForm>(c),
-                std::mem::transmute::<*mut libc::c_void, Free>(d),
-            )
-        },
-        _ => return Err("couldn't load macOS's Security framework to ask for an administrator's approval".into()),
-    };
-    const INTERACTION_ALLOWED: u32 = 1;
-    const EXTEND_RIGHTS: u32 = 1 << 1;
-    const PRE_AUTHORIZE: u32 = 1 << 4;
-    let mut a: *mut libc::c_void = std::ptr::null_mut();
-    // SAFETY: Authorization calls with valid pointers; the reference is freed (rights kept, so the
-    // external form stays usable) before returning.
-    unsafe {
-        if create(std::ptr::null(), std::ptr::null(), 0, &mut a) != 0 {
-            return Err("couldn't ask macOS for an administrator's approval".into());
-        }
-        let mut item =
-            Item { name: c"system.privilege.admin".as_ptr(), value_length: 0, value: std::ptr::null_mut(), flags: 0 };
-        let rights = Rights { count: 1, items: &mut item };
-        let flags = INTERACTION_ALLOWED | EXTEND_RIGHTS | PRE_AUTHORIZE;
-        let r = copy_rights(a, &rights, std::ptr::null(), flags, std::ptr::null_mut());
-        if r != 0 {
-            free(a, 0);
-            return Err(if r == -60006 {
-                "an administrator didn't approve it".into()
-            } else {
-                format!("macOS didn't approve it (error {r})")
-            });
-        }
-        let mut ext = [0u8; 32];
-        let r = make_external_form(a, &mut ext);
-        free(a, 0);
-        if r != 0 {
-            return Err(format!("couldn't pass the approval on (error {r})"));
-        }
-        Ok(ext.to_vec())
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn admin_approval() -> Result<Vec<u8>, String> {
-    Err("administrator approval needs macOS".into())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -605,23 +479,6 @@ pub fn ancestors(pid: i32) -> Vec<ProcInfo> {
         out.push(info);
     }
     out
-}
-
-/// The process whose sandbox `pid` runs in: the furthest ancestor that is still sandboxed, as
-/// (pid, start time). `None` when `pid` isn't sandboxed. A sandboxed process can't take on
-/// another sandbox, so two processes with the same root share one sandbox.
-pub fn sandbox_root(pid: i32) -> Option<(i32, u64)> {
-    if !sandboxed(pid) {
-        return None;
-    }
-    let mut root = proc_info(pid)?;
-    for p in ancestors(root.ppid) {
-        if !sandboxed(p.pid) {
-            break;
-        }
-        root = p;
-    }
-    Some((root.pid, root.start_us))
 }
 
 /// Resident memory of a process, less what it shares with others (file-backed pages).
@@ -888,18 +745,6 @@ unsafe extern "C" {
 pub fn release_free_memory() -> usize {
     // SAFETY: a null zone means all zones; goal 0 means as much as possible.
     unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), 0) }
-}
-
-#[cfg(all(test, target_os = "macos"))]
-mod tests {
-    #[test]
-    fn the_admin_approval_functions_load() {
-        for name in
-            [c"AuthorizationCreate", c"AuthorizationCopyRights", c"AuthorizationMakeExternalForm", c"AuthorizationFree"]
-        {
-            assert!(super::security_symbol(name).is_some(), "{name:?}");
-        }
-    }
 }
 
 /// Open a link or file in the person's session (`open` on macOS, `xdg-open` on Linux).

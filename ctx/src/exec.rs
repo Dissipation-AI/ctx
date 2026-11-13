@@ -69,10 +69,6 @@ pub fn run(args: &[String], caller: Caller) -> Out {
     {
         return out;
     }
-    // What an agent program's name runs in your tabs (see shim.rs); not a sentence.
-    if caller == Caller::Cli && args.first().is_some_and(|a| a == "shim") {
-        return crate::shim::run(&args[1..]);
-    }
     // `open`, `xdg-open`, `pbcopy` and `pbpaste` in an agent's tab (see bridge.rs); not a sentence.
     if caller == Caller::Cli && args.first().is_some_and(|a| a == "bridge") {
         return crate::bridge::run(&args[1..]);
