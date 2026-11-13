@@ -58,6 +58,9 @@ jobs:
           curl -sSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" | tar xJ -C "$RUNNER_TEMP"
           echo "ZIG=$RUNNER_TEMP/zig-x86_64-linux-${ZIG_VERSION}/zig" >> "$GITHUB_ENV"
           sudo apt-get install -y acl zsh
+          # The runner leaves zsh's function folders group-writable, so compinit stops every new
+          # tab's zsh at "Ignore insecure directories and continue [y]?" before its first prompt.
+          zsh -c 'autoload -Uz compaudit; compaudit' | xargs -r sudo chmod g-w,o-w
 
       - name: Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
@@ -71,22 +74,6 @@ jobs:
 
       - name: Everything else
         run: cargo test --all-targets
-
-      - name: What a tab shows (when the tests failed)
-        if: failure()
-        run: |
-          export CTX_HOME=$(mktemp -d) HOME=$(mktemp -d)
-          printf 'shell = "/bin/zsh"\n' > "$CTX_HOME/config.toml"
-          ctx=target/debug/ctx
-          $ctx server > "$CTX_HOME/server.log" 2>&1 &
-          sleep 2
-          $ctx open tab named Probe || true
-          sleep 3
-          $ctx read "Probe" || true
-          $ctx list tabs || true
-          ls -la "$CTX_HOME/run" || true
-          cat "$CTX_HOME/server.log"
-          zsh --version; echo "SHELL=$SHELL TERM=$TERM"; ls /etc/zsh || true
 
       - name: Agents as real accounts (makes and deletes throwaway accounts with sudo)
         run: CTX_REAL_ACCOUNTS=1 cargo test -p ctx --test real_accounts -- --nocapture
