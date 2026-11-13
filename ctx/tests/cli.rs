@@ -860,18 +860,6 @@ fn the_hook_sends_background_and_busy_calls_to_copies_of_the_session_tab() {
 }
 
 #[test]
-fn ctx_folders_are_made_and_in_every_tabs_environment() {
-    let s = Server::start("folders");
-    for f in ["Agents", "Context", "Workspaces"] {
-        assert!(s.home.join(f).is_dir(), "{f} wasn't made");
-    }
-    s.ctx(&["open", "tab", "named", "Env", "at", "/tmp"]).ok();
-    let o = s.ctx(&["run", "in", "Env", "echo $CTX_AGENTS $CTX_CONTEXT $CTX_WORKSPACES"]).ok().stdout.clone();
-    let h = s.home.display();
-    assert_eq!(o, format!("{h}/Agents {h}/Context {h}/Workspaces\n"));
-}
-
-#[test]
 fn reopen_tabs_from_last_session_after_a_crash_and_a_clean_stop() {
     let mut s = Server::start("last-session");
     s.ctx(&["open", "window", "named", "Work", "at", "/tmp"]).ok();
@@ -905,4 +893,16 @@ fn reopen_tabs_from_last_session_after_a_crash_and_a_clean_stop() {
     // …and a tab closed by hand comes back on its own.
     s.ctx(&["reopen", "tab", "3"]).ok();
     assert!(s.ctx(&["list", "tabs"]).ok().stdout.contains("tab 3 \"Two\""));
+}
+
+#[test]
+fn ctx_folders_are_made_and_in_every_tabs_environment() {
+    let s = Server::start("folders");
+    for f in ["Agents", "Context", "Workspaces"] {
+        assert!(s.home.join(f).is_dir(), "{f} wasn't made");
+    }
+    s.ctx(&["open", "tab", "named", "Env", "at", "/tmp"]).ok();
+    let o = s.ctx(&["run", "in", "Env", "echo $CTX_AGENTS $CTX_CONTEXT $CTX_WORKSPACES"]).ok().stdout.clone();
+    let h = s.home.display();
+    assert_eq!(o, format!("{h}/Agents {h}/Context {h}/Workspaces\n"));
 }
