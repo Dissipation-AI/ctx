@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 
 /// Bumped whenever a message changes shape. Client and server must match exactly.
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 /// Version of the `as json` / `as toon` schema. Printed as `"schema": 1`.
 pub const SCHEMA_VERSION: u32 = 1;
 /// Largest message either side accepts (a whole `read everything` of a big tab fits).
@@ -383,6 +383,9 @@ pub enum Request {
     Starters {
         limit: u32,
     },
+    /// `ctx reopen tabs from last session`: every tab that was open when the server last stopped
+    /// (reboot, crash or restart) and isn't open now, back in its window.
+    ReopenLastSession,
 }
 
 // ---------------------------------------------------------------------------------------------

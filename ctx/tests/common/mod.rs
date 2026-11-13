@@ -98,6 +98,23 @@ impl Server {
         std::thread::sleep(Duration::from_millis(300));
     }
 
+    /// A polite stop (SIGTERM): tabs are marked interrupted and the server saves its state.
+    pub fn stop(&mut self) {
+        if let Some(mut c) = self.child.take() {
+            unsafe_kill(c.id() as i32);
+            let start = Instant::now();
+            while start.elapsed() < Duration::from_secs(5) {
+                if let Ok(Some(_)) = c.try_wait() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+
     pub fn ctx(&self, args: &[&str]) -> Out {
         self.ctx_in(args, None)
     }

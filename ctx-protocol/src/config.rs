@@ -76,6 +76,14 @@ impl Paths {
     pub fn state(&self) -> PathBuf {
         self.data.join("server-state.json")
     }
+    /// The windows and their tabs, as of the last change.
+    pub fn layout(&self) -> PathBuf {
+        self.data.join("layout.json")
+    }
+    /// The tabs that were open when the server last stopped, and their windows.
+    pub fn last_session(&self) -> PathBuf {
+        self.data.join("last-session.json")
+    }
     pub fn server_log(&self) -> PathBuf {
         self.data.join("server.log")
     }

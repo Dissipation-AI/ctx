@@ -627,6 +627,9 @@ fn parse_object(
             )))
         }
         Object::ReadSelector => parse_read_selector(left, phrases).map(Some),
+        Object::Kind(Kind::Tab) if verb.name == "reopen" && is_last_session(left) => {
+            Ok(Some((Value::Noun(LAST_SESSION.into()), LAST_SESSION.into())))
+        }
         Object::Kind(kind) | Object::Optional(kind) => {
             if left.is_empty() {
                 if matches!(verb.object, Object::Optional(_)) {
@@ -642,6 +645,20 @@ fn parse_object(
             Ok(Some((value, shown)))
         }
     }
+}
+
+/// `ctx reopen tabs from last session` (also `… from the last session`).
+const LAST_SESSION: &str = "tabs from last session";
+
+fn is_last_session(left: &[Token]) -> bool {
+    let words: Vec<String> = left.iter().map(Token::lower).collect();
+    matches!(
+        words.join(" ").as_str(),
+        "tabs from last session"
+            | "tabs from the last session"
+            | "all tabs from last session"
+            | "all tabs from the last session"
+    )
 }
 
 fn too_many_words(verb: &Verb, left: &[Token]) -> ParseError {
@@ -970,6 +987,9 @@ fn to_command(parts: &Parts) -> Result<Command, ParseError> {
             Command::Server(Request::Move { tab, to, position: count(parts, P::Position).map(|n| n as u32) })
         }
         "clear" => Command::Server(Request::Clear { tab: object_tab(parts) }),
+        "reopen" if matches!(&parts.object, Some((Value::Noun(n), _)) if n == LAST_SESSION) => {
+            Command::Server(Request::ReopenLastSession)
+        }
         "reopen" | "forget" => {
             let n = match object_tab(parts) {
                 TabRef::Number(n) => n,
