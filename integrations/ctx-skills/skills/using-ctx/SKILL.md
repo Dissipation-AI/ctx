@@ -13,8 +13,9 @@ If ctx's hook is installed, your shell tool already runs each command in a tab n
 
 ## CTX folders
 
-Every tab has three folders in its environment:
-- `$CTX_AGENTS` (`~/Agents`): one folder per agent (its home), with its CLAUDE.md or AGENTS.md. For the user these are links to agents' homes, which live outside the user's home.
+Every tab has these folders in its environment:
+- `$CTX_AGENTS` (`~/Agents`, the user's tabs only): a link per agent to its private home, with its CLAUDE.md or AGENTS.md, and `Spaces`.
+- `$CTX_SPACES`: spaces, folders shared by the agents that are members of each (agents' tabs too).
 - `$CTX_CONTEXT` (`~/Context`): the user's documents (resumes, tickets, calendars, PDFs). Read only what the task needs.
 - `$CTX_WORKSPACES` (`~/Workspaces`): monorepos of related projects.
 

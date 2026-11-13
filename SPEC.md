@@ -646,16 +646,6 @@ Because tabs persist and have names, they're shared resources:
   Nothing about a tab is tied to the agent that opened it, unless agents are configured (below).
 - All of it is in the activity log and badged in CTX.app, so it's always visible who touched what.
 
-### Agents as principals (added 2026-10-23)
-
-With `[agents.<name>]` in config.toml, sharing becomes explicit. Each agent is a principal; a tab belongs to whoever opened it (recorded in the tab's log, so it survives reopening). An agent sees and drives its own tabs, plus those of the principals in its `see_tabs_of` / `drive_tabs_of`; you see and drive everything. Requests that act on tabs an agent can't see are answered as if those tabs don't exist; commands it can see but not drive are refused with the reason. CTX.app's requests count only when they come from you.
-
-Identity comes from the strongest evidence available: the process's account (`account`), its Seatbelt sandbox (checked against a per-agent marker file only that agent's profile can read), a launcher in its ancestry (`launcher`), an agent program in an agent's folder (`folders`, `default_agent`), then the tab it runs in. `CTX_AGENT_NAME` is a claim, honoured only when it names a configured agent and never to become you. An unsandboxed agent running as you can still lie by double-forking out of its ancestry; the sandbox and accounts are what make identity hold. A server that itself runs inside a sandbox (started from an agent's tab, as when an agent runs ctx's tests) treats a client in that same sandbox like an unsandboxed one, since every tab it opens inherits that sandbox anyway; macOS can't nest sandboxes, so two processes whose sandbox started at the same ancestor share one. Such a server can't open tabs for sandboxed agents, and says so.
-
-Enforcement: the sandbox profile (`ctx-protocol/src/agents.rs`) is applied by `ctx-launch --sandbox` before an agent tab's shell starts, or by the `ctx shim` an agent program's name runs in your tabs. It fails closed: a profile that can't be applied means nothing starts. Agents with accounts start through `ctx-helper` (root, launchd), which checks its own root-owned rules, `getpeereid` of the caller, and, for root, an Authorization from an administrator, then drops to the account irreversibly, applies the sandbox and execs. The README's "Agents: who may reach what" has the config.
-
-Known limits: approving a root tab blocks the server while the dialog is up; an agent with write access to your home can still plant things you run later (repository hooks, shell files), so the dev profile keeps those read-only; an account agent needs its own login for its agent program.
-
 ### Agents are accounts (sprint 2026-11-12; replaces the 2026-11-02 "agent manager" plan)
 
 ctx adds no permission system of its own. An agent is an operating-system account, and what it may reach is decided by the operating system's own accounts, groups, file owners and access lists, the way people share a Unix machine or an HPC cluster. ctx makes that easy: every operation is a `ctx` sentence (the model), and CTX.app's Agents window only runs those sentences as you (view and controller). Everything works the same from a terminal, so an agent can run the same sentences, and the OS decides whether it may.
@@ -665,8 +655,8 @@ ctx adds no permission system of its own. An agent is an operating-system accoun
 **An agent is an account.**
 
 - The account's name is the agent's name (lowercase letters, digits and `-`). It is hidden from the login window, standard (never an administrator), and a member of the group `ctx-agents`.
-- Its home folder is in agents' homes, outside yours: `/Users/Shared/ctx-agents/<name>` on macOS, `/home/ctx-agents/<name>` on Linux (the helper makes that folder, yours, mode 711). `~/Agents/<name>` links to it. Everything that is the agent's lives there: its instructions, its agent programs' own settings and logins, its work, and `ctx-agent.toml`.
-- Why not in your home: an account that may pass through a folder can reach, by name, anything inside it that other accounts may read, and most files are made readable to everyone. An agent never passes through your home just to get to its own. The helper refuses a home inside yours; `from <folder>` and `ctx move agents to accounts` move such a folder out and leave a link in its place.
+- Its home is where every account's home is: `/Users/<name>` on macOS, `/home/<name>` on Linux. The helper makes it new (it must not exist yet), owned by the agent, mode 700, with an inherited access-list entry giving you full access. `~/Agents/<name>` links to it. Everything that is the agent's own lives there: its instructions, its agent programs' settings and logins, its private work, and `ctx-agent.toml`.
+- Homes are private spaces; spaces (below) are the collaborative ones. An agent's home is never inside yours: an account that may pass through a folder can reach, by name, anything inside it that other accounts may read, and most files are made readable to everyone.
 - Agent programs and their logins are the agent's business, as for any new user on the machine: the first time `claude` (or `codex`, `pi`…) runs as the agent, it asks the agent's account to log in. ctx never copies credentials between accounts.
 
 **Who is who.** The server knows each client by the account it runs as (the kernel's peer credentials on the socket). Your account is you. An account in `ctx-agents` is that agent. Any other account is refused. Folders, programs and names a process claims don't decide anything. A tab belongs to the account it runs as.
@@ -679,12 +669,12 @@ ctx adds no permission system of its own. An agent is an operating-system accoun
   - Write access to `b`'s home makes `a` an administrator of `b`: it can edit `b`'s instructions and `ctx-agent.toml`, and see and drive `b`'s tabs.
   - Read access lets `a` see `b`'s tabs and files.
   - This is how one agent looks after others; there is no built-in manager agent. Make one if you want it: `ctx make agent named "foreman"`, then `ctx allow agent "foreman" to read agent "email-agent"`.
-- `ctx allow every agent to read ~/.local/bin` grants it to the group `ctx-agents`. Use it for tools every agent should run.
+- `ctx allow every agent to read <path>` grants it to the group `ctx-agents`.
 - `ctx forbid …` takes a grant back. `forbid … to write` leaves read access.
 - **Tabs follow files.** An account sees a tab if the tab runs as that account, or if it can read the home of the tab's account. It drives the tab (run, type, press, close, reopen, copy) if it can write that home. You see and drive every agent's tab. No agent ever sees or drives yours, because your tabs run as you.
 - `ctx show agent "b"` lists `b`'s grants. ctx keeps a note of each grant it made and checks it against the OS every time it shows them, so a change made in Finder or with chmod shows up, and a grant that no longer holds says so.
 
-**`ctx-agent.toml`**, in each agent's home, holds what the OS has no place for: the agent's colour, its limits, and on macOS an optional Seatbelt deny list (below).
+**`ctx-agent.toml`**, in each agent's home, holds what the OS has no place for: the agent's colour and its limits.
 - It belongs to you. `b`'s administrators can write it through the access list; `b` itself never can.
 - `b` owns its home, so it could replace the file with its own. The server therefore believes the file only while its owner isn't `b`. If `b` replaced it, `b`'s tabs don't start until an administrator runs `ctx reset agent "b"`.
 
@@ -694,15 +684,13 @@ ctx adds no permission system of its own. An agent is an operating-system accoun
 - CTX.app has the same thing under File ▸ New Tab As, and in the Agents window.
 - You need no password to switch. An agent may switch only to an agent it administers.
 
-**Making and removing agents.** Accounts need root, so `ctx-helper` (already a root daemon) does this part. It does it only for you, and only to accounts in `ctx-agents`. Accounts it didn't make are touched only once you have adopted them.
+**Making and removing agents.** Accounts need root, so `ctx-helper` (already a root daemon) does this part. It does it only for you, and only to accounts in `ctx-agents`, which only it makes.
 
 | Command | What it does |
 |---|---|
-| `ctx make agent named "b"` | Account, `ctx-agents` membership, home with a starter CLAUDE.md and AGENTS.md (CTX folders, ctx, how sharing works), `ctx-agent.toml`, access to `Shared/everyone`. Ends with the command to talk to it. |
-| `ctx make agent named "b" from ~/Agents/b` | The same, with an existing folder as its home: its files become `b`'s, and you keep full access. A folder in your home moves to agents' homes first, leaving a link. |
-| `ctx make agent from account "vibe-daemon"` | Adopts an existing standard account as an agent. |
+| `ctx make agent named "b"` | Account, `ctx-agents` membership, a new private home with a starter CLAUDE.md and AGENTS.md (CTX folders, spaces, ctx, how sharing works) and `ctx-agent.toml`, and the link in `~/Agents`. Ends with the command to talk to it. |
 | `ctx rename agent "b" to "Book critic"` | The full name shown beside the account name. The account name is fixed. |
-| `ctx remove agent "b"` | Deletes the account and the grants ctx made for it. Its home is kept unless you add `with its files`. Asks first at a terminal. |
+| `ctx remove agent "b"` | Stops its processes, takes it out of its spaces, and deletes the account and the grants ctx made for it. Its home is kept unless you add `with its files`, which moves it to your Trash (its files become yours). Asks first at a terminal. |
 | `ctx list agents`, `ctx show agent "b"` | Accounts, administrators, grants, limits, tabs, and warnings. |
 | `ctx limit agent "b" to 8 GB of memory` / `200 processes` / `low priority` / `nothing` | Resources. On Linux, memory is a hard limit (a systemd scope with `MemoryMax`). macOS has no per-account memory limit, so the server watches the agent's tabs and stops the largest command over the limit, with an event line in the tab. Processes: `RLIMIT_NPROC`. Priority: `nice` plus background QoS on macOS. |
 | `ctx reset agent "b"` | Rewrites `ctx-agent.toml` as yours, with the defaults. |
@@ -715,25 +703,19 @@ ctx adds no permission system of its own. An agent is an operating-system accoun
 
 This is how an agent hands its work back to you.
 
-**Seatbelt** is off for agents with accounts, because the account is the boundary. `ctx-agent.toml` can still add a Seatbelt deny list on macOS to narrow an agent further. Agents without an account (an install without the helper) keep running as you inside the Seatbelt sandbox, as before.
-
-**Shared folders.**
-- `$CTX_AGENTS/Shared/everyone` is readable and writable by `ctx-agents` and you.
-- `ctx make shared folder with agent "b"`, run by agent `a`, makes `$CTX_AGENTS/Shared/a+b` for `a`, `b` and you. The server makes it, as you, so no agent can make one for others.
+**Spaces** are the collaborative places. Not every shared place is for every agent, so each space has its own members.
+- A space is a group, `ctx-space-<name>`, and a folder in the spaces folder: `/Users/Shared/Spaces/<name>` on macOS, `/srv/spaces/<name>` on Linux. The folder is yours, with the space's group, mode 2770, and inherited access-list entries giving the group and you read and write, so whatever a member makes there the others can change.
+- `ctx make space named "research"`, `ctx add agent "a" to space "research"`, `ctx take agent "a" out of space "research"`, `ctx list spaces`, `ctx remove space "research"` (the group goes; add `with its files` to move the folder to your Trash). Only you make spaces and change their members; the helper does it.
+- Membership is group membership, so the OS decides, and a tab started after a change has it. Every tab gets the spaces folder in `CTX_SPACES`; `~/Agents/Spaces` links to it. `ctx show agent "a"` lists its spaces.
 
 **Which account a tab runs as.** `ctx list tabs` puts `as b` on agents' tabs. CTX.app shows the agent's name and colour on the tab and in the window title. The tab's first line is an event line naming the account.
 
-**Bringing existing agents over.** `ctx move agents to accounts` reads the `[agents.*]` sections of `config.toml` and shows the plan first:
-- an agent with a folder in `$CTX_AGENTS` becomes an account with that folder as its home;
-- an agent that already names an account adopts it;
-- each agent's `read` and `write` lists become grants.
+**Platforms.** macOS uses `dscl` and `dseditgroup` for accounts and groups, and `chmod +a` for access lists. Linux uses `useradd`, `userdel`, `groupadd` and `gpasswd` for accounts and spaces, and `setfacl`. Agents' shells on Linux use `umask 002` so access-list masks keep write.
 
-Once you agree, it carries out the plan and takes those sections out of `config.toml` (a copy is kept). It needs the helper, so an administrator approves it once.
-
-**Platforms.** macOS uses `dscl` and `dseditgroup` for accounts and groups, and `chmod +a` for access lists. Linux uses `useradd`, `userdel` and `usermod` for accounts, a group per agent, and `setfacl`. On Linux, shared folders also get the setgid bit so new files keep the group, and agents' shells use `umask 002` so access-list masks keep write.
+**Installed for the whole computer.** `sudo scripts/install.sh <you>` puts `ctx` and `ctx-launch` in `/usr/local/bin`, where every account finds them (an agent can't run a program kept in your home), installs the helper (launchd on macOS, systemd on Linux) with its one rule, the account that may ask, and copies the skills to where Claude Code (`/Library/Application Support/ClaudeCode/.claude/skills`, `/etc/claude-code/.claude/skills`) and Codex (`/etc/codex/skills`) read skills for every account. `--remove` undoes it. Other agent programs have no documented machine-wide skills folder; `ctx install skills for …` covers them per account.
 
 **CTX folders.** `[folders]` in config.toml, defaults `agents = "~/Agents"`, `context = "~/Context"`, `workspaces = "~/Workspaces"`. ctx creates them on install and when the server starts, and exports `CTX_AGENTS`, `CTX_CONTEXT` and `CTX_WORKSPACES` into every tab, agents' included.
-- Agents: one link per agent to its home (in agents' homes, outside yours). In an agent's tab `CTX_AGENTS` is agents' homes itself.
+- Agents: one link per agent to its home, and `Spaces`, a link to the spaces folder. An agent's tab has no `CTX_AGENTS`: your folder isn't its to reach; it has `CTX_SPACES`.
 - Context: documents an agent may need. None is shared by default; you grant what each agent needs.
 - Workspaces: monorepos of related projects, where a developer agent starts.
 
@@ -747,7 +729,9 @@ The skills and the starter instructions explain all three.
 - the built-in manager agent: administration is a grant;
 - the monolithic `[agents]` config: each agent has its own file in its home;
 - `see_tabs_of` and `drive_tabs_of`: tabs follow file access;
-- folder rules and shims that turned `claude` in your tab into an agent: you switch to the agent instead.
+- folder rules and shims that turned `claude` in your tab into an agent: you switch to the agent instead;
+- the Seatbelt sandbox, config-file agents (`[agents.*]`, `default_agent`, `agent_base`), root agents, adopting existing accounts and moving old agents over: no backward compatibility, an agent is an account ctx made;
+- per-pair shared folders: spaces replace them.
 
 ## Asking about a tab
 

@@ -34,7 +34,7 @@ pub fn list(format: Format) -> Out {
     if list.agents.is_empty() {
         out.line("No agents yet. Make one: ctx make agent named \"<name>\" (its own account, linked in ~/Agents).");
     } else if !list.helper_running {
-        out.line("The ctx helper isn't running, so agents' tabs can't start. An administrator installs it once: sudo scripts/install-helper.sh <you>");
+        out.line("The ctx helper isn't running, so agents' tabs can't start. An administrator installs it once: sudo scripts/install.sh <you>");
     }
     out
 }

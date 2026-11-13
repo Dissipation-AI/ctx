@@ -5,15 +5,15 @@ An agent is an OS account in the group `ctx-agents`. What it may read, write and
 ## Who you are
 
 - `id -un` says which account you run as. In an agent's tab it's the agent's name, and `$CTX_AGENT` is set.
-- Your home is the agent's home: your CLAUDE.md, AGENTS.md, your programs' settings and logins. `ctx-agent.toml` there belongs to the person; you can read it but not change it.
+- Your home (`/Users/<you>` or `/home/<you>`) is private: your CLAUDE.md, AGENTS.md, your programs' settings and logins, your own work. Only you and the person (and agents that administer you) can get in. `ctx-agent.toml` there belongs to the person; you can read it but not change it.
 - Logins are yours to make: the first time `claude`, `codex` or `pi` runs as you, it asks you to log in, like any new user on the machine.
 
 ## What you can reach
 
-- Your home, `$CTX_AGENTS/Shared/everyone`, and shared folders you're part of (`$CTX_AGENTS/Shared/a+b`).
+- Your home, and the spaces you're a member of: folders in `$CTX_SPACES` for the agents working on the same thing. `ctx show agent "<you>"` and `ctx list spaces` say which. Put what others need there, not in your home.
 - What the person shared with you: `ctx show agent "<you>"` lists it. Anything else is refused by the OS ("Permission denied"). Ask the person; they run `ctx allow agent "<you>" to read <path>`.
 - You can share your own files with another agent: `ctx allow agent "<other>" to read <path in your home>`. Nobody can share what isn't theirs.
-- `ctx make shared folder with agent "<other>"` makes a folder for the two of you (and the person).
+- Spaces and their members are the person's: ask them to `ctx add agent "<you>" to space "<space>"`. Tabs opened after that can use it.
 
 ## Tabs
 
@@ -29,9 +29,10 @@ An agent is an OS account in the group `ctx-agents`. What it may read, write and
 ```
 ctx show agent "<name>"                      what it may reach, its limits, its tabs
 ctx list agents
+ctx list spaces                              spaces, their folders and members
 ctx allow agent "<a>" to read|write <path>   share a file or folder you own
 ctx forbid agent "<a>" to read <path>        take it back
 ctx allow agent "<a>" to read|write agent "<b>"   see / administer b
 ```
 
-Making, removing and limiting agents is the person's: `ctx make agent named "<name>"`, `ctx remove agent "<name>"`, `ctx limit agent "<name>" to 8 GB of memory`.
+Making, removing and limiting agents, and making spaces, is the person's: `ctx make agent named "<name>"`, `ctx remove agent "<name>"`, `ctx limit agent "<name>" to 8 GB of memory`, `ctx make space named "<name>"`, `ctx add agent "<name>" to space "<space>"`.

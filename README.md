@@ -50,11 +50,12 @@ Rust 1.99 (see `rust-toolchain.toml`), plus what Ghostty's terminal library need
   at an extracted `libghostty-vt` source tarball.
 
 ```sh
-cargo build --release      # target/release/ctx and target/release/ctx-launch, side by side
+cargo build --release      # target/release/ctx, ctx-launch and ctx-helper
 cargo test
+sudo scripts/install.sh "$USER"
 ```
 
-Install both binaries in the same folder (`ctx` starts tab shells through `ctx-launch`).
+ctx installs for the whole computer, so agents' accounts run the same `ctx` you do: `ctx` and `ctx-launch` in `/usr/local/bin`, the ctx helper (a root daemon, see below) under launchd or systemd, and the skills where Claude Code and Codex read them for every account. `sudo scripts/install.sh --remove` takes it all out again; agents' accounts, homes and spaces stay until you remove them with ctx.
 
 ## Trying it without touching your tabs
 
@@ -117,7 +118,7 @@ ctx remove skills for claude                  # undo (also with `at`)
 | pi | `pi install` | `pi install -l` |
 | opencode | copied into `~/.config/opencode/skills` | copied into the project's `.opencode/skills` |
 
-Copies don't update with ctx; run `ctx install skills` again after updating. Without ctx installed, Claude Code can take them straight from GitHub: `claude plugin install ctx-skills --marketplace Dissipation-AI/ctx`. See [integrations/ctx-skills/README.md](integrations/ctx-skills/README.md).
+`scripts/install.sh` also puts both skills where Claude Code (`/Library/Application Support/ClaudeCode/.claude/skills`, `/etc/claude-code/.claude/skills` on Linux) and Codex (`/etc/codex/skills`) load them for every account, agents' included; with those, the per-person install above is only for the other agents. Copies don't update with ctx; run `ctx install skills` (or the install script) again after updating. Without ctx installed, Claude Code can take them straight from GitHub: `claude plugin install ctx-skills --marketplace Dissipation-AI/ctx`. See [integrations/ctx-skills/README.md](integrations/ctx-skills/README.md).
 
 ### Agents without a hookable shell: `ctx mcp`
 
@@ -125,42 +126,38 @@ For an agent whose shell tool can't be hooked, `ctx mcp` is an MCP server (stdio
 
 ## Agents: who may reach what
 
-Each agent is a principal of its own, named in `~/.config/ctx/config.toml`. Its tabs belong to it; it sees and drives only those, plus the tabs of anyone listed in `see_tabs_of` / `drive_tabs_of` (`"you"`, another agent, or `"*"`). Every activity log line names the agent (`dev: claude (pid 5512) …`), including commands its hooks rewrote. `ctx list agents` shows the whole setup.
-
-```toml
-default_agent = "dev"            # agent programs started outside every agent's folders
-
-[agent_base]                     # every agent's sandbox gets these too
-read = ["~/.zshrc", "~/.gitconfig", "~/.cargo", "~/Library/Keychains"]
-write = ["~/.claude", "~/.claude.json", "~/.cache"]
-
-[agents.dev]
-folders = ["~/Workspaces"]       # claude, codex, agy, … started here are dev
-write = ["~"]
-deny = ["~/Context", "~/Agents", "~/Library", "~/.ssh"]
-read = ["~/.zshrc", "~/.ssh/known_hosts"]
-see_tabs_of = ["you"]
-# account = "vibe-daemon"        # run as its own macOS account (needs the ctx helper)
-
-[agents.sysadmin]
-launcher = "sysadmin"            # whatever runs through this launcher is the sysadmin
-folders = ["~/Agents/sys-admin"]
-sandbox = false
-```
-
-How an agent is recognised, strongest first: the account a process runs as, the sandbox it's in, a launcher in its ancestry, an agent program in an agent's folder, the tab it runs in. A declared `CTX_AGENT_NAME` counts only when it names a configured agent, and never upgrades a process to you.
-
-**The sandbox** (on unless `sandbox = false`). Your home is closed, then the agent's `read`, `write` and `deny` paths are given back. The most specific path wins whatever its kind, so `write = ["~"]` with `deny = ["~/.ssh"]` and `read = ["~/.ssh/known_hosts"]` means what it says. Outside your home everything stays readable and only temporary folders are writable. ctx's own files, Apple Events and `open` are always closed. A tab for the agent starts its shell inside the sandbox; an agent program you start in one of your tabs (ctx puts a small shim for each of `agent_programs` first on PATH) applies it to itself before it starts. macOS privacy protection (TCC: Full Disk Access, browser data) still applies on top: the sandbox can only take away.
-
-**Accounts.** With `account = "<name>"`, the agent's tabs run as that macOS account, started by the ctx helper (`ctx-helper`), a small root daemon. It accepts requests only from the account the server runs as, and only for the agents its own root-owned rules (`/Library/Application Support/ctx/helper.toml`) list, so nothing running as you can widen them. An agent that runs as root needs an administrator's approval (password or Touch ID) each time a tab starts. The agent's shell reaches the server through `/private/tmp/ctx-agents-<uid>/server.sock` (`CTX_SOCKET`). An agent program you start in your own tab runs in a new tab of the agent's, shown in your terminal until it exits.
+An agent is an account of its own on the computer, in the group `ctx-agents`. The operating system decides what it may reach, with the same users, groups and access lists that keep people apart, and ctx keeps those details out of sight:
 
 ```sh
-cargo build --release -p ctx-helper
-sudo scripts/install-helper.sh c dev=vibe-daemon sysadmin=sys-ops-monkey
-sudo scripts/install-helper.sh --remove
+ctx make agent named "email-agent"         # an account, a private home, ~/Agents/email-agent links to it
+ctx switch to agent "email-agent"          # a tab as that account, in its home; run claude, codex, … there
+ctx allow agent "email-agent" to read ~/Context/career
+ctx forbid agent "email-agent" to read ~/Context/career
+ctx allow agent "sys-admin" to write agent "email-agent"   # sys-admin administers email-agent
+ctx limit agent "email-agent" to 4 GB of memory
+ctx show agent "email-agent"
+ctx remove agent "email-agent" with its files              # its home goes to your Trash
 ```
 
-An account only helps if it can't read your files: close your home (`chmod 700 ~`) and give back what each account needs with ACLs, and give each account its own login for its agent program (`claude setup-token` as that account).
+**Homes are private.** Each agent's home is where every account's is (`/Users/<name>`, `/home/<name>` on Linux), readable only by the agent and you. It holds the agent's own logins (`claude`, `codex`, `pi` … each signed in as that account), its instructions (`CLAUDE.md`, `AGENTS.md`) and `ctx-agent.toml`, its colour and limits, which belong to you and its administrators, never to the agent.
+
+**Spaces are shared.** A space is a folder for the agents that work together on something, and a group the OS checks. Only its members (and you) can use it:
+
+```sh
+ctx make space named "job-search"          # /Users/Shared/Spaces/job-search (/srv/spaces on Linux)
+ctx add agent "email-agent" to space "job-search"
+ctx take agent "email-agent" out of space "job-search"
+ctx list spaces
+ctx remove space "job-search" with its files
+```
+
+Every tab has the spaces folder in `CTX_SPACES`; `~/Agents/Spaces` links to it. A new member's tabs opened after it joined can use the space.
+
+**Your files** stay closed to every agent until you share a folder or file, and only for as long as you do. Sharing opens only the path to it: whatever sits beside it on the way stays closed, including files made there later.
+
+**Tabs.** An agent's tabs belong to it and run as its account. It sees and drives only its own tabs, plus those of agents whose homes it may read (see) or write (drive). No agent ever sees or drives yours, restarts the server, or reopens your session's tabs; a copy you make of an agent's tab stays the agent's. Every activity log line names who did it (`email-agent: claude (pid 5512) …`).
+
+**The ctx helper** (`ctx-helper`) is the only part of ctx with root. It answers only the account in its root-owned rules (the one the ctx server runs as), makes and removes agents' accounts and spaces, and starts a tab only as an agent's account: one in `ctx-agents`, standard, never yours or an administrator's. An agent's shell reaches the server through a door of its own (`CTX_SOCKET`), and `open`, `pbcopy` and `pbpaste` there reach your session through ctx.
 
 ## Licence
 

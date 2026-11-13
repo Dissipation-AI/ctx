@@ -14,8 +14,11 @@ use std::path::PathBuf;
 /// Where the helper listens, unless `CTX_HELPER_SOCKET` says otherwise (tests).
 pub const SOCKET: &str = "/var/run/ctx-helper.sock";
 /// The helper's rules, unless `CTX_HELPER_CONFIG` says otherwise (tests).
+#[cfg(target_os = "macos")]
 pub const CONFIG: &str = "/Library/Application Support/ctx/helper.toml";
-/// The launchd label it's installed under.
+#[cfg(not(target_os = "macos"))]
+pub const CONFIG: &str = "/etc/ctx/helper.toml";
+/// The launchd label (macOS) and systemd unit name (Linux) it's installed under.
 pub const LABEL: &str = "com.ctx.helper";
 
 pub fn socket() -> PathBuf {
@@ -160,7 +163,7 @@ pub fn ask(req: &HelperRequest) -> Result<HelperReply, String> {
     let path = socket();
     let mut stream = std::os::unix::net::UnixStream::connect(&path).map_err(|e| {
         format!(
-            "the ctx helper isn't installed or isn't running ({}: {e}). An administrator installs it once: sudo scripts/install-helper.sh <you>",
+            "the ctx helper isn't installed or isn't running ({}: {e}). An administrator installs it once: sudo scripts/install.sh <you>",
             path.display()
         )
     })?;
@@ -179,7 +182,7 @@ pub fn ask(req: &HelperRequest) -> Result<HelperReply, String> {
     match serde_json::from_str::<SpawnReply>(&answer) {
         Ok(SpawnReply::Refused { message }) => Ok(HelperReply::Refused {
             message: format!(
-                "{message} (The installed helper is older than this ctx; an administrator reinstalls it: sudo scripts/install-helper.sh <you>.)"
+                "{message} (The installed helper is older than this ctx; an administrator reinstalls it: sudo scripts/install.sh <you>.)"
             ),
         }),
         _ => Err(format!("the ctx helper's answer didn't make sense: {}", answer.trim())),
