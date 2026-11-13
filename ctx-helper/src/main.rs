@@ -1,5 +1,5 @@
-//! `ctx-helper`: starts an agent's tab as the agent's own macOS account. See
-//! `ctx-protocol/src/helper.rs` for the rules and the wire format.
+//! `ctx-helper`: starts an agent's tab as the agent's own account, and makes, adopts and removes
+//! agents' accounts. See `ctx-protocol/src/helper.rs` for the rules and the wire format.
 //!
 //! Installed as a launchd daemon (root). It listens on one socket, answers only the account in
 //! its root-owned `helper.toml`, and for each request: checks the agent and account against that
@@ -10,19 +10,33 @@
 //! Usage: `ctx-helper` (by launchd). With `CTX_HELPER_SOCKET` and `CTX_HELPER_CONFIG` it can run
 //! unprivileged for tests, where the only account it can become is its own.
 
-use ctx_protocol::helper::{HelperConfig, SpawnReply, SpawnRequest, config_path, socket};
+use ctx_accounts::{accounts, acl};
+use ctx_protocol::helper::{
+    EntryFor, Grant, HELPER_VERSION, HelperConfig, HelperReply, HelperRequest, SpawnReply, SpawnRequest, StarterFile,
+    config_path, socket,
+};
+use std::path::{Path, PathBuf};
 use std::ffi::{CStr, CString};
 use std::io::{BufRead, BufReader, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 
+#[cfg(target_os = "macos")]
 unsafe extern "C" {
-    #[cfg(target_os = "macos")]
     fn sandbox_check(pid: libc::pid_t, operation: *const libc::c_char, filter: libc::c_int, ...) -> libc::c_int;
     fn sandbox_init(profile: *const libc::c_char, flags: u64, errorbuf: *mut *mut libc::c_char) -> libc::c_int;
 }
 
+/// Linux has no administrator approval of this kind; root agents are refused there.
+#[cfg(not(target_os = "macos"))]
+mod auth {
+    pub fn admin_approved(_ext: &[u8]) -> bool {
+        false
+    }
+}
+
 /// macOS Authorization, enough to check (and use up) an administrator's approval.
+#[cfg(target_os = "macos")]
 mod auth {
     #[repr(C)]
     struct Item {
@@ -104,13 +118,13 @@ fn account_name(uid: libc::uid_t) -> Option<String> {
     }
 }
 
-/// One JSON line and the descriptor attached to it.
-fn receive(stream: &UnixStream) -> Option<(Vec<u8>, OwnedFd)> {
+/// One JSON line and the descriptor attached to it, if any.
+fn receive(stream: &UnixStream) -> Option<(Vec<u8>, Option<OwnedFd>)> {
     let mut buf = vec![0u8; 1 << 20];
     let mut cmsg = [0u8; 64];
     let mut iov = libc::iovec { iov_base: buf.as_mut_ptr().cast(), iov_len: buf.len() };
     // SAFETY: msghdr points at live buffers for the duration of recvmsg.
-    let n = unsafe {
+    let (len, fd) = unsafe {
         let mut msg: libc::msghdr = std::mem::zeroed();
         msg.msg_iov = &mut iov;
         msg.msg_iovlen = 1;
@@ -121,13 +135,13 @@ fn receive(stream: &UnixStream) -> Option<(Vec<u8>, OwnedFd)> {
             return None;
         }
         let c = libc::CMSG_FIRSTHDR(&msg);
-        if c.is_null() || (*c).cmsg_level != libc::SOL_SOCKET || (*c).cmsg_type != libc::SCM_RIGHTS {
-            return None;
-        }
-        let fd = *(libc::CMSG_DATA(c) as *const RawFd);
-        (n as usize, OwnedFd::from_raw_fd(fd))
+        let fd = if !c.is_null() && (*c).cmsg_level == libc::SOL_SOCKET && (*c).cmsg_type == libc::SCM_RIGHTS {
+            Some(OwnedFd::from_raw_fd(*(libc::CMSG_DATA(c) as *const RawFd)))
+        } else {
+            None
+        };
+        (n as usize, fd)
     };
-    let (len, fd) = n;
     buf.truncate(len);
     // The rest of the line, if it didn't come in one piece.
     let mut reader = BufReader::new(stream);
@@ -139,6 +153,13 @@ fn receive(stream: &UnixStream) -> Option<(Vec<u8>, OwnedFd)> {
     Some((buf, fd))
 }
 
+fn answer(mut stream: &UnixStream, r: &HelperReply) {
+    if let Ok(mut s) = serde_json::to_vec(r) {
+        s.push(b'\n');
+        let _ = stream.write_all(&s);
+    }
+}
+
 fn reply(mut stream: &UnixStream, r: &SpawnReply) {
     if let Ok(mut s) = serde_json::to_vec(r) {
         s.push(b'\n');
@@ -148,6 +169,22 @@ fn reply(mut stream: &UnixStream, r: &SpawnReply) {
 
 /// Check a request against the rules. `Ok` gives the account to become.
 fn check(req: &SpawnRequest, rules: &HelperConfig) -> Result<Account, String> {
+    // An agent that is an account: its name is the account's, and the account is in ctx-agents,
+    // standard, and not the owner's.
+    if !rules.accounts.contains_key(&req.agent) && req.agent == req.account {
+        let a = account(&req.account).ok_or_else(|| format!("There's no account \"{}\".", req.account))?;
+        let info = accounts::by_name(&req.account).ok_or_else(|| format!("There's no account \"{}\".", req.account))?;
+        if !accounts::is_agent(&info) {
+            return Err(format!("\"{}\" isn't an agent's account (it isn't in {}).", req.account, accounts::AGENTS_GROUP));
+        }
+        if a.uid == 0 || accounts::is_admin(&req.account) || account(&rules.owner).is_some_and(|o| o.uid == a.uid) {
+            return Err(format!("\"{}\" is an administrator or the owner; agents' accounts are standard.", req.account));
+        }
+        if req.program.is_empty() || req.argv.is_empty() {
+            return Err("No program to start.".into());
+        }
+        return Ok(a);
+    }
     let Some(want) = rules.accounts.get(&req.agent) else {
         return Err(format!(
             "The helper's rules ({}) don't have the agent \"{}\".",
@@ -216,12 +253,7 @@ fn become_and_exec(req: &SpawnRequest, a: &Account, tty: RawFd) -> String {
     env.push(("USER".into(), user.clone()));
     env.push(("LOGNAME".into(), user));
     env.push(("SHELL".into(), if a.shell.is_empty() { "/bin/zsh".into() } else { a.shell.clone() }));
-    let mut tmp = [0u8; 1024];
-    // SAFETY: confstr writes at most the buffer's length.
-    let n = unsafe { libc::confstr(libc::_CS_DARWIN_USER_TEMP_DIR, tmp.as_mut_ptr().cast(), tmp.len()) };
-    if n > 0 && n <= tmp.len() {
-        env.push(("TMPDIR".into(), String::from_utf8_lossy(&tmp[..n - 1]).into_owned()));
-    }
+    env.push(("TMPDIR".into(), user_temp()));
     let folder = CString::new(req.folder.clone()).unwrap_or_default();
     let home = CString::new(a.home.clone()).unwrap_or_default();
     // SAFETY: valid C strings.
@@ -231,17 +263,36 @@ fn become_and_exec(req: &SpawnRequest, a: &Account, tty: RawFd) -> String {
         }
     }
     if !req.sandbox.is_empty() {
-        let Ok(profile) = CString::new(req.sandbox.clone()) else { return "the sandbox has a NUL byte".into() };
-        let mut err: *mut libc::c_char = std::ptr::null_mut();
-        // SAFETY: a valid C string and an out-pointer.
-        if unsafe { sandbox_init(profile.as_ptr(), 0, &mut err) } != 0 {
-            return "couldn't apply the agent's sandbox".into();
+        #[cfg(target_os = "macos")]
+        {
+            let Ok(profile) = CString::new(req.sandbox.clone()) else { return "the sandbox has a NUL byte".into() };
+            let mut err: *mut libc::c_char = std::ptr::null_mut();
+            // SAFETY: a valid C string and an out-pointer.
+            if unsafe { sandbox_init(profile.as_ptr(), 0, &mut err) } != 0 {
+                return "couldn't apply the agent's sandbox".into();
+            }
         }
+        #[cfg(not(target_os = "macos"))]
+        return "the agent sandbox is macOS only".into();
     }
     use std::os::unix::process::CommandExt;
     let e =
         std::process::Command::new(&req.program).arg0(&req.argv[0]).args(&req.argv[1..]).env_clear().envs(env).exec();
     format!("couldn't start {}: {e}", req.program)
+}
+
+/// The account's own temporary folder (the helper has already become the account).
+fn user_temp() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        let mut tmp = [0u8; 1024];
+        // SAFETY: confstr writes at most the buffer's length.
+        let n = unsafe { libc::confstr(libc::_CS_DARWIN_USER_TEMP_DIR, tmp.as_mut_ptr().cast(), tmp.len()) };
+        if n > 0 && n <= tmp.len() {
+            return String::from_utf8_lossy(&tmp[..n - 1]).into_owned();
+        }
+    }
+    "/tmp".into()
 }
 
 /// The process on the other end of the socket (as it was when it connected).
@@ -287,7 +338,11 @@ fn serve_one(stream: UnixStream, rules: &HelperConfig, owner_uid: libc::uid_t) {
             },
         );
     }
-    let Some((line, tty)) = receive(&stream) else {
+    let Some((line, fd)) = receive(&stream) else { return };
+    if let Ok(req) = serde_json::from_slice::<HelperRequest>(&line) {
+        return answer(&stream, &handle(req, owner_uid));
+    }
+    let Some(tty) = fd else {
         return reply(
             &stream,
             &SpawnReply::Refused { message: "The request needs the tab's terminal attached.".into() },
@@ -320,6 +375,246 @@ fn serve_one(stream: UnixStream, rules: &HelperConfig, owner_uid: libc::uid_t) {
     }
     drop(tty);
     reply(&stream, &SpawnReply::Started { pid });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Accounts
+// ---------------------------------------------------------------------------------------------
+
+fn handle(req: HelperRequest, owner: libc::uid_t) -> HelperReply {
+    let r = match req {
+        HelperRequest::Version => return HelperReply::Version { version: HELPER_VERSION },
+        HelperRequest::MakeAccount { name, full_name, home, files } => make_account(&name, &full_name, &home, &files, owner),
+        HelperRequest::AdoptAccount { name } => accounts::adopt(&name).map(|a| format!("\"{}\" is an agent now.", a.name)),
+        HelperRequest::RemoveAccount { name, trash_home } => remove_account(&name, trash_home, owner),
+        HelperRequest::SetFullName { name, full_name } => agent(&name, owner)
+            .and_then(|_| accounts::set_full_name(&name, &full_name))
+            .map(|_| format!("\"{name}\" is called \"{full_name}\" now.")),
+        HelperRequest::Share { path, entry, grant } => share(Path::new(&path), entry, grant, owner),
+        HelperRequest::MayAccess { account, path, write } => {
+            return match agent(&account, owner) {
+                Ok(a) => HelperReply::Answer { yes: may_access(&a, &path, write) },
+                Err(message) => HelperReply::Refused { message },
+            };
+        }
+    };
+    match r {
+        Ok(message) => HelperReply::Done { message },
+        Err(message) => HelperReply::Refused { message },
+    }
+}
+
+/// An agent's account (in ctx-agents, standard, not the owner).
+fn agent(name: &str, owner: libc::uid_t) -> Result<accounts::Account, String> {
+    let a = accounts::by_name(name).ok_or_else(|| format!("There's no account \"{name}\"."))?;
+    if !accounts::is_agent(&a) || a.uid == 0 || a.uid == owner || accounts::is_admin(name) {
+        return Err(format!("\"{name}\" isn't an agent's account."));
+    }
+    Ok(a)
+}
+
+fn lstat(p: &Path) -> Option<std::fs::Metadata> {
+    std::fs::symlink_metadata(p).ok()
+}
+
+/// A real folder (not a link) owned by `uid`.
+fn owned_folder(p: &Path, uid: libc::uid_t) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    lstat(p).is_some_and(|m| m.is_dir() && m.uid() == uid)
+}
+
+fn chown(p: &Path, uid: u32, gid: u32) -> std::io::Result<()> {
+    std::os::unix::fs::lchown(p, Some(uid), Some(gid))
+}
+
+fn make_account(
+    name: &str,
+    full_name: &str,
+    home: &str,
+    files: &[StarterFile],
+    owner: libc::uid_t,
+) -> Result<String, String> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let home_path = PathBuf::from(home);
+    if !home_path.is_absolute() || home.contains("/../") || home.ends_with("/..") {
+        return Err(format!("The home folder must be a full path, not \"{home}\"."));
+    }
+    let parent = home_path.parent().ok_or("The home folder needs a parent folder.")?;
+    if !owned_folder(parent, owner) {
+        return Err(format!("{} must be a folder of yours.", parent.display()));
+    }
+    let existing = lstat(&home_path);
+    if let Some(m) = &existing
+        && !(m.is_dir() && m.uid() == owner)
+    {
+        return Err(format!("{home} exists and isn't a folder of yours."));
+    }
+    let a = accounts::make(name, full_name, home)?;
+    let undo = |e: String| {
+        let _ = accounts::remove(name);
+        e
+    };
+    if existing.is_none() {
+        std::fs::create_dir(&home_path).map_err(|e| undo(format!("couldn't make {home}: {e}")))?;
+    }
+    // Your files in it become the agent's: only files you own, not through links, and no file
+    // with other hard links (it would be someone else's file too).
+    let mut skipped = 0;
+    let mut give = |p: &Path| {
+        if let Some(m) = lstat(p)
+            && m.uid() == owner
+            && (m.is_dir() || m.nlink() == 1)
+        {
+            let _ = chown(p, a.uid, a.gid);
+        } else {
+            skipped += 1;
+        }
+    };
+    give(&home_path);
+    acl::each_inside(&home_path, &mut give);
+    let _ = std::fs::set_permissions(&home_path, std::fs::Permissions::from_mode(0o700));
+    for f in files {
+        let rel = Path::new(&f.path);
+        if rel.is_absolute() || rel.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+            continue;
+        }
+        let p = home_path.join(rel);
+        if lstat(&p).is_some() {
+            continue;
+        }
+        if let Some(dir) = p.parent()
+            && lstat(dir).is_none()
+        {
+            let _ = std::fs::create_dir_all(dir);
+            let _ = chown(dir, a.uid, a.gid);
+        }
+        if std::fs::write(&p, &f.text).is_ok() {
+            let (u, g) = if f.yours { (owner, accounts::by_uid(owner).map(|o| o.gid).unwrap_or(0)) } else { (a.uid, a.gid) };
+            let _ = chown(&p, u, g);
+            let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644));
+        }
+    }
+    // You keep full access to everything in it, now and later.
+    acl::apply(&home_path, acl::Who::User(owner), Some(acl::Access::Write))
+        .map_err(|e| undo(format!("couldn't give you access to {home}: {e}")))?;
+    // Agents pass through the folders above it, up to and including your home.
+    let gid = accounts::group(accounts::AGENTS_GROUP).map(|(g, _)| g).unwrap_or(a.gid);
+    let your_home = accounts::by_uid(owner).map(|o| PathBuf::from(o.home)).unwrap_or_default();
+    let mut up = parent.to_path_buf();
+    loop {
+        if !owned_folder(&up, owner) {
+            break;
+        }
+        let _ = acl::allow_passing(&up, acl::Who::Group(gid));
+        if up == your_home {
+            break;
+        }
+        match up.parent() {
+            Some(p) => up = p.to_path_buf(),
+            None => break,
+        }
+    }
+    let mut msg = format!("Made the agent \"{name}\" (account {}, uid {}) with its home at {home}.", a.name, a.uid);
+    if skipped > 0 {
+        msg.push_str(&format!(" {skipped} files in it weren't yours (or had other links) and kept their owner."));
+    }
+    Ok(msg)
+}
+
+fn remove_account(name: &str, trash_home: bool, owner: libc::uid_t) -> Result<String, String> {
+    use std::os::unix::fs::MetadataExt;
+    let a = agent(name, owner)?;
+    let mut msg = String::new();
+    let home = PathBuf::from(&a.home);
+    if trash_home && lstat(&home).is_some_and(|m| m.is_dir() && m.uid() == a.uid) {
+        let you = accounts::by_uid(owner).ok_or("There's no owner account.")?;
+        if !home.parent().is_some_and(|p| owned_folder(p, owner)) {
+            return Err(format!("{} isn't in a folder of yours, so ctx won't move it.", home.display()));
+        }
+        let trash = PathBuf::from(&you.home).join(".Trash");
+        let _ = std::fs::create_dir_all(&trash);
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let to = trash.join(format!("{name}-{stamp}"));
+        std::fs::rename(&home, &to).map_err(|e| format!("couldn't move {} to the Trash: {e}", home.display()))?;
+        // Everything the agent owned in it becomes yours.
+        let mut take = |p: &Path| {
+            if lstat(p).is_some_and(|m| m.uid() == a.uid && (m.is_dir() || m.nlink() == 1)) {
+                let _ = chown(p, owner, you.gid);
+            }
+        };
+        take(&to);
+        acl::each_inside(&to, &mut take);
+        msg = format!(" Its home is in your Trash ({}).", to.display());
+    }
+    accounts::remove(name)?;
+    Ok(format!("Removed the agent \"{name}\".{msg}"))
+}
+
+fn share(path: &Path, entry: EntryFor, grant: Option<Grant>, owner: libc::uid_t) -> Result<String, String> {
+    use std::os::unix::fs::MetadataExt;
+    let Some(top) = lstat(path) else { return Err(format!("There's no {}.", path.display())) };
+    if top.uid() != owner || top.file_type().is_symlink() {
+        return Err(format!("{} isn't yours, so you can't share it.", path.display()));
+    }
+    let who = match entry {
+        EntryFor::User(u) => acl::Who::User(u),
+        EntryFor::Group(g) => acl::Who::Group(g),
+    };
+    let access = grant.map(|g| match g {
+        Grant::Read => acl::Access::Read,
+        Grant::Write => acl::Access::Write,
+        Grant::ReadOnly => acl::Access::ReadOnly,
+        Grant::Nothing => acl::Access::Nothing,
+    });
+    let agents: Vec<u32> = accounts::agents().iter().map(|a| a.uid).collect();
+    let (mut changed, mut skipped) = (0, 0);
+    let mut one = |p: &Path, inside: bool| {
+        let ok = lstat(p).is_some_and(|m| {
+            !m.file_type().is_symlink()
+                && (m.uid() == owner || agents.contains(&m.uid()))
+                && (m.is_dir() || m.nlink() == 1)
+        });
+        if ok && acl::apply_one(p, who, access, inside).is_ok() {
+            changed += 1;
+        } else {
+            skipped += 1;
+        }
+    };
+    one(path, false);
+    if top.is_dir() {
+        acl::each_inside(path, &mut |p| one(p, true));
+    }
+    Ok(format!("{changed} changed, {skipped} left alone (not yours or an agent's, links, or files with other links)."))
+}
+
+/// Ask the OS as the account: fork, become it, `access(2)`.
+fn may_access(a: &accounts::Account, path: &str, write: bool) -> bool {
+    let Ok(p) = CString::new(path) else { return false };
+    let Ok(n) = CString::new(a.name.clone()) else { return false };
+    // SAFETY: fork; the child only makes system calls and exits. SIGCHLD is ignored so tabs'
+    // processes are reaped by the system; for this one child, the parent needs the status.
+    unsafe {
+        libc::signal(libc::SIGCHLD, libc::SIG_DFL);
+        let pid = libc::fork();
+        if pid == 0 {
+            let ok = libc::initgroups(n.as_ptr(), a.gid as _) == 0
+                && libc::setgid(a.gid) == 0
+                && libc::setuid(a.uid) == 0
+                && libc::access(p.as_ptr(), if write { libc::W_OK } else { libc::R_OK }) == 0;
+            libc::_exit(if ok { 0 } else { 1 });
+        }
+        let mut status = 0;
+        let waited = pid > 0 && loop {
+            if libc::waitpid(pid, &mut status, 0) >= 0 {
+                break true;
+            }
+            if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+                break false;
+            }
+        };
+        libc::signal(libc::SIGCHLD, libc::SIG_IGN);
+        waited && libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0
+    }
 }
 
 fn main() {

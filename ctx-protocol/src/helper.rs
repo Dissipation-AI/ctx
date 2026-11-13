@@ -1,5 +1,5 @@
-//! The ctx helper: a small root daemon (`ctx-helper`) that starts an agent's tab as the agent's
-//! own macOS account. It's the only part of ctx with root, and it does one thing.
+//! The ctx helper: a small root daemon (`ctx-helper`), the only part of ctx with root. It starts
+//! an agent's tab as the agent's own account, and makes, adopts and removes agents' accounts.
 //!
 //! Its rules live in a root-owned file, so nothing running as you can widen them: which account
 //! may ask (the one the ctx server runs as) and which account each agent runs as. An agent that
@@ -72,6 +72,66 @@ pub enum SpawnReply {
     Started { pid: i32 },
     Refused { message: String },
 }
+
+/// Who an access-list entry names (mirrors `ctx_accounts::acl::Who`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum EntryFor {
+    User(u32),
+    Group(u32),
+}
+
+/// A grant's state (mirrors `ctx_accounts::acl::Access`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum Grant {
+    Read,
+    Write,
+    ReadOnly,
+    Nothing,
+}
+
+/// A file the helper writes into a new agent's home.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StarterFile {
+    /// Relative to the home folder.
+    pub path: String,
+    pub text: String,
+    /// Owned by the asker (you) instead of the agent: `ctx-agent.toml`, which the agent must
+    /// not be able to change.
+    pub yours: bool,
+}
+
+/// Every request besides starting a tab (which is a bare [`SpawnRequest`] on the wire, so older
+/// servers and helpers keep understanding each other). Only the owner may ask.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum HelperRequest {
+    /// What this helper can do.
+    Version,
+    /// A new agent account with `home` as its home folder. `home` must be missing, or a folder of
+    /// yours (its files become the agent's). Its parent must be yours.
+    MakeAccount { name: String, full_name: String, home: String, files: Vec<StarterFile> },
+    /// An existing standard account becomes an agent (joins `ctx-agents`).
+    AdoptAccount { name: String },
+    /// Delete an agent's account. With `trash_home`, its home goes to your Trash.
+    RemoveAccount { name: String, trash_home: bool },
+    SetFullName { name: String, full_name: String },
+    /// Set an access-list entry on `path` and everything in it, as root: for files inside a
+    /// folder of yours that agents own. Only files owned by you or an agent, never through links,
+    /// never a file with other hard links.
+    Share { path: String, entry: EntryFor, grant: Option<Grant> },
+    /// Whether an agent's account may read (or write) `path`, as the OS would answer it.
+    MayAccess { account: String, path: String, write: bool },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum HelperReply {
+    Version { version: u32 },
+    Done { message: String },
+    Answer { yes: bool },
+    Refused { message: String },
+}
+
+/// The helper's own version: what it understands. 1 started tabs; 2 makes and removes accounts.
+pub const HELPER_VERSION: u32 = 2;
 
 #[cfg(test)]
 mod tests {

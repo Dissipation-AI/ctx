@@ -11,3 +11,4 @@ publish.workspace = true
 ctx-protocol.workspace = true
 libc.workspace = true
 serde_json.workspace = true
+ctx-accounts.workspace = true

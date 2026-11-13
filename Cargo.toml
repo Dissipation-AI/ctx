@@ -10,6 +10,7 @@ members = [
     "ctx",
     "ctx-launch",
     "ctx-helper",
+    "ctx-accounts",
 ]
 
 [workspace.package]
@@ -43,6 +44,7 @@ ctx-store = { path = "ctx-store" }
 ctx-server = { path = "ctx-server" }
 ctx-ask = { path = "ctx-ask" }
 ctx-mcp = { path = "ctx-mcp" }
+ctx-accounts = { path = "ctx-accounts" }
 
 [profile.release]
 opt-level = 3
