@@ -11,6 +11,15 @@ ctx is a terminal whose server keeps every shell as a **tab** with a number and 
 
 If ctx's hook is installed, your shell tool already runs each command in a tab named for your session (`Claude 4db0312f`, `Antigravity 8c1e…`). The tool reports "a pre-tool hook changed the arguments" each time; that is the hook, and it's expected. Plain commands work as usual and the tab keeps your folder and exported variables between calls. A background command gets its own copy of the tab, so a server you start keeps running after you finish. You don't need ctx sentences for ordinary work.
 
+## CTX folders
+
+Every tab has three folders in its environment:
+- `$CTX_AGENTS` (`~/Agents`): one folder per agent, with its CLAUDE.md or AGENTS.md.
+- `$CTX_CONTEXT` (`~/Context`): the user's documents (resumes, tickets, calendars, PDFs). Read only what the task needs.
+- `$CTX_WORKSPACES` (`~/Workspaces`): monorepos of related projects.
+
+When you look for a project, an agent or a document, look in these first, not all over the home folder.
+
 ## Sentences for other tabs
 
 Quote tab names; `tab 4` for a number.

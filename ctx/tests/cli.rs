@@ -773,3 +773,15 @@ fn the_hook_sends_background_and_busy_calls_to_copies_of_the_session_tab() {
         s.ctx(&["press", "ctrl-c", "in", t]).ok();
     }
 }
+
+#[test]
+fn ctx_folders_are_made_and_in_every_tabs_environment() {
+    let s = Server::start("folders");
+    for f in ["Agents", "Context", "Workspaces"] {
+        assert!(s.home.join(f).is_dir(), "{f} wasn't made");
+    }
+    s.ctx(&["open", "tab", "named", "Env", "at", "/tmp"]).ok();
+    let o = s.ctx(&["run", "in", "Env", "echo $CTX_AGENTS $CTX_CONTEXT $CTX_WORKSPACES"]).ok().stdout.clone();
+    let h = s.home.display();
+    assert_eq!(o, format!("{h}/Agents {h}/Context {h}/Workspaces\n"));
+}
