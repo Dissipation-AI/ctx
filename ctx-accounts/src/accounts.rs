@@ -287,7 +287,7 @@ pub fn make(name: &str, full_name: &str) -> Result<Account, String> {
             "\"{name}\" can't be an agent's name: use lowercase letters, digits and -, starting with a letter."
         ));
     }
-    if by_name(name).is_some() {
+    if exists(name) {
         return Err(format!("There's already an account \"{name}\"; choose another name."));
     }
     let gid = ensure_agents_group()?;
@@ -366,9 +366,20 @@ pub fn remove(name: &str) -> Result<(), String> {
     } else {
         run("userdel", &[name])?;
     }
-    // Gone once the directory service says so (macOS answers from its cache for a moment).
-    appeared(|| by_name(name).is_none().then_some(()))
-        .ok_or_else(|| format!("the account \"{name}\" was deleted but still shows"))
+    appeared(|| (!exists(name)).then_some(())).ok_or_else(|| {
+        let id = Command::new("id").arg(name).output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
+        format!("the account \"{name}\" was deleted but still shows ({})", id.unwrap_or_default().trim())
+    })
+}
+
+/// Whether an account exists, asked of the directory itself. On macOS `getpwnam` in a
+/// long-running process (the helper) keeps answering for a deleted account from its cache.
+fn exists(name: &str) -> bool {
+    if cfg!(target_os = "macos") {
+        run("dscl", &[".", "-read", &format!("/Users/{name}"), "UniqueID"]).is_ok()
+    } else {
+        by_name(name).is_some()
+    }
 }
 
 /// Change the full name shown beside the account name. Root only.
