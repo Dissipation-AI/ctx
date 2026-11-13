@@ -343,8 +343,19 @@ impl Server {
             relieved_at: 0,
             unconfirmed: Vec::new(),
         };
+        server.make_folders();
         server.recover();
         Ok(server)
+    }
+
+    /// The CTX folders (`[folders]`), made if they're missing. Every tab gets them as
+    /// `CTX_AGENTS`, `CTX_CONTEXT` and `CTX_WORKSPACES`, and tools count on them being there.
+    fn make_folders(&self) {
+        for (_, path) in self.config.folders.env(&sys::home()) {
+            if let Err(e) = std::fs::create_dir_all(&path) {
+                eprintln!("ctx server: couldn't make {path}: {e}");
+            }
+        }
     }
 
     /// After a crash, reboot or restart: tabs the index thinks are open are marked
@@ -609,7 +620,10 @@ impl Server {
             if mtime != self.config_mtime {
                 self.config_mtime = mtime;
                 match Config::load(&self.paths.config) {
-                    Ok(c) => self.config = c,
+                    Ok(c) => {
+                        self.config = c;
+                        self.make_folders();
+                    }
                     Err(e) => eprintln!("ctx server: {e}; keeping the previous settings"),
                 }
             }
@@ -2377,6 +2391,9 @@ impl Server {
             *p = format!("{p}:{launchers}");
         }
         set(&mut env, "CTX_LAUNCHERS", launchers);
+        for (k, v) in self.config.folders.env(&sys::home()) {
+            set(&mut env, k, v);
+        }
         if self.config.ssh_integration {
             set(&mut env, "CTX_SSH_COMMAND", ssh_command());
         }

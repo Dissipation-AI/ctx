@@ -1067,6 +1067,12 @@ agent_window_name = "Agents"
 assist = true
 assist_command = "bro"             # looked up on PATH; missing = deterministic suggestions only
 
+# the CTX folders: made when the server starts, CTX_AGENTS, CTX_CONTEXT and CTX_WORKSPACES in every tab
+[folders]
+agents = "~/Agents"
+context = "~/Context"
+workspaces = "~/Workspaces"
+
 # ctx ask: its own model, independent of bro
 [ask]
 endpoint = ""                      # e.g. "http://localhost:8080/v1" or a cloud provider
