@@ -34,6 +34,7 @@ const FILES: &[(&str, &str)] = files![
     "ctx-skills/skills/using-ctx/reference/troubleshooting.md",
     "ctx-skills/skills/using-ctx/reference/auto-mode.md",
     "ctx-skills/skills/using-ctx/reference/layout-and-records.md",
+    "ctx-skills/skills/using-ctx/reference/agents.md",
     "ctx-skills/skills/interactive-programs/SKILL.md",
     "ctx-skills/skills/interactive-programs/reference/python.md",
     "ctx-skills/skills/interactive-programs/reference/native-debuggers.md",

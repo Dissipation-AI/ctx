@@ -665,7 +665,8 @@ ctx adds no permission system of its own. An agent is an operating-system accoun
 **An agent is an account.**
 
 - The account's name is the agent's name (lowercase letters, digits and `-`). It is hidden from the login window, standard (never an administrator), and a member of the group `ctx-agents`.
-- Its home folder is `$CTX_AGENTS/<name>` (by default `~/Agents/<name>`). Everything that is the agent's lives there: its instructions, its agent programs' own settings and logins, its work, and `ctx-agent.toml`.
+- Its home folder is in agents' homes, outside yours: `/Users/Shared/ctx-agents/<name>` on macOS, `/home/ctx-agents/<name>` on Linux (the helper makes that folder, yours, mode 711). `~/Agents/<name>` links to it. Everything that is the agent's lives there: its instructions, its agent programs' own settings and logins, its work, and `ctx-agent.toml`.
+- Why not in your home: an account that may pass through a folder can reach, by name, anything inside it that other accounts may read, and most files are made readable to everyone. An agent never passes through your home just to get to its own. The helper refuses a home inside yours; `from <folder>` and `ctx move agents to accounts` move such a folder out and leave a link in its place.
 - Agent programs and their logins are the agent's business, as for any new user on the machine: the first time `claude` (or `codex`, `pi`…) runs as the agent, it asks the agent's account to log in. ctx never copies credentials between accounts.
 
 **Who is who.** The server knows each client by the account it runs as (the kernel's peer credentials on the socket). Your account is you. An account in `ctx-agents` is that agent. Any other account is refused. Folders, programs and names a process claims don't decide anything. A tab belongs to the account it runs as.
@@ -673,7 +674,7 @@ ctx adds no permission system of its own. An agent is an operating-system accoun
 **What an agent may reach is the OS's answer.**
 
 - You have full access to the home of every agent you make, through an inherited access-list entry, so you can read and clean up whatever it writes.
-- `ctx allow agent "a" to read ~/Context/career` (or `to write`) adds an inherited access-list entry for `a` on that file or folder, plus permission to pass through each folder above it. On macOS this is `chmod +a`; on Linux it is `setfacl` with default entries. `ctx` makes the change as whoever runs it, so the OS rule holds: only the owner of a file can share it. You can share your files, an agent can share its own, and nobody can share what isn't theirs. Some files inside a shared folder may belong to someone else, for example files an agent wrote there. Those are updated by the helper, which does this only inside a folder owned by the person asking and never follows links.
+- `ctx allow agent "a" to read ~/Context/career` (or `to write`) adds an inherited access-list entry for `a` on that file or folder, and opens only the way to it: on each of your folders above it, `a` may pass through, everything else in that folder gets an explicit "nothing" for `a` (unless it already names an agent), and so does whatever is made in that folder later. `ctx forbid` leaves an explicit "nothing" on the path. On macOS this is `chmod +a`; on Linux it is `setfacl` with default entries. `ctx` makes the change as whoever runs it, so the OS rule holds: only the owner of a file can share it. You can share your files, an agent can share its own, and nobody can share what isn't theirs. Some files inside a shared folder may belong to someone else, for example files an agent wrote there. Those are updated by the helper, which does this only inside a folder owned by the person asking and never follows links.
 - `ctx allow agent "a" to read agent "b"` and `to write agent "b"` do the same on `b`'s home.
   - Write access to `b`'s home makes `a` an administrator of `b`: it can edit `b`'s instructions and `ctx-agent.toml`, and see and drive `b`'s tabs.
   - Read access lets `a` see `b`'s tabs and files.
@@ -698,7 +699,7 @@ ctx adds no permission system of its own. An agent is an operating-system accoun
 | Command | What it does |
 |---|---|
 | `ctx make agent named "b"` | Account, `ctx-agents` membership, home with a starter CLAUDE.md and AGENTS.md (CTX folders, ctx, how sharing works), `ctx-agent.toml`, access to `Shared/everyone`. Ends with the command to talk to it. |
-| `ctx make agent named "b" from ~/Agents/b` | The same, with an existing folder as its home: its files become `b`'s, and you keep full access. |
+| `ctx make agent named "b" from ~/Agents/b` | The same, with an existing folder as its home: its files become `b`'s, and you keep full access. A folder in your home moves to agents' homes first, leaving a link. |
 | `ctx make agent from account "vibe-daemon"` | Adopts an existing standard account as an agent. |
 | `ctx rename agent "b" to "Book critic"` | The full name shown beside the account name. The account name is fixed. |
 | `ctx remove agent "b"` | Deletes the account and the grants ctx made for it. Its home is kept unless you add `with its files`. Asks first at a terminal. |
@@ -732,7 +733,7 @@ Once you agree, it carries out the plan and takes those sections out of `config.
 **Platforms.** macOS uses `dscl` and `dseditgroup` for accounts and groups, and `chmod +a` for access lists. Linux uses `useradd`, `userdel` and `usermod` for accounts, a group per agent, and `setfacl`. On Linux, shared folders also get the setgid bit so new files keep the group, and agents' shells use `umask 002` so access-list masks keep write.
 
 **CTX folders.** `[folders]` in config.toml, defaults `agents = "~/Agents"`, `context = "~/Context"`, `workspaces = "~/Workspaces"`. ctx creates them on install and when the server starts, and exports `CTX_AGENTS`, `CTX_CONTEXT` and `CTX_WORKSPACES` into every tab, agents' included.
-- Agents: one folder per agent; it is that agent's home.
+- Agents: one link per agent to its home (in agents' homes, outside yours). In an agent's tab `CTX_AGENTS` is agents' homes itself.
 - Context: documents an agent may need. None is shared by default; you grant what each agent needs.
 - Workspaces: monorepos of related projects, where a developer agent starts.
 
