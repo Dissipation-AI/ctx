@@ -9,4 +9,6 @@ elif [ -r "$HOME/.profile" ]; then . "$HOME/.profile"; fi
 # A tab an agent opened: no pager waits for a person to press q, and no history expansion, so a
 # command runs as it would in the agent's own shell (`print("done!")` isn't "event not found").
 [ -n "$CTX_NO_PAGER" ] && export PAGER=cat GIT_PAGER=cat MANPAGER=cat GH_PAGER=cat PSQL_PAGER=cat AWS_PAGER= SYSTEMD_PAGER= && set +H
-unset CTX_PREFILL CTX_INTEGRATION CTX_NO_PAGER
+# A tab standing in for an agent's own shell: no job control, as in `bash -c` (no job notices).
+[ -n "$CTX_NO_JOBS" ] && set +m
+unset CTX_PREFILL CTX_INTEGRATION CTX_NO_PAGER CTX_NO_JOBS

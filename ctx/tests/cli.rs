@@ -750,6 +750,9 @@ fn the_hook_sends_background_and_busy_calls_to_copies_of_the_session_tab() {
     let (sentence, o) = call("export SESSION_VAR=1; echo ready", false);
     assert!(sentence.starts_with("ctx run in 'Claude abc12345' "), "{sentence}");
     assert_eq!(o.stdout, "ready\n");
+    // The session tab stands in for the agent's own shell, which has no job control: no job notices.
+    let (_, o) = call("sleep 0.2 & wait; echo after", false);
+    assert_eq!(o.stdout, "after\n", "no \"[1] <pid>\" or done lines");
     // A background call gets its own copy, named for the command; the session tab stays free.
     let (sentence, _) = call("sleep 600; echo never", true);
     assert!(sentence.starts_with("ctx run in 'Claude abc12345 - sleep 600 echo never' "), "{sentence}");
