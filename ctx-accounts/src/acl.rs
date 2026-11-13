@@ -43,15 +43,34 @@ pub struct Applied {
 /// Set `who`'s access to `path` and, for a folder, everything inside it (links aren't
 /// followed). `None` removes `who`'s entries instead. Errors stop only for `path` itself.
 pub fn apply(path: &Path, who: Who, access: Option<Access>) -> std::io::Result<Applied> {
+    apply_counting(path, who, access, &mut |_| {})
+}
+
+/// [`apply`], calling `seen` with the number of files and folders done so far after each one
+/// (a large tree takes minutes).
+pub fn apply_counting(
+    path: &Path,
+    who: Who,
+    access: Option<Access>,
+    seen: &mut dyn FnMut(usize),
+) -> std::io::Result<Applied> {
     let mut done = Applied::default();
     imp::set(path, who, access, false)?;
     done.changed += 1;
     let meta = std::fs::symlink_metadata(path)?;
     if meta.is_dir() {
-        walk(path, &mut |p| match imp::set(p, who, access, true) {
-            Ok(()) => done.changed += 1,
-            Err(e) if e.raw_os_error() == Some(libc::EPERM) => done.not_owned.push(p.to_path_buf()),
-            Err(_) => done.not_owned.push(p.to_path_buf()),
+        let mut n = 1;
+        walk(path, &mut |p| {
+            // A link has no access of its own: what it points to decides.
+            if std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()) {
+                return;
+            }
+            match imp::set(p, who, access, true) {
+                Ok(()) => done.changed += 1,
+                Err(_) => done.not_owned.push(p.to_path_buf()),
+            }
+            n += 1;
+            seen(n);
         });
     }
     Ok(done)
@@ -700,6 +719,9 @@ mod tests {
         }
         let d = tmp("states");
         let who = nobody();
+        // Links are skipped: neither counted nor reported as someone else's.
+        std::os::unix::fs::symlink("f", d.join("link")).unwrap();
+        std::os::unix::fs::symlink("nowhere", d.join("dangling")).unwrap();
         for a in [Access::Read, Access::Write, Access::ReadOnly, Access::Nothing] {
             let done = apply(&d, who, Some(a)).unwrap();
             // POSIX access lists can't deny write separately; a named entry without write already

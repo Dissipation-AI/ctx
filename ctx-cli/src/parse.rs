@@ -66,6 +66,8 @@ pub enum Value {
 /// Every agent a sentence can name (`agents` is any agent, at a project folder).
 pub const AGENTS: &[&str] = &["claude", "codex", "gemini", "antigravity", "cursor", "pi", "opencode", "agents"];
 /// The agents ctx has hooks for (`ctx install hooks for …`).
+/// Agents' program names, for the agents whose ctx name is another: `agy` is Antigravity.
+pub const AGENT_PROGRAM_NAMES: &[(&str, &str)] = &[("agy", "antigravity"), ("cursor-agent", "cursor")];
 pub const HOOK_AGENTS: &[&str] = &["claude", "antigravity", "codex", "cursor", "pi", "opencode"];
 
 /// What a sentence asks for.
@@ -384,7 +386,10 @@ fn parse_value(kind: Kind, tokens: &[Token], ctx: &Context, p: &Phrase) -> Resul
             Ok((Value::Who(who.clone()), 1, who))
         }
         Kind::Agent => {
-            let agent = first.lower();
+            let mut agent = first.lower();
+            if let Some((_, name)) = AGENT_PROGRAM_NAMES.iter().find(|(program, _)| *program == agent) {
+                agent = name.to_string();
+            }
             if AGENTS.contains(&agent.as_str()) {
                 Ok((Value::Agent(agent.clone()), 1, agent))
             } else {
@@ -1643,6 +1648,11 @@ mod tests {
             Command::InstallHooks { agent: "opencode".into(), folder: None }
         );
         assert!(err("install hooks for gemini").message.contains("claude, antigravity, codex"));
+        // Program names work too.
+        assert_eq!(
+            p("install hooks for agy").command,
+            Command::InstallHooks { agent: "antigravity".into(), folder: None }
+        );
         assert!(err("install hooks").message.contains("which agent"));
         assert_eq!(
             p("install skills for cursor").command,

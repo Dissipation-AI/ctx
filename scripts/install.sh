@@ -48,6 +48,9 @@ owner=$1
 id -u "$owner" >/dev/null
 for b in ctx ctx-launch ctx-helper; do
     [ -x "$here/target/release/$b" ] || { echo "build ctx first (as $owner: cargo build --release)" >&2; exit 1; }
+    # A build older than the source would install yesterday's ctx.
+    newer=$(find "$here" -path "$here/target" -prune -o \( -name '*.rs' -o -name Cargo.toml -o -name Cargo.lock \) -newer "$here/target/release/$b" -print | head -1)
+    [ -z "$newer" ] || { echo "target/release/$b is older than $newer; rebuild first (as $owner: cargo build --release)" >&2; exit 1; }
 done
 
 mkdir -p "$BIN" "$(dirname "$HELPER")" "$(dirname "$RULES")"
