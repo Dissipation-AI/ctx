@@ -298,7 +298,12 @@ fn grant(allow: bool, to: &Grantee, write: bool, on: &Target) -> Lines {
         Target::Path(p) => p.clone(),
         Target::Agent(b) => format!("the agent \"{b}\"'s home ({})", path.display()),
     };
-    let meta = std::fs::symlink_metadata(&path).map_err(|_| format!("There's no {}.", path.display()))?;
+    let meta = std::fs::symlink_metadata(&path).map_err(|e| match e.kind() {
+        std::io::ErrorKind::PermissionDenied => {
+            format!("You can't reach {}, so it isn't yours to share: only its owner can share it.", path.display())
+        }
+        _ => format!("There's no {}.", path.display()),
+    })?;
     let mine = me().uid;
     // allow read → Read; allow write → Write; forbid write → Read; forbid read → nothing at all.
     let access = match (allow, write) {
