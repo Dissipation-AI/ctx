@@ -69,6 +69,18 @@ pub fn shim_script(ctx: &Path, program: &str) -> String {
     )
 }
 
+/// A Seatbelt profile that allows everything except touching `deny` (`~` is your home): the
+/// optional extra narrowing in an agent account's `ctx-agent.toml`. The account is the boundary;
+/// this only takes more away.
+pub fn deny_only_profile(deny: &[String], your_home: &str) -> String {
+    let mut p = String::from("(version 1)\n(allow default)\n");
+    for d in deny {
+        let path = real(&expand(d, Path::new(your_home)));
+        p.push_str(&format!("(deny file-read* file-write* (subpath {}))\n", quote(&path)));
+    }
+    p
+}
+
 /// `~` and `~/…` against `home`; other paths as given.
 pub fn expand(path: &str, home: &Path) -> PathBuf {
     if path == "~" {
@@ -295,6 +307,13 @@ pub fn sandbox_profile(name: &str, agent: &Agent, places: &Places) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_deny_only_profile_allows_everything_else() {
+        let p = deny_only_profile(&["~/Context/private".into()], "/Users/x");
+        assert!(p.starts_with("(version 1)\n(allow default)\n"));
+        assert!(p.contains("(deny file-read* file-write* (subpath \"/Users/x/Context/private\"))"), "{p}");
+    }
 
     fn places(root: &Path) -> Places {
         Places {

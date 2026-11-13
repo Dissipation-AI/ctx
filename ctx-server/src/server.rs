@@ -179,6 +179,8 @@ pub struct Server {
     config: Config,
     /// The sandbox the server itself runs in (see `sys::sandbox_root`); every tab inherits it.
     own_sandbox: Option<(i32, u64)>,
+    /// What agents' accounts may do with each other's homes, as the OS answers it.
+    access: std::cell::RefCell<crate::accounts::Access>,
     config_mtime: Option<std::time::SystemTime>,
     poller: sys::Poller,
     listener: UnixListener,
@@ -309,6 +311,7 @@ impl Server {
 
         let mut server = Server {
             own_sandbox: sys::sandbox_root(std::process::id() as i32),
+            access: Default::default(),
             config_mtime: std::fs::metadata(&paths.config).and_then(|m| m.modified()).ok(),
             paths,
             config,
@@ -1109,13 +1112,27 @@ impl Server {
     // Agents
     // -----------------------------------------------------------------------------------------
 
-    /// The agent whose account has this uid.
+    /// The agent whose account has this uid: an account in `ctx-agents` (its name is the
+    /// agent's), or one an `[agents.*]` section of config.toml names.
     fn agent_for_uid(&self, uid: u32) -> Option<String> {
         self.config
             .agents
             .iter()
             .find(|(_, a)| !a.account.is_empty() && sys::account(&a.account).is_some_and(|(u, _)| u == uid))
             .map(|(n, _)| n.clone())
+            .or_else(|| crate::accounts::agent_by_uid(uid).map(|a| a.name))
+    }
+
+    /// Whether `name` is an agent whose account is in `ctx-agents` (and not in config.toml).
+    fn account_agent(&self, name: &str) -> Option<ctx_accounts::accounts::Account> {
+        if self.config.agents.contains_key(name) {
+            return None;
+        }
+        crate::accounts::agent(name)
+    }
+
+    fn is_agent(&self, name: &str) -> bool {
+        self.config.agents.contains_key(name) || self.account_agent(name).is_some()
     }
 
     /// The agent a client is, most trustworthy evidence first: the account it runs as; the
@@ -1168,6 +1185,13 @@ impl Server {
         if owner == Some(p) {
             return true;
         }
+        // An agent account: the OS decides. Reading the owner's home lets it see the tab;
+        // writing it lets it drive the tab. Your tabs run as you, and no agent can write your
+        // home's access list, so no agent sees or drives yours.
+        if let Some(me) = self.account_agent(p) {
+            let Some(o) = owner.and_then(|o| self.account_agent(o)) else { return false };
+            return self.access.borrow_mut().may(&me, &o, drive);
+        }
         let Some(a) = self.config.agents.get(p) else { return false };
         let owner = owner.unwrap_or(agents::YOU);
         // Driving a tab is running code as its account, so no agent drives yours, whatever
@@ -1213,7 +1237,7 @@ impl Server {
             ));
         }
         let opens = matches!(r, Request::OpenTab { .. } | Request::OpenWindow { .. } | Request::Reopen { .. });
-        if opens && !self.config.agents.contains_key(p) {
+        if opens && !self.is_agent(p) {
             return no(
                 "This process runs in a sandbox ctx didn't make, so ctx can't give a new tab the same limits, and it can't open tabs. Its own commands still run where it is.".into(),
             );
@@ -1426,6 +1450,7 @@ impl Server {
             Request::ListClosedTabs { limit } => self.list_closed(key, limit),
             Request::Starters { limit } => self.starters(key, limit),
             Request::ReopenLastSession => self.reopen_last_session(key),
+            Request::MakeSharedFolder { with } => self.make_shared_folder(key, with),
             Request::Processes { tab } => self.processes(key, &tab),
             Request::ListCommands { tab, limit } => self.list_commands(key, &tab, limit),
             Request::ListActivity { filter, limit } => self.list_activity(key, filter, limit),
@@ -1845,13 +1870,23 @@ impl Server {
         };
         // A tab for a named agent: you may open one for any agent, an agent only for itself.
         if let Some(a) = &agent {
-            if !self.config.agents.contains_key(a) {
-                return err(ErrorKind::NotAllowed, format!("There's no agent \"{a}\" in config.toml."));
-            }
-            if self.principal(key).is_some_and(|p| p != a) {
+            if !self.is_agent(a) {
                 return err(
                     ErrorKind::NotAllowed,
-                    format!("Only you, or the agent \"{a}\" itself, may open its tabs."),
+                    format!(
+                        "There's no agent \"{a}\". `ctx list agents` shows them; `ctx make agent named \"{a}\"` makes one."
+                    ),
+                );
+            }
+            // You, the agent itself, or (for agents that are accounts) an agent that may write
+            // its home: its administrator.
+            if let Some(p) = self.principal(key)
+                && p != a
+                && !self.may(key, Some(a), true)
+            {
+                return err(
+                    ErrorKind::NotAllowed,
+                    format!("Only you, the agent \"{a}\" itself, or an agent that administers it may open its tabs."),
                 );
             }
         }
@@ -1874,6 +1909,7 @@ impl Server {
             },
         };
         let folder = folder.or_else(|| source.and_then(|n| self.tabs.get(&n)).map(|t| t.folder.clone()));
+        let folder = folder.or_else(|| agent.as_deref().and_then(|a| self.account_agent(a)).map(|a| a.home));
         let folder = folder.unwrap_or_else(|| {
             if let Some(t) = self.client_tab(key).and_then(|t| self.tabs.get(&t)) {
                 return t.folder.clone();
@@ -2080,8 +2116,26 @@ impl Server {
         let mut args = vec!["ctx-launch".to_string()];
         // An agent with its own account: (agent, account, sandbox text), for the ctx helper.
         let mut as_account: Option<(String, String, String)> = None;
+        let mut limits = ctx_protocol::helper::Limits::default();
         let mut rc_dir = self.paths.runtime.clone();
-        if let Some(o) = &owner {
+        let account_agent = owner.as_deref().and_then(|o| self.account_agent(o));
+        if let (Some(o), Some(acct)) = (&owner, &account_agent) {
+            let file =
+                crate::accounts::file(acct).map_err(|e| failed(format!("The agent \"{o}\"'s tab didn't open: {e}")))?;
+            let sandbox = if file.deny.is_empty() || !cfg!(target_os = "macos") {
+                String::new()
+            } else {
+                agents::deny_only_profile(&file.deny, &sys::home())
+            };
+            let door =
+                self.open_door().map_err(|e| failed(format!("couldn't open the way in for agent accounts: {e}")))?;
+            self.door_env(&mut env, &door);
+            rc_dir = door.join("shell");
+            as_account = Some((o.clone(), acct.name.clone(), sandbox));
+            limits = file.limits;
+            env.retain(|(k, _)| k != "CTX_AGENT");
+            env.push(("CTX_AGENT".into(), o.clone()));
+        } else if let Some(o) = &owner {
             let Some(agent) = self.config.agents.get(o).cloned() else {
                 return Err(failed(format!(
                     "This tab belongs to the agent \"{o}\", and config.toml has no [agents.{o}], so it can't start without that agent's limits."
@@ -2145,6 +2199,7 @@ impl Server {
                     env: env.clone(),
                     sandbox,
                     authorization,
+                    limits,
                 };
                 sys::helper_spawn(&req, slave.as_raw_fd())
                     .map_err(|e| failed(format!("couldn't start the agent \"{agent}\"'s shell: {e}")))?
@@ -2709,6 +2764,32 @@ impl Server {
 
     /// Every tab of the last session that isn't open now, each back in its window (a window
     /// that's gone comes back with its number, and its name when that's free).
+    /// A shared folder for the agent asking and the agents it names (and you). Made by the
+    /// server as you, so no agent can make one in another's name: the asker is always in it.
+    fn make_shared_folder(&mut self, key: usize, with: Vec<String>) -> Handled {
+        let mut names = with;
+        if let Some(p) = self.principal(key) {
+            names.push(p.to_string());
+        }
+        names.sort();
+        names.dedup();
+        let mut uids = Vec::new();
+        for n in &names {
+            match crate::accounts::agent(n) {
+                Some(a) => uids.push(a.uid),
+                None => return err(ErrorKind::NotAllowed, format!("There's no agent account \"{n}\".")),
+            }
+        }
+        let agents_dir = self.config.folders.env(&sys::home())[0].1.clone();
+        match ctx_accounts::shared::make(Path::new(&agents_dir), &names, &uids) {
+            Ok(dir) => {
+                self.access.borrow_mut().forget();
+                done(format!("{} is shared by {} and the person.", dir.display(), names.join(", ")))
+            }
+            Err(e) => err(ErrorKind::Failed, e),
+        }
+    }
+
     fn reopen_last_session(&mut self, key: usize) -> Handled {
         let session: LastSession = std::fs::read(self.paths.last_session())
             .ok()

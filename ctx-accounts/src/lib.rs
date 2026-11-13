@@ -3,3 +3,4 @@
 
 pub mod accounts;
 pub mod acl;
+pub mod shared;

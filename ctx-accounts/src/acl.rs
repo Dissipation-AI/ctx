@@ -78,6 +78,12 @@ pub fn access_of(path: &Path, who: Who) -> std::io::Result<Option<Access>> {
     imp::access_of(path, who)
 }
 
+/// Everyone `path`'s access list names, with their access (entries that only let them pass
+/// through a folder are left out).
+pub fn entries(path: &Path) -> std::io::Result<Vec<(Who, Access)>> {
+    imp::entries(path)
+}
+
 /// Every file and folder under `dir` (not `dir` itself), depth first, without following links.
 fn walk(dir: &Path, f: &mut dyn FnMut(&Path)) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
@@ -323,7 +329,7 @@ mod imp {
         let mut acl = get(&p)?;
         // Keep any stronger entry for `who`; add search only when there's none.
         let r = (|| {
-            if entries(acl, who).is_empty() {
+            if entries_for(acl, who).is_empty() {
                 add(&mut acl, who, true, EXECUTE, false, false)?;
                 write(&p, acl)?;
             }
@@ -335,7 +341,7 @@ mod imp {
     }
 
     /// `(allow, perms)` of each entry for `who`.
-    fn entries(acl: AclT, who: Who) -> Vec<(bool, u32)> {
+    fn entries_for(acl: AclT, who: Who) -> Vec<(bool, u32)> {
         let mut out = Vec::new();
         // SAFETY: walking a live acl.
         unsafe {
@@ -357,15 +363,47 @@ mod imp {
         out
     }
 
+    /// Everyone named, in order of first appearance.
+    fn named(acl: AclT) -> Vec<Who> {
+        let mut out = Vec::new();
+        // SAFETY: walking a live acl.
+        unsafe {
+            let mut entry: EntryT = std::ptr::null_mut();
+            let mut id = ACL_FIRST_ENTRY;
+            while acl_get_entry(acl, id, &mut entry) == 0 {
+                id = ACL_NEXT_ENTRY;
+                if let Some(w) = who_of(entry)
+                    && !out.contains(&w)
+                {
+                    out.push(w);
+                }
+            }
+        }
+        out
+    }
+
+    pub fn entries(path: &Path) -> std::io::Result<Vec<(Who, Access)>> {
+        let p = c(path)?;
+        let acl = get(&p)?;
+        let out = named(acl).into_iter().filter_map(|w| classify(&entries_for(acl, w)).map(|a| (w, a))).collect();
+        // SAFETY: freeing the acl.
+        unsafe { acl_free(acl) };
+        Ok(out)
+    }
+
     pub fn access_of(path: &Path, who: Who) -> std::io::Result<Option<Access>> {
         let p = c(path)?;
         let acl = get(&p)?;
-        let es = entries(acl, who);
+        let es = entries_for(acl, who);
         // SAFETY: freeing the acl.
         unsafe { acl_free(acl) };
+        Ok(classify(&es))
+    }
+
+    fn classify(es: &[(bool, u32)]) -> Option<Access> {
         let allowed = es.iter().filter(|(a, _)| *a).fold(0, |a, (_, p)| a | p);
         let denied = es.iter().filter(|(a, _)| !*a).fold(0, |a, (_, p)| a | p);
-        Ok(if es.is_empty() {
+        if es.is_empty() {
             None
         } else if denied & READ_DATA != 0 {
             Some(Access::Nothing)
@@ -378,7 +416,7 @@ mod imp {
         } else {
             // Only search on a folder (a parent of something shared): not a grant of its own.
             None
-        })
+        }
     }
 
     #[allow(dead_code)]
@@ -446,6 +484,43 @@ mod imp {
         setfacl(&["-m", &format!("{}:--x", name(who))], folder)
     }
 
+    pub fn entries(path: &Path) -> std::io::Result<Vec<(Who, Access)>> {
+        let text = getfacl(path)?;
+        let mut out = Vec::new();
+        for l in text.lines() {
+            let mut f = l.split(':');
+            let (Some(kind), Some(id), Some(p)) = (f.next(), f.next(), f.next()) else { continue };
+            let Ok(id) = id.parse::<u32>() else { continue };
+            let who = match kind {
+                "user" => Who::User(id),
+                "group" => Who::Group(id),
+                _ => continue,
+            };
+            if let Some(a) = classify(p.split_whitespace().next().unwrap_or("")) {
+                out.push((who, a));
+            }
+        }
+        Ok(out)
+    }
+
+    fn classify(p: &str) -> Option<Access> {
+        match p {
+            "---" => Some(Access::Nothing),
+            "--x" => None,
+            p if p.contains('w') => Some(Access::Write),
+            p if p.starts_with('r') => Some(Access::Read),
+            _ => None,
+        }
+    }
+
+    fn getfacl(path: &Path) -> std::io::Result<String> {
+        let o = Command::new("getfacl").args(["-n", "-p", "--omit-header", "--"]).arg(path).output()?;
+        if !o.status.success() {
+            return Err(std::io::Error::other(String::from_utf8_lossy(&o.stderr).trim().to_string()));
+        }
+        Ok(String::from_utf8_lossy(&o.stdout).into_owned())
+    }
+
     pub fn access_of(path: &Path, who: Who) -> std::io::Result<Option<Access>> {
         let o = Command::new("getfacl").args(["-n", "-p", "--omit-header", "--"]).arg(path).output()?;
         if !o.status.success() {
@@ -457,14 +532,7 @@ mod imp {
         };
         let text = String::from_utf8_lossy(&o.stdout);
         let Some(line) = text.lines().find(|l| l.starts_with(&want)) else { return Ok(None) };
-        let p = line[want.len()..].split_whitespace().next().unwrap_or("");
-        Ok(match p {
-            "---" => Some(Access::Nothing),
-            "--x" => None,
-            p if p.contains('w') => Some(Access::Write),
-            p if p.starts_with('r') => Some(Access::Read),
-            _ => None,
-        })
+        Ok(classify(line[want.len()..].split_whitespace().next().unwrap_or("")))
     }
 }
 
@@ -516,7 +584,9 @@ mod tests {
             assert_eq!(access_of(&n, who).unwrap(), Some(a_read), "{a:?} inherited by a new file");
             std::fs::remove_file(&n).unwrap();
         }
+        assert_eq!(entries(&d).unwrap(), vec![(who, Access::Nothing)]);
         apply(&d, who, None).unwrap();
+        assert!(entries(&d).unwrap().is_empty());
         for p in [d.clone(), d.join("f"), d.join("sub/g")] {
             assert_eq!(access_of(&p, who).unwrap(), None);
         }

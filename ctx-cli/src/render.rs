@@ -105,7 +105,7 @@ pub fn render(o: &Output, st: &Style) -> Printed {
                         ));
                     }
                     if let Some(o) = &t.owner {
-                        s.push_str(&format!(", belongs to the agent \"{o}\""));
+                        s.push_str(&format!(", as {o}"));
                     }
                     if let Some(l) = &t.permissions_of {
                         s.push_str(&format!(", running with the permissions of {l}"));

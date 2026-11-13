@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 
 /// Bumped whenever a message changes shape. Client and server must match exactly.
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 /// Version of the `as json` / `as toon` schema. Printed as `"schema": 1`.
 pub const SCHEMA_VERSION: u32 = 1;
 /// Largest message either side accepts (a whole `read everything` of a big tab fits).
@@ -386,6 +386,11 @@ pub enum Request {
     /// `ctx reopen tabs from last session`: every tab that was open when the server last stopped
     /// (reboot, crash or restart) and isn't open now, back in its window.
     ReopenLastSession,
+    /// `ctx make shared folder with agent "b"`, asked by an agent: the server makes
+    /// `$CTX_AGENTS/Shared/<a+b>` as you, for the agent asking, those agents and you.
+    MakeSharedFolder {
+        with: Vec<String>,
+    },
 }
 
 // ---------------------------------------------------------------------------------------------

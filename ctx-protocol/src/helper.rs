@@ -65,6 +65,9 @@ pub struct SpawnRequest {
     /// An Authorization's external form (32 bytes) granting `system.privilege.admin`, needed for
     /// root.
     pub authorization: Option<Vec<u8>>,
+    /// The agent's limits (absent from older servers).
+    #[serde(default)]
+    pub limits: Limits,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -108,18 +111,39 @@ pub enum HelperRequest {
     Version,
     /// A new agent account with `home` as its home folder. `home` must be missing, or a folder of
     /// yours (its files become the agent's). Its parent must be yours.
-    MakeAccount { name: String, full_name: String, home: String, files: Vec<StarterFile> },
+    MakeAccount {
+        name: String,
+        full_name: String,
+        home: String,
+        files: Vec<StarterFile>,
+    },
     /// An existing standard account becomes an agent (joins `ctx-agents`).
-    AdoptAccount { name: String },
+    AdoptAccount {
+        name: String,
+    },
     /// Delete an agent's account. With `trash_home`, its home goes to your Trash.
-    RemoveAccount { name: String, trash_home: bool },
-    SetFullName { name: String, full_name: String },
+    RemoveAccount {
+        name: String,
+        trash_home: bool,
+    },
+    SetFullName {
+        name: String,
+        full_name: String,
+    },
     /// Set an access-list entry on `path` and everything in it, as root: for files inside a
     /// folder of yours that agents own. Only files owned by you or an agent, never through links,
     /// never a file with other hard links.
-    Share { path: String, entry: EntryFor, grant: Option<Grant> },
+    Share {
+        path: String,
+        entry: EntryFor,
+        grant: Option<Grant>,
+    },
     /// Whether an agent's account may read (or write) `path`, as the OS would answer it.
-    MayAccess { account: String, path: String, write: bool },
+    MayAccess {
+        account: String,
+        path: String,
+        write: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -133,9 +157,93 @@ pub enum HelperReply {
 /// The helper's own version: what it understands. 1 started tabs; 2 makes and removes accounts.
 pub const HELPER_VERSION: u32 = 2;
 
+/// Ask the helper something (no terminal attached). Only the owner's account gets answers.
+pub fn ask(req: &HelperRequest) -> Result<HelperReply, String> {
+    use std::io::{BufRead, Write};
+    let path = socket();
+    let mut stream = std::os::unix::net::UnixStream::connect(&path).map_err(|e| {
+        format!(
+            "the ctx helper isn't installed or isn't running ({}: {e}). An administrator installs it once: sudo scripts/install-helper.sh <you>",
+            path.display()
+        )
+    })?;
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(60)));
+    let mut line = serde_json::to_vec(req).map_err(|e| e.to_string())?;
+    line.push(b'\n');
+    stream.write_all(&line).map_err(|e| format!("couldn't ask the ctx helper: {e}"))?;
+    let mut answer = String::new();
+    std::io::BufReader::new(&stream)
+        .read_line(&mut answer)
+        .map_err(|e| format!("the ctx helper didn't answer: {e}"))?;
+    // An older helper answers anything it doesn't know with a spawn refusal.
+    if let Ok(r) = serde_json::from_str::<HelperReply>(&answer) {
+        return Ok(r);
+    }
+    match serde_json::from_str::<SpawnReply>(&answer) {
+        Ok(SpawnReply::Refused { message }) => Ok(HelperReply::Refused {
+            message: format!(
+                "{message} (The installed helper is older than this ctx; an administrator reinstalls it: sudo scripts/install-helper.sh <you>.)"
+            ),
+        }),
+        _ => Err(format!("the ctx helper's answer didn't make sense: {}", answer.trim())),
+    }
+}
+
+/// `ctx-agent.toml` in an agent's home: what the OS has no place for. It belongs to you (or an
+/// administrator of the agent), never to the agent itself.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct AgentFile {
+    /// The agent's colour in CTX.app: a name (`teal`, `orange`…) or `#rrggbb`. Empty: one is
+    /// picked from the name.
+    pub colour: String,
+    pub limits: Limits,
+    /// macOS only: paths the agent may not touch even where the OS would let it (a Seatbelt deny
+    /// list on top of the account).
+    pub deny: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct Limits {
+    /// Memory in megabytes across the agent's tabs (0: none).
+    pub memory_mb: u64,
+    /// Processes the account may run at once (0: none).
+    pub processes: u64,
+    /// Run at low priority.
+    pub low_priority: bool,
+}
+
+/// The file's name in an agent's home.
+pub const AGENT_FILE: &str = "ctx-agent.toml";
+
+impl AgentFile {
+    pub fn parse(text: &str) -> Result<AgentFile, String> {
+        toml::from_str(text).map_err(|e| e.to_string())
+    }
+
+    pub fn to_text(&self) -> String {
+        let mut s = String::from(
+            "# This agent's settings in ctx. It belongs to you (and the agent's administrators); the agent\n# itself can't change it. `ctx limit agent`, `ctx reset agent` and CTX.app's Agents window edit it.\n",
+        );
+        s.push_str(&toml::to_string(self).unwrap_or_default());
+        s
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_file_round_trips() {
+        let mut f = AgentFile { colour: "teal".into(), ..Default::default() };
+        f.limits.memory_mb = 8192;
+        f.limits.low_priority = true;
+        assert_eq!(AgentFile::parse(&f.to_text()).unwrap(), f);
+        assert_eq!(AgentFile::parse("").unwrap(), AgentFile::default());
+        assert!(AgentFile::parse("color = 1").is_err());
+    }
 
     #[test]
     fn rules_parse() {

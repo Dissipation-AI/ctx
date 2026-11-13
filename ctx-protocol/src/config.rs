@@ -111,7 +111,11 @@ impl Paths {
             data: PathBuf::from(home).join("Library/Application Support/ctx"),
             runtime: user_temp.join(format!("ctx-{uid}")),
             config: config_home.join("ctx/config.toml"),
-            door: PathBuf::from(format!("/private/tmp/ctx-agents-{uid}")),
+            door: PathBuf::from(if cfg!(target_os = "macos") {
+                format!("/private/tmp/ctx-agents-{uid}")
+            } else {
+                format!("/tmp/ctx-agents-{uid}")
+            }),
         }
     }
 }

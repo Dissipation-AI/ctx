@@ -15,16 +15,17 @@ use ctx_protocol::helper::{
     EntryFor, Grant, HELPER_VERSION, HelperConfig, HelperReply, HelperRequest, SpawnReply, SpawnRequest, StarterFile,
     config_path, socket,
 };
-use std::path::{Path, PathBuf};
 use std::ffi::{CStr, CString};
 use std::io::{BufRead, BufReader, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::{Path, PathBuf};
 
 #[cfg(target_os = "macos")]
 unsafe extern "C" {
     fn sandbox_check(pid: libc::pid_t, operation: *const libc::c_char, filter: libc::c_int, ...) -> libc::c_int;
     fn sandbox_init(profile: *const libc::c_char, flags: u64, errorbuf: *mut *mut libc::c_char) -> libc::c_int;
+    fn setiopolicy_np(iotype: libc::c_int, scope: libc::c_int, policy: libc::c_int) -> libc::c_int;
 }
 
 /// Linux has no administrator approval of this kind; root agents are refused there.
@@ -175,10 +176,17 @@ fn check(req: &SpawnRequest, rules: &HelperConfig) -> Result<Account, String> {
         let a = account(&req.account).ok_or_else(|| format!("There's no account \"{}\".", req.account))?;
         let info = accounts::by_name(&req.account).ok_or_else(|| format!("There's no account \"{}\".", req.account))?;
         if !accounts::is_agent(&info) {
-            return Err(format!("\"{}\" isn't an agent's account (it isn't in {}).", req.account, accounts::AGENTS_GROUP));
+            return Err(format!(
+                "\"{}\" isn't an agent's account (it isn't in {}).",
+                req.account,
+                accounts::AGENTS_GROUP
+            ));
         }
         if a.uid == 0 || accounts::is_admin(&req.account) || account(&rules.owner).is_some_and(|o| o.uid == a.uid) {
-            return Err(format!("\"{}\" is an administrator or the owner; agents' accounts are standard.", req.account));
+            return Err(format!(
+                "\"{}\" is an administrator or the owner; agents' accounts are standard.",
+                req.account
+            ));
         }
         if req.program.is_empty() || req.argv.is_empty() {
             return Err("No program to start.".into());
@@ -235,6 +243,20 @@ fn become_and_exec(req: &SpawnRequest, a: &Account, tty: RawFd) -> String {
         {
             return format!("couldn't become {}", a.name.to_string_lossy());
         }
+        // Limits, set while still root so the agent can't raise them back.
+        if req.limits.processes > 0 {
+            let l = libc::rlimit { rlim_cur: req.limits.processes as _, rlim_max: req.limits.processes as _ };
+            libc::setrlimit(libc::RLIMIT_NPROC, &l);
+        }
+        if req.limits.low_priority {
+            libc::setpriority(libc::PRIO_PROCESS, 0, 10);
+            #[cfg(target_os = "macos")]
+            // IOPOL_TYPE_DISK, IOPOL_SCOPE_PROCESS, IOPOL_THROTTLE.
+            setiopolicy_np(0, 0, 3);
+        }
+        // Group-writable new files, so access-list masks on Linux keep write for shared folders.
+        #[cfg(not(target_os = "macos"))]
+        libc::umask(0o002);
         // No way back: a uid that could return to ours would be no boundary.
         if libc::getuid() != a.uid || libc::geteuid() != a.uid || (a.uid != 0 && libc::setuid(0) == 0) {
             return "the account switch didn't hold".into();
@@ -323,11 +345,28 @@ fn caller_sandboxed(_fd: RawFd) -> bool {
     false
 }
 
+/// The account on the other end of the socket.
+fn peer_uid(fd: RawFd) -> Option<libc::uid_t> {
+    #[cfg(target_os = "macos")]
+    {
+        let (mut uid, mut gid) = (0, 0);
+        // SAFETY: getpeereid with valid out-pointers.
+        (unsafe { libc::getpeereid(fd, &mut uid, &mut gid) } == 0).then_some(uid)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        // SAFETY: SO_PEERCRED fills a ucred.
+        let r = unsafe {
+            libc::getsockopt(fd, libc::SOL_SOCKET, libc::SO_PEERCRED, (&mut cred as *mut libc::ucred).cast(), &mut len)
+        };
+        (r == 0).then_some(cred.uid)
+    }
+}
+
 fn serve_one(stream: UnixStream, rules: &HelperConfig, owner_uid: libc::uid_t) {
-    let mut uid: libc::uid_t = 0;
-    let mut gid: libc::gid_t = 0;
-    // SAFETY: getpeereid with valid out-pointers.
-    if unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) } != 0 || uid != owner_uid {
+    if peer_uid(stream.as_raw_fd()) != Some(owner_uid) {
         return reply(&stream, &SpawnReply::Refused { message: "Only the ctx server's account may ask.".into() });
     }
     if caller_sandboxed(stream.as_raw_fd()) {
@@ -384,8 +423,12 @@ fn serve_one(stream: UnixStream, rules: &HelperConfig, owner_uid: libc::uid_t) {
 fn handle(req: HelperRequest, owner: libc::uid_t) -> HelperReply {
     let r = match req {
         HelperRequest::Version => return HelperReply::Version { version: HELPER_VERSION },
-        HelperRequest::MakeAccount { name, full_name, home, files } => make_account(&name, &full_name, &home, &files, owner),
-        HelperRequest::AdoptAccount { name } => accounts::adopt(&name).map(|a| format!("\"{}\" is an agent now.", a.name)),
+        HelperRequest::MakeAccount { name, full_name, home, files } => {
+            make_account(&name, &full_name, &home, &files, owner)
+        }
+        HelperRequest::AdoptAccount { name } => {
+            accounts::adopt(&name).map(|a| format!("\"{}\" is an agent now.", a.name))
+        }
         HelperRequest::RemoveAccount { name, trash_home } => remove_account(&name, trash_home, owner),
         HelperRequest::SetFullName { name, full_name } => agent(&name, owner)
             .and_then(|_| accounts::set_full_name(&name, &full_name))
@@ -489,7 +532,8 @@ fn make_account(
             let _ = chown(dir, a.uid, a.gid);
         }
         if std::fs::write(&p, &f.text).is_ok() {
-            let (u, g) = if f.yours { (owner, accounts::by_uid(owner).map(|o| o.gid).unwrap_or(0)) } else { (a.uid, a.gid) };
+            let (u, g) =
+                if f.yours { (owner, accounts::by_uid(owner).map(|o| o.gid).unwrap_or(0)) } else { (a.uid, a.gid) };
             let _ = chown(&p, u, g);
             let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644));
         }
@@ -533,7 +577,8 @@ fn remove_account(name: &str, trash_home: bool, owner: libc::uid_t) -> Result<St
         }
         let trash = PathBuf::from(&you.home).join(".Trash");
         let _ = std::fs::create_dir_all(&trash);
-        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let stamp =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         let to = trash.join(format!("{name}-{stamp}"));
         std::fs::rename(&home, &to).map_err(|e| format!("couldn't move {} to the Trash: {e}", home.display()))?;
         // Everything the agent owned in it becomes yours.
@@ -553,8 +598,10 @@ fn remove_account(name: &str, trash_home: bool, owner: libc::uid_t) -> Result<St
 fn share(path: &Path, entry: EntryFor, grant: Option<Grant>, owner: libc::uid_t) -> Result<String, String> {
     use std::os::unix::fs::MetadataExt;
     let Some(top) = lstat(path) else { return Err(format!("There's no {}.", path.display())) };
-    if top.uid() != owner || top.file_type().is_symlink() {
-        return Err(format!("{} isn't yours, so you can't share it.", path.display()));
+    let agents: Vec<u32> = accounts::agents().iter().map(|a| a.uid).collect();
+    // Yours, or an agent's (you have full access to every agent's home): never anyone else's.
+    if !(top.uid() == owner || agents.contains(&top.uid())) || top.file_type().is_symlink() {
+        return Err(format!("{} isn't yours or an agent's, so ctx won't share it.", path.display()));
     }
     let who = match entry {
         EntryFor::User(u) => acl::Who::User(u),
@@ -566,7 +613,6 @@ fn share(path: &Path, entry: EntryFor, grant: Option<Grant>, owner: libc::uid_t)
         Grant::ReadOnly => acl::Access::ReadOnly,
         Grant::Nothing => acl::Access::Nothing,
     });
-    let agents: Vec<u32> = accounts::agents().iter().map(|a| a.uid).collect();
     let (mut changed, mut skipped) = (0, 0);
     let mut one = |p: &Path, inside: bool| {
         let ok = lstat(p).is_some_and(|m| {
@@ -604,14 +650,15 @@ fn may_access(a: &accounts::Account, path: &str, write: bool) -> bool {
             libc::_exit(if ok { 0 } else { 1 });
         }
         let mut status = 0;
-        let waited = pid > 0 && loop {
-            if libc::waitpid(pid, &mut status, 0) >= 0 {
-                break true;
-            }
-            if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
-                break false;
-            }
-        };
+        let waited = pid > 0
+            && loop {
+                if libc::waitpid(pid, &mut status, 0) >= 0 {
+                    break true;
+                }
+                if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+                    break false;
+                }
+            };
         libc::signal(libc::SIGCHLD, libc::SIG_IGN);
         waited && libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0
     }
@@ -680,8 +727,11 @@ mod tests {
             env: vec![],
             sandbox: String::new(),
             authorization: None,
+            limits: Default::default(),
         };
         assert!(check(&req("dev", &me), &rules).is_ok());
+        // An agent account must be in ctx-agents: this account (the test's) isn't.
+        assert!(check(&req(&me, &me), &rules).is_err());
         assert!(check(&req("dev", "root"), &rules).unwrap_err().contains("runs as"));
         assert!(check(&req("email", &me), &rules).unwrap_err().contains("don't have the agent"));
         let root = check(&req("sysadmin", "root"), &rules).err().unwrap();

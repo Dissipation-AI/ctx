@@ -456,7 +456,7 @@ fn agents_see_and_drive_only_their_own_tabs_and_run_sandboxed() {
 
     // You see everything, with its owner, and can drive the agent's tab.
     let o = s.ctx(&["list", "tabs"]).ok().stdout.clone();
-    assert!(o.contains("Mine") && o.contains("\"Dev work\"") && o.contains("belongs to the agent \"dev\""), "{o}");
+    assert!(o.contains("Mine") && o.contains("\"Dev work\"") && o.contains("as dev"), "{o}");
     assert_eq!(s.ctx(&["run", "in", "Dev work", "echo yours"]).ok().stdout, "yours\n");
     // An agent program started in your tab runs as the agent for its folder.
     std::fs::create_dir_all(s.home.join("bin")).unwrap();
@@ -520,7 +520,7 @@ fn agents_cant_escalate_through_ctx() {
     s.ctx(&["open", "tab", "like", "Dev work", "named", "My copy"]).ok();
     let o = s.ctx(&["list", "tabs"]).ok().stdout.clone();
     let line = o.lines().find(|l| l.contains("My copy")).unwrap_or_default().to_string();
-    assert!(line.contains("belongs to the agent \"dev\""), "{o}");
+    assert!(line.contains("as dev"), "{o}");
     let o = s.ctx(&["run", "in", "My copy", "echo $PLANTED; cat ~/Secret/key"]).stdout;
     assert!(o.contains("Operation not permitted") && !o.contains("hunter2"), "{o}");
 
@@ -584,7 +584,7 @@ fn an_agents_hook_never_reuses_a_tab_it_cant_drive() {
     let sentence = hook(&dev);
     assert!(sentence.starts_with("ctx run in 'Claude abc12345 dev' "), "{sentence}");
     let o = s.ctx(&["list", "tabs"]).ok().stdout.clone();
-    assert!(o.contains("\"Claude abc12345 dev\"") && o.contains("belongs to the agent \"dev\""), "{o}");
+    assert!(o.contains("\"Claude abc12345 dev\"") && o.contains("as dev"), "{o}");
     // The next call reuses it, and you keep yours.
     assert_eq!(hook(&dev), sentence);
     assert!(hook(&[]).starts_with("ctx run in 'Claude abc12345' "));

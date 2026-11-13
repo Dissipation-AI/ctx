@@ -284,6 +284,7 @@ fn execute(s: Sentence, caller: Caller) -> Out {
         Command::RemoveLauncher { name } => launchers::remove(&name, format),
         Command::ListLaunchers => launchers::list(format),
         Command::ListAgents => crate::agents::list(format),
+        Command::Agent(c) => crate::accounts::run(c, s.canonical, format, caller == Caller::Cli),
         Command::Ask { question, about, within_ms } => ask::run(&question, about, within_ms, format),
         Command::Mcp => {
             if caller == Caller::Mcp {
@@ -297,6 +298,17 @@ fn execute(s: Sentence, caller: Caller) -> Out {
                 ctx_mcp::Result { stdout: o.stdout, stderr: o.stderr, code: o.code, ctx_error: o.ctx_error }
             }))
         }
+    }
+}
+
+/// Send one request and give back its message lines, for sentences ctx mostly handles itself.
+pub fn server_lines(sentence: String, req: Request) -> Result<Vec<String>, String> {
+    let mut conn = Connection::open(ClientKind::Cli).map_err(|client::NoServer(m)| m)?;
+    match conn.request(&Envelope { sentence, request: req }) {
+        Ok(Response::Ok(Output::Done(d))) => Ok(vec![d.message]),
+        Ok(Response::Ok(other)) => Ok(vec![format!("{other:?}")]),
+        Ok(Response::Error(e)) => Err(e.message),
+        Err(e) => Err(format!("Lost the connection to the ctx server: {e}")),
     }
 }
 
