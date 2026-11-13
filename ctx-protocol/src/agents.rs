@@ -264,6 +264,10 @@ pub fn sandbox_profile(name: &str, agent: &Agent, places: &Places) -> String {
         p.push_str(&format!("(deny file-write* (subpath {}))\n", quote(&real(d))));
     }
     p.push_str(&format!("(deny file-read* (subpath {}))\n", quote(&real(&places.ctx_data))));
+    // Except the plugins ctx installs for agent programs (hooks, skills): an agent program that
+    // can't read them starts without them, and its shell calls silently skip ctx.
+    let plugins = places.ctx_data.join("integrations");
+    p.push_str(&format!("(allow file-read* (subpath {}))\n", quote(&real(&plugins))));
     for f in &places.programs {
         let mut files = vec![f.clone(), real(f)];
         files.dedup();
@@ -338,5 +342,10 @@ mod tests {
         assert!(at(";; ~/Library/Caches\n") < at("(deny appleevent-send)"));
         assert!(p.contains("(allow file-read* (literal \"/nonexistent/run/agents/dev\"))"));
         assert!(!p.contains("network-outbound"), "network stays on by default");
+        // Agent programs read ctx's plugins (hooks, skills), though ctx's data is closed.
+        let data = p.find("(deny file-read* (subpath \"/nonexistent/home/Library/Application Support/ctx\"))").unwrap();
+        let plugins =
+            p.find("(allow file-read* (subpath \"/nonexistent/home/Library/Application Support/ctx/integrations\"))");
+        assert!(plugins.is_some_and(|i| i > data), "{p}");
     }
 }
