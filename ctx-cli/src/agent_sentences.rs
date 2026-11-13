@@ -76,10 +76,13 @@ pub enum AgentCommand {
 
 /// Example sentences with what they do, for `ctx help`, docs/grammar.md and tests.
 pub const EXAMPLES: &[(&str, &str)] = &[
-    ("ctx make agent named \"email-agent\"", "A new agent: its own account, with its home in ~/Agents."),
+    (
+        "ctx make agent named \"email-agent\"",
+        "A new agent: its own account, its home beside other agents' (outside yours), and ~/Agents/email-agent linking to it.",
+    ),
     (
         "ctx make agent named \"email-agent\" from ~/Agents/email-agent",
-        "The same, with an existing folder as its home.",
+        "The same, with an existing folder as its home (one in your home moves out, leaving a link).",
     ),
     ("ctx make agent from account \"vibe-daemon\"", "An existing standard account becomes an agent."),
     (
@@ -92,7 +95,10 @@ pub const EXAMPLES: &[(&str, &str)] = &[
     ("ctx forbid agent \"email-agent\" to write ~/Context/career", "Take write back; reading stays."),
     ("ctx forbid agent \"email-agent\" to read ~/Context/career", "Take all access back."),
     ("ctx show agent \"email-agent\"", "Its account, administrators, grants, limits and tabs."),
-    ("ctx limit agent \"email-agent\" to 8 GB of memory", "Also: 200 processes, low priority, normal priority, nothing."),
+    (
+        "ctx limit agent \"email-agent\" to 8 GB of memory",
+        "Also: 200 processes, low priority, normal priority, nothing.",
+    ),
     ("ctx rename agent \"email-agent\" to \"Email\"", "The full name shown beside the account name."),
     ("ctx reset agent \"email-agent\"", "Rewrite its ctx-agent.toml as yours, with the defaults."),
     ("ctx remove agent \"email-agent\"", "Delete the account; its home stays. Add `with its files` to trash it too."),

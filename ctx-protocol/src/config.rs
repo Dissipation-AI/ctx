@@ -17,16 +17,21 @@ pub struct Paths {
     door: PathBuf,
 }
 
+/// A short, stable name for a path (FNV-1a).
+fn path_hash(p: &std::path::Path) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in p.as_os_str().as_encoded_bytes() {
+        h = (h ^ *b as u64).wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
 fn short_socket(dir: &std::path::Path, prefix: &str) -> PathBuf {
     let p = dir.join("server.sock");
     if p.as_os_str().len() < 100 {
         return p;
     }
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in dir.as_os_str().as_encoded_bytes() {
-        h = (h ^ *b as u64).wrapping_mul(0x100000001b3);
-    }
-    PathBuf::from(format!("/tmp/{prefix}-{h:016x}")).join("server.sock")
+    PathBuf::from(format!("/tmp/{prefix}-{:016x}", path_hash(dir))).join("server.sock")
 }
 
 impl Paths {
@@ -97,12 +102,10 @@ impl Paths {
     pub fn resolve(user_temp: PathBuf, uid: u32, home: &str) -> Paths {
         if let Some(h) = std::env::var_os("CTX_HOME").filter(|h| !h.is_empty()) {
             let h = PathBuf::from(h);
-            return Paths {
-                data: h.join("data"),
-                runtime: h.join("run"),
-                config: h.join("config.toml"),
-                door: h.join("door"),
-            };
+            // The door is outside your folders, as it is without CTX_HOME: agents may be shut
+            // out of those (sharing one of your files closes the folders beside its path).
+            let door = PathBuf::from(format!("/tmp/ctx-agents-{uid}-{:016x}", path_hash(&h)));
+            return Paths { data: h.join("data"), runtime: h.join("run"), config: h.join("config.toml"), door };
         }
         let config_home = std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)

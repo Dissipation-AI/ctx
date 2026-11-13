@@ -1039,14 +1039,19 @@ impl Server {
 
     fn on_request(&mut self, key: usize, env: Envelope) {
         let target = self.request_tab(key, &env.request);
-        // A tab whose shell hasn't shown its first prompt yet: hold the request until it has.
+        // A tab whose shell hasn't shown its first prompt yet, or is between a command's end and
+        // the next prompt (the end mark comes in precmd, the prompt mark in PS1, so a slow precmd
+        // leaves a gap): hold the request until the prompt.
         if let Some(t) = target
             && let Some(tab) = self.tabs.get(&t)
             && tab.integration_expected
             && !tab.at_prompt
             && tab.running.is_empty()
-            && tab.last_finished.is_none()
-            && now_ms() - tab.created_ms < 10_000
+            && match tab.last_finished {
+                None => now_ms() - tab.created_ms < 10_000,
+                // Whatever is in front then is precmd's.
+                Some(_) => tab.finished.back().and_then(|c| c.finished_ms).is_some_and(|f| now_ms() - f < 10_000),
+            }
             && !matches!(
                 env.request,
                 Request::ListCommands { .. }
@@ -2134,14 +2139,21 @@ impl Server {
             rc_dir = door.join("shell");
             as_account = Some((o.clone(), acct.name.clone(), sandbox));
             limits = file.limits;
-            env.retain(|(k, _)| k != "CTX_AGENT");
+            env.retain(|(k, _)| k != "CTX_AGENT" && k != "CTX_AGENTS");
             env.push(("CTX_AGENT".into(), o.clone()));
+            // Agents reach agents' homes where they are, not through your ~/Agents links.
+            env.push(("CTX_AGENTS".into(), ctx_protocol::helper::agent_homes().display().to_string()));
         } else if let Some(o) = &owner {
             let Some(agent) = self.config.agents.get(o).cloned() else {
                 return Err(failed(format!(
                     "This tab belongs to the agent \"{o}\", and config.toml has no [agents.{o}], so it can't start without that agent's limits."
                 )));
             };
+            if agent.sandbox && !cfg!(target_os = "macos") {
+                return Err(failed(format!(
+                    "The agent \"{o}\" is set up in config.toml, which sandboxes it with macOS's Seatbelt; this system has none. Make it an account instead: ctx move agents to accounts"
+                )));
+            }
             if agent.sandbox && self.own_sandbox.is_some() {
                 return Err(failed(format!(
                     "The ctx server runs inside a sandbox, and macOS can't start a sandbox inside one, so it can't open tabs for the agent \"{o}\". Run the server outside any sandbox."
@@ -2793,8 +2805,7 @@ impl Server {
                 None => return err(ErrorKind::NotAllowed, format!("There's no agent account \"{n}\".")),
             }
         }
-        let agents_dir = self.config.folders.env(&sys::home())[0].1.clone();
-        match ctx_accounts::shared::make(Path::new(&agents_dir), &names, &uids) {
+        match ctx_accounts::shared::make(&ctx_protocol::helper::agent_homes(), &names, &uids) {
             Ok(dir) => {
                 self.access.borrow_mut().forget();
                 done(format!("{} is shared by {} and the person.", dir.display(), names.join(", ")))

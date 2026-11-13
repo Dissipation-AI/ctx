@@ -314,8 +314,8 @@ ctx help ["<text>"]
 
 ## Agents: each is its own account; the OS's file permissions decide what it reaches
 
-- `ctx make agent named "email-agent"`: A new agent: its own account, with its home in ~/Agents.
-- `ctx make agent named "email-agent" from ~/Agents/email-agent`: The same, with an existing folder as its home.
+- `ctx make agent named "email-agent"`: A new agent: its own account, its home beside other agents' (outside yours), and ~/Agents/email-agent linking to it.
+- `ctx make agent named "email-agent" from ~/Agents/email-agent`: The same, with an existing folder as its home (one in your home moves out, leaving a link).
 - `ctx make agent from account "vibe-daemon"`: An existing standard account becomes an agent.
 - `ctx switch to agent "email-agent"`: Open a tab as the agent, in its home (like su). Run claude, codex, pi… there.
 - `ctx allow agent "email-agent" to read ~/Context/career`: Let it read that folder (an access-list entry).

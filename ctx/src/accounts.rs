@@ -85,7 +85,7 @@ fn agent(name: &str) -> Result<Account, String> {
     Ok(a)
 }
 
-fn helper(req: HelperRequest) -> Result<String, String> {
+pub(crate) fn helper(req: HelperRequest) -> Result<String, String> {
     match ctx_protocol::helper::ask(&req)? {
         HelperReply::Done { message } => Ok(message),
         HelperReply::Refused { message } => Err(message),
@@ -112,7 +112,7 @@ pub fn starter_instructions(name: &str) -> String {
         "# {name}\n\n\
 You are the agent \"{name}\". You run as your own account, `{name}`, and this folder is your home. Write your instructions for yourself here.\n\n\
 ## Where things are\n\n\
-- `$CTX_AGENTS` (~/Agents): one folder per agent; each is that agent's home. `$CTX_AGENTS/Shared/everyone` is shared by every agent and the person.\n\
+- `$CTX_AGENTS`: one folder per agent; each is that agent's home (the person sees them as ~/Agents). `$CTX_AGENTS/Shared/everyone` is shared by every agent and the person.\n\
 - `$CTX_CONTEXT` (~/Context): the person's documents. You see only what they shared with you.\n\
 - `$CTX_WORKSPACES` (~/Workspaces): code projects.\n\n\
 ## Permissions\n\n\
@@ -134,24 +134,95 @@ fn starter_files(name: &str) -> Vec<StarterFile> {
 
 fn make(name: &str, home: Option<&str>) -> Lines {
     only_you("make agents")?;
-    let dir = agents_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("couldn't make {}: {e}", dir.display()))?;
-    let home = home.map(PathBuf::from).unwrap_or_else(|| dir.join(name));
+    helper(HelperRequest::MakeAgentHomes)?;
+    let mut lines = Vec::new();
+    let home = match home.map(PathBuf::from) {
+        // A folder in your home moves out of it: an agent must never pass through your home.
+        Some(from) if from.starts_with(ctx_server::sys::home()) && from != agent_homes().join(name) => {
+            let to = agent_homes().join(name);
+            move_out(&from, &to)?;
+            lines.push(format!("Moved {} to {}; the old path links to it.", from.display(), to.display()));
+            to
+        }
+        Some(h) => h,
+        None => agent_homes().join(name),
+    };
     let full_name = name.to_string();
-    let mut lines = vec![helper(HelperRequest::MakeAccount {
+    lines.push(helper(HelperRequest::MakeAccount {
         name: name.into(),
         full_name,
         home: home.display().to_string(),
         files: starter_files(name),
-    })?];
+    })?);
+    lines.extend(link_in_agents(name, &home));
     lines.extend(shared_everyone()?);
+    lines.extend(open_home());
     lines.push(format!("Talk to it: ctx switch to agent {}", quote(name)));
     Ok(lines)
 }
 
-/// `$CTX_AGENTS/Shared/everyone`: yours, and every agent may read and write it.
+/// A warning when your home lets every account in: then agents read your files (any that
+/// others may read) without being granted them, and access lists can't stop it.
+fn open_home() -> Option<String> {
+    use std::os::unix::fs::PermissionsExt;
+    let home = std::env::var_os("HOME")?;
+    let mode = std::fs::metadata(&home).ok()?.permissions().mode();
+    (mode & 0o005 != 0).then(|| {
+        format!(
+            "Your home folder ({}) lets every account in, so agents can read your files without being given them. Make it private: chmod go-rwx \"$HOME\"",
+            Path::new(&home).display()
+        )
+    })
+}
+
+/// Where agents' homes are (outside your home; see `ctx_protocol::helper::agent_homes`).
+pub fn agent_homes() -> PathBuf {
+    ctx_protocol::helper::agent_homes()
+}
+
+/// `~/Agents/<name>` links to the agent's home (what's there already is left alone).
+fn link_in_agents(name: &str, home: &Path) -> Option<String> {
+    let dir = agents_dir();
+    let link = dir.join(name);
+    if dir == agent_homes() || link == home || std::fs::symlink_metadata(&link).is_ok() {
+        return None;
+    }
+    let made = std::fs::create_dir_all(&dir).and_then(|_| std::os::unix::fs::symlink(home, &link));
+    Some(match made {
+        Ok(()) => format!("{} links to it.", link.display()),
+        Err(e) => format!("couldn't link {} to it: {e}", link.display()),
+    })
+}
+
+/// Move an agent's folder out of your home into agents' homes, leaving a link at the old path.
+/// A rename only: the files stay as they are (on another disk it stops and says so).
+pub(crate) fn move_out(from: &Path, to: &Path) -> Result<(), String> {
+    helper(ctx_protocol::helper::HelperRequest::MakeAgentHomes)?;
+    if std::fs::symlink_metadata(to).is_ok() {
+        return Err(format!("{} is there already; move or remove it first.", to.display()));
+    }
+    std::fs::rename(from, to).map_err(|e| {
+        if e.raw_os_error() == Some(libc::EXDEV) {
+            format!("{} is on another disk than {}, so it can't just be renamed; move it there yourself and run this again.", from.display(), to.display())
+        } else {
+            format!("couldn't move {} to {}: {e}", from.display(), to.display())
+        }
+    })?;
+    std::os::unix::fs::symlink(to, from).map_err(|e| format!("moved, but couldn't link {} to it: {e}", from.display()))
+}
+
+/// The `~/Agents/<name>` link to `home`, if that's what it is.
+fn unlink_in_agents(name: &str, home: &str) {
+    let link = agents_dir().join(name);
+    if std::fs::read_link(&link).is_ok_and(|to| to == Path::new(home)) {
+        let _ = std::fs::remove_file(link);
+    }
+}
+
+/// `Shared/everyone` beside agents' homes: yours, and every agent may read and write it.
 fn shared_everyone() -> Lines {
-    let dir = agents_dir().join("Shared").join("everyone");
+    let _ = link_in_agents("Shared", &agent_homes().join("Shared"));
+    let dir = agent_homes().join("Shared").join("everyone");
     let made = !dir.exists();
     std::fs::create_dir_all(&dir).map_err(|e| format!("couldn't make {}: {e}", dir.display()))?;
     let Some((gid, _)) = accounts::group(accounts::AGENTS_GROUP) else { return Ok(Vec::new()) };
@@ -195,12 +266,17 @@ fn remove(name: &str, with_files: bool, interactive: bool) -> Lines {
     for n in notes.grants {
         if n.to == grantee_key(&Grantee::Agent(name.into())) {
             let _ = acl::apply(Path::new(&n.path), Who::User(a.uid), None);
+            // Its way there too: the account goes, so nothing should name its uid.
+            ctx_accounts::shared::forget_passing(Path::new(&n.path), Who::User(a.uid));
         } else {
             left.grants.push(n);
         }
     }
     left.save();
     lines.push(helper(HelperRequest::RemoveAccount { name: name.into(), trash_home: with_files })?);
+    if with_files {
+        unlink_in_agents(name, &a.home);
+    }
     Ok(lines)
 }
 
@@ -324,6 +400,11 @@ fn grant(allow: bool, to: &Grantee, write: bool, on: &Target) -> Lines {
     }
     if allow {
         pass_through(&path, who);
+    } else if !write && meta.uid() == mine {
+        // Its way here may still be open (a folder it passes through toward something else), and
+        // the file's own mode may let anyone read it: close it outright.
+        acl::apply_one(&path, who, Some(Access::Nothing), false)
+            .map_err(|e| format!("couldn't close {} to {whom}: {e}", path.display()))?;
     }
     let mut lines = Vec::new();
     let mut notes = Notes::load();
@@ -333,7 +414,7 @@ fn grant(allow: bool, to: &Grantee, write: bool, on: &Target) -> Lines {
         (true, true) => format!("{} may now read and write {what}.", capitalise(&whom)),
         (true, false) => format!("{} may now read {what}.", capitalise(&whom)),
         (false, true) => format!("{} may now only read {what}.", capitalise(&whom)),
-        (false, false) => format!("{} has no access of its own to {what} now.", capitalise(&whom)),
+        (false, false) => format!("{} may no longer use {what}.", capitalise(&whom)),
     });
     if left > 0 {
         lines.push(format!(
@@ -483,7 +564,7 @@ fn access_word(a: Access) -> &'static str {
 }
 
 pub fn shown(a: &Account) -> AgentShown {
-    let mut warnings = Vec::new();
+    let mut warnings: Vec<String> = open_home().into_iter().collect();
     let home_access = acl::entries(Path::new(&a.home))
         .map(|es| {
             es.into_iter().map(|(w, acc)| Holder { who: holder_name(w), access: access_word(acc).into() }).collect()
@@ -697,6 +778,6 @@ fn make_shared(with: &[String]) -> Lines {
         );
     }
     let uids: Vec<u32> = names.iter().map(|n| agent(n).map(|a| a.uid)).collect::<Result<_, _>>()?;
-    let dir = ctx_accounts::shared::make(&agents_dir(), &names, &uids)?;
+    let dir = ctx_accounts::shared::make(&agent_homes(), &names, &uids)?;
     Ok(vec![format!("{} is shared by {} and you.", dir.display(), names.join(", "))])
 }

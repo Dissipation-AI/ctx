@@ -109,8 +109,12 @@ pub struct StarterFile {
 pub enum HelperRequest {
     /// What this helper can do.
     Version,
+    /// Make the folder agents' homes live in ([`agent_homes`]) if it's missing: yours, and other
+    /// accounts may only pass through it.
+    MakeAgentHomes,
     /// A new agent account with `home` as its home folder. `home` must be missing, or a folder of
-    /// yours (its files become the agent's). Its parent must be yours.
+    /// yours (its files become the agent's). Its parent must be yours, and it can't be inside your
+    /// home folder (agents would have to pass through it).
     MakeAccount {
         name: String,
         full_name: String,
@@ -155,7 +159,17 @@ pub enum HelperReply {
 }
 
 /// The helper's own version: what it understands. 1 started tabs; 2 makes and removes accounts.
-pub const HELPER_VERSION: u32 = 2;
+pub const HELPER_VERSION: u32 = 3;
+
+/// Where agents' homes are made: outside your home, so an agent never passes through it (a
+/// folder an account may pass through lets it reach anything inside that others may read).
+/// `~/Agents/<name>` links to each. `CTX_AGENT_HOMES` moves it (tests).
+pub fn agent_homes() -> std::path::PathBuf {
+    if let Some(d) = std::env::var_os("CTX_AGENT_HOMES").filter(|d| !d.is_empty()) {
+        return d.into();
+    }
+    if cfg!(target_os = "macos") { "/Users/Shared/ctx-agents".into() } else { "/home/ctx-agents".into() }
+}
 
 /// Ask the helper something (no terminal attached). Only the owner's account gets answers.
 pub fn ask(req: &HelperRequest) -> Result<HelperReply, String> {

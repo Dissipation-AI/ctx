@@ -423,6 +423,7 @@ fn serve_one(stream: UnixStream, rules: &HelperConfig, owner_uid: libc::uid_t) {
 fn handle(req: HelperRequest, owner: libc::uid_t) -> HelperReply {
     let r = match req {
         HelperRequest::Version => return HelperReply::Version { version: HELPER_VERSION },
+        HelperRequest::MakeAgentHomes => make_agent_homes(owner),
         HelperRequest::MakeAccount { name, full_name, home, files } => {
             make_account(&name, &full_name, &home, &files, owner)
         }
@@ -470,6 +471,25 @@ fn chown(p: &Path, uid: u32, gid: u32) -> std::io::Result<()> {
     std::os::unix::fs::lchown(p, Some(uid), Some(gid))
 }
 
+/// The folder agents' homes go in: yours, others may pass through it but not list it.
+fn make_agent_homes(owner: libc::uid_t) -> Result<String, String> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = ctx_protocol::helper::agent_homes();
+    if let Some(m) = lstat(&dir) {
+        return if m.is_dir() && std::os::unix::fs::MetadataExt::uid(&m) == owner {
+            Ok(format!("{} is there.", dir.display()))
+        } else {
+            Err(format!("{} exists and isn't a folder of yours.", dir.display()))
+        };
+    }
+    std::fs::create_dir(&dir).map_err(|e| format!("couldn't make {}: {e}", dir.display()))?;
+    let gid = accounts::by_uid(owner).map(|o| o.gid).unwrap_or(0);
+    chown(&dir, owner, gid).map_err(|e| format!("couldn't give {} to you: {e}", dir.display()))?;
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o711))
+        .map_err(|e| format!("couldn't set {}'s permissions: {e}", dir.display()))?;
+    Ok(format!("Made {} for agents' homes.", dir.display()))
+}
+
 fn make_account(
     name: &str,
     full_name: &str,
@@ -483,6 +503,14 @@ fn make_account(
         return Err(format!("The home folder must be a full path, not \"{home}\"."));
     }
     let parent = home_path.parent().ok_or("The home folder needs a parent folder.")?;
+    let your_home = accounts::by_uid(owner).map(|o| PathBuf::from(o.home)).unwrap_or_default();
+    if !your_home.as_os_str().is_empty() && home_path.starts_with(&your_home) {
+        return Err(format!(
+            "An agent's home can't be inside your home folder ({}): the agent would have to pass through it, and could then read anything in it that other accounts may. Agents' homes go in {}.",
+            your_home.display(),
+            ctx_protocol::helper::agent_homes().display()
+        ));
+    }
     if !owned_folder(parent, owner) {
         return Err(format!("{} must be a folder of yours.", parent.display()));
     }
@@ -498,7 +526,9 @@ fn make_account(
         e
     };
     if existing.is_none() {
+        // Made here, as root: it's the agent's from the start.
         std::fs::create_dir(&home_path).map_err(|e| undo(format!("couldn't make {home}: {e}")))?;
+        chown(&home_path, a.uid, a.gid).map_err(|e| undo(format!("couldn't give {home} to the agent: {e}")))?;
     }
     // Your files in it become the agent's: only files you own, not through links, and no file
     // with other hard links (it would be someone else's file too).
@@ -513,7 +543,9 @@ fn make_account(
             skipped += 1;
         }
     };
-    give(&home_path);
+    if existing.is_some() {
+        give(&home_path);
+    }
     acl::each_inside(&home_path, &mut give);
     let _ = std::fs::set_permissions(&home_path, std::fs::Permissions::from_mode(0o700));
     for f in files {
@@ -541,18 +573,14 @@ fn make_account(
     // You keep full access to everything in it, now and later.
     acl::apply(&home_path, acl::Who::User(owner), Some(acl::Access::Write))
         .map_err(|e| undo(format!("couldn't give you access to {home}: {e}")))?;
-    // Agents pass through the folders above it, up to and including your home.
+    // Agents pass through the folders of yours above it (never your home: see above).
     let gid = accounts::group(accounts::AGENTS_GROUP).map(|(g, _)| g).unwrap_or(a.gid);
-    let your_home = accounts::by_uid(owner).map(|o| PathBuf::from(o.home)).unwrap_or_default();
     let mut up = parent.to_path_buf();
     loop {
-        if !owned_folder(&up, owner) {
+        if !owned_folder(&up, owner) || up == your_home {
             break;
         }
         let _ = acl::allow_passing(&up, acl::Who::Group(gid));
-        if up == your_home {
-            break;
-        }
         match up.parent() {
             Some(p) => up = p.to_path_buf(),
             None => break,
@@ -565,9 +593,54 @@ fn make_account(
     Ok(msg)
 }
 
+/// End every process of the account: as the account, signal everything it may signal (only its
+/// own processes), politely and then not; wait for them to be gone.
+fn stop_everything_of(a: &accounts::Account) {
+    for (sig, settle) in [(libc::SIGHUP, 500), (libc::SIGKILL, 1500)] {
+        // SAFETY: fork; the child only makes system calls and exits.
+        unsafe {
+            let pid = libc::fork();
+            if pid == 0 {
+                if libc::setgid(a.gid) == 0 && libc::setuid(a.uid) == 0 {
+                    libc::kill(-1, sig);
+                }
+                libc::_exit(0);
+            }
+            if pid > 0 {
+                let mut status = 0;
+                libc::waitpid(pid, &mut status, 0);
+            }
+        }
+        let start = std::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_millis(settle) {
+            if !runs_anything(a.uid) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+}
+
+/// Whether any process runs as `uid` (signal 0 as that account, in a child).
+fn runs_anything(uid: libc::uid_t) -> bool {
+    // SAFETY: fork; the child only makes system calls and exits.
+    unsafe {
+        let pid = libc::fork();
+        if pid == 0 {
+            // kill(-1, 0) as the account: success means something of its own is there to signal.
+            let found = libc::setuid(uid) == 0 && libc::kill(-1, 0) == 0;
+            libc::_exit(if found { 0 } else { 1 });
+        }
+        let mut status = 0;
+        pid > 0 && libc::waitpid(pid, &mut status, 0) > 0 && libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0
+    }
+}
+
 fn remove_account(name: &str, trash_home: bool, owner: libc::uid_t) -> Result<String, String> {
     use std::os::unix::fs::MetadataExt;
     let a = agent(name, owner)?;
+    // Its programs stop first (Linux won't delete an account that still runs any).
+    stop_everything_of(&a);
     let mut msg = String::new();
     let home = PathBuf::from(&a.home);
     if trash_home && lstat(&home).is_some_and(|m| m.is_dir() && m.uid() == a.uid) {
@@ -637,10 +710,8 @@ fn share(path: &Path, entry: EntryFor, grant: Option<Grant>, owner: libc::uid_t)
 fn may_access(a: &accounts::Account, path: &str, write: bool) -> bool {
     let Ok(p) = CString::new(path) else { return false };
     let Ok(n) = CString::new(a.name.clone()) else { return false };
-    // SAFETY: fork; the child only makes system calls and exits. SIGCHLD is ignored so tabs'
-    // processes are reaped by the system; for this one child, the parent needs the status.
+    // SAFETY: fork; the child only makes system calls and exits.
     unsafe {
-        libc::signal(libc::SIGCHLD, libc::SIG_DFL);
         let pid = libc::fork();
         if pid == 0 {
             let ok = libc::initgroups(n.as_ptr(), a.gid as _) == 0
@@ -659,9 +730,15 @@ fn may_access(a: &accounts::Account, path: &str, write: bool) -> bool {
                     break false;
                 }
             };
-        libc::signal(libc::SIGCHLD, libc::SIG_IGN);
         waited && libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0
     }
+}
+
+/// Collect the exit status of tabs that have ended (so they don't stay as zombies).
+fn reap_ended_tabs() {
+    let mut status = 0;
+    // SAFETY: a non-blocking wait for any child.
+    while unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) } > 0 {}
 }
 
 fn main() {
@@ -700,10 +777,12 @@ fn main() {
     };
     // Anyone may connect; only the owner gets an answer other than no.
     let _ = std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o666));
-    // Children are reaped by the system; each child puts SIGCHLD back before it execs.
-    // SAFETY: setting a signal disposition.
-    unsafe { libc::signal(libc::SIGCHLD, libc::SIG_IGN) };
+    // SIGCHLD stays at its default: ignoring it would have the system reap tabs' processes, but
+    // also take the exit status of every program the helper runs itself (dscl, useradd, setfacl),
+    // which then fail with ECHILD. Requests are served one at a time, so tabs that have ended are
+    // reaped before each one, while none of the helper's own programs are running.
     for stream in listener.incoming().flatten() {
+        reap_ended_tabs();
         serve_one(stream, &rules, owner.uid);
     }
 }

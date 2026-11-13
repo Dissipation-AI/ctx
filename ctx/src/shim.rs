@@ -9,7 +9,7 @@
 use crate::exec::Out;
 use ctx_protocol::agents;
 use ctx_protocol::config::Config;
-use std::ffi::CString;
+
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
@@ -122,7 +122,7 @@ fn apply(_profile: &str) -> Result<(), String> {
 
 #[cfg(target_os = "macos")]
 fn apply(profile: &str) -> Result<(), String> {
-    let c = CString::new(profile.as_bytes()).map_err(|e| e.to_string())?;
+    let c = std::ffi::CString::new(profile.as_bytes()).map_err(|e| e.to_string())?;
     let mut err: *mut libc::c_char = std::ptr::null_mut();
     // SAFETY: a valid C string and an out-pointer for the error message.
     if unsafe { sandbox_init(c.as_ptr(), 0, &mut err) } == 0 {

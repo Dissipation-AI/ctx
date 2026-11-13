@@ -73,6 +73,42 @@ pub fn allow_passing(folder: &Path, who: Who) -> std::io::Result<()> {
     imp::allow_passing(folder, who)
 }
 
+/// Let `who` pass through `folder` to its entry `toward` and to nothing else in it.
+///
+/// A folder `who` may pass through lets it reach, by name, anything inside that other accounts
+/// may read (most files are made readable to everyone), so passing alone would open far more
+/// than what was shared. Here `who` gets: search on `folder` (unless it has a grant there
+/// already); an explicit "nothing" on each other entry of `folder` that's the caller's and whose
+/// access list names neither `who` nor anyone `spare` picks (other agents' grants are left as
+/// they are); and the same "nothing" on entries made in `folder` later.
+pub fn pass_only(
+    folder: &Path,
+    toward: &std::ffi::OsStr,
+    who: Who,
+    spare: &dyn Fn(Who) -> bool,
+) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    imp::pass_here(folder, who)?;
+    // SAFETY: getuid.
+    let mine = unsafe { libc::getuid() };
+    for e in std::fs::read_dir(folder)?.flatten() {
+        if e.file_name() == toward {
+            continue;
+        }
+        let p = e.path();
+        let Ok(m) = std::fs::symlink_metadata(&p) else { continue };
+        if m.file_type().is_symlink() || m.uid() != mine {
+            continue;
+        }
+        let named = imp::named_on(&p).unwrap_or_default();
+        if named.iter().any(|w| *w == who || spare(*w)) {
+            continue;
+        }
+        imp::set(&p, who, Some(Access::Nothing), false)?;
+    }
+    Ok(())
+}
+
 /// `who`'s access to `path` as its access list states it (`None`: no entry for `who`).
 pub fn access_of(path: &Path, who: Who) -> std::io::Result<Option<Access>> {
     imp::access_of(path, who)
@@ -146,6 +182,7 @@ mod imp {
     const ENTRY_INHERITED: libc::c_int = 1 << 4;
     const ENTRY_FILE_INHERIT: libc::c_int = 1 << 5;
     const ENTRY_DIRECTORY_INHERIT: libc::c_int = 1 << 6;
+    const ENTRY_ONLY_INHERIT: libc::c_int = 1 << 8;
 
     const ID_TYPE_UID: libc::c_int = 0;
     const ID_TYPE_GID: libc::c_int = 1;
@@ -340,7 +377,49 @@ mod imp {
         r
     }
 
-    /// `(allow, perms)` of each entry for `who`.
+    /// Search on `folder` for `who`, and "nothing" passed on to what's made in it later (an
+    /// entry that applies only to new entries, not the folder). A grant `who` has on the folder
+    /// is kept as it is.
+    pub fn pass_here(folder: &Path, who: Who) -> std::io::Result<()> {
+        let p = c(folder)?;
+        let mut acl = get(&p)?;
+        let r = (|| {
+            if classify(&entries_for(acl, who)).is_some() {
+                return Ok(());
+            }
+            strip(acl, who);
+            add(&mut acl, who, true, EXECUTE, false, false)?;
+            add(&mut acl, who, false, READ | WRITE, true, false)?;
+            // The deny is for what's made inside only.
+            // SAFETY: the entry just added is first; setting a flag on it.
+            unsafe {
+                let mut e: EntryT = std::ptr::null_mut();
+                if acl_get_entry(acl, ACL_FIRST_ENTRY, &mut e) == 0 {
+                    let mut fs: FlagsetT = std::ptr::null_mut();
+                    acl_get_flagset_np(e, &mut fs);
+                    acl_add_flag_np(fs, ENTRY_ONLY_INHERIT);
+                    acl_set_flagset_np(e, fs);
+                }
+            }
+            write(&p, acl)
+        })();
+        // SAFETY: freeing the acl.
+        unsafe { acl_free(acl) };
+        r
+    }
+
+    /// Everyone `path`'s access list names (any entry).
+    pub fn named_on(path: &Path) -> std::io::Result<Vec<Who>> {
+        let p = c(path)?;
+        let acl = get(&p)?;
+        let out = named(acl);
+        // SAFETY: freeing the acl.
+        unsafe { acl_free(acl) };
+        Ok(out)
+    }
+
+    /// `(allow, perms)` of each entry for `who` that applies to the file itself (entries only
+    /// passed on to new entries of a folder are left out).
     fn entries_for(acl: AclT, who: Who) -> Vec<(bool, u32)> {
         let mut out = Vec::new();
         // SAFETY: walking a live acl.
@@ -350,6 +429,11 @@ mod imp {
             while acl_get_entry(acl, id, &mut entry) == 0 {
                 id = ACL_NEXT_ENTRY;
                 if who_of(entry) != Some(who) {
+                    continue;
+                }
+                let mut fs: FlagsetT = std::ptr::null_mut();
+                acl_get_flagset_np(entry, &mut fs);
+                if acl_get_flag_np(fs, ENTRY_ONLY_INHERIT) == 1 {
                     continue;
                 }
                 let mut tag = 0;
@@ -484,6 +568,33 @@ mod imp {
         setfacl(&["-m", &format!("{}:--x", name(who))], folder)
     }
 
+    pub fn pass_here(folder: &Path, who: Who) -> std::io::Result<()> {
+        if access_of(folder, who)?.is_some() {
+            return Ok(());
+        }
+        let n = name(who);
+        setfacl(&["-m", &format!("{n}:--x,d:{n}:---")], folder)
+    }
+
+    pub fn named_on(path: &Path) -> std::io::Result<Vec<Who>> {
+        let mut out = Vec::new();
+        for l in getfacl(path)?.lines() {
+            let l = l.strip_prefix("default:").unwrap_or(l);
+            let mut f = l.split(':');
+            let (Some(kind), Some(id)) = (f.next(), f.next()) else { continue };
+            let Ok(id) = id.parse::<u32>() else { continue };
+            let w = match kind {
+                "user" => Who::User(id),
+                "group" => Who::Group(id),
+                _ => continue,
+            };
+            if !out.contains(&w) {
+                out.push(w);
+            }
+        }
+        Ok(out)
+    }
+
     pub fn entries(path: &Path) -> std::io::Result<Vec<(Who, Access)>> {
         let text = getfacl(path)?;
         let mut out = Vec::new();
@@ -558,6 +669,27 @@ mod tests {
             (*pw).pw_uid
         };
         Who::User(uid)
+    }
+
+    #[test]
+    fn passing_toward_one_entry_closes_the_rest() {
+        let d = tmp("pass");
+        let who = nobody();
+        std::fs::create_dir_all(d.join("other")).unwrap();
+        pass_only(&d, std::ffi::OsStr::new("sub"), who, &|_| false).unwrap();
+        // The folder: search only, which isn't a grant.
+        assert_eq!(access_of(&d, who).unwrap(), None);
+        assert_eq!(access_of(&d.join("sub"), who).unwrap(), None);
+        assert_eq!(access_of(&d.join("f"), who).unwrap(), Some(Access::Nothing));
+        assert_eq!(access_of(&d.join("other"), who).unwrap(), Some(Access::Nothing));
+        // Made later: closed too.
+        std::fs::write(d.join("later"), "z").unwrap();
+        assert_eq!(access_of(&d.join("later"), who).unwrap(), Some(Access::Nothing));
+        // A grant there stays: passing again doesn't close it.
+        apply(&d.join("other"), who, Some(Access::Read)).unwrap();
+        pass_only(&d, std::ffi::OsStr::new("sub"), who, &|_| false).unwrap();
+        assert_eq!(access_of(&d.join("other"), who).unwrap(), Some(Access::Read));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

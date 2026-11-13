@@ -12,8 +12,9 @@ use std::path::{Path, PathBuf};
 pub enum Step {
     /// An existing account joins ctx-agents.
     Adopt { agent: String, account: String },
-    /// A new account; `home` may be an existing folder.
-    Make { agent: String, name: String, home: PathBuf, existing: bool },
+    /// A new account with its home in agents' homes; `from` is its folder in ~/Agents, moved
+    /// there (a link to it stays in its place).
+    Make { agent: String, name: String, home: PathBuf, from: Option<PathBuf> },
     /// A grant from the agent's `read`/`write` list.
     Grant { name: String, path: String, write: bool },
     /// Something the plan can't carry over.
@@ -38,7 +39,8 @@ pub fn account_name(agent: &str) -> String {
     s
 }
 
-pub fn plan(config: &Config, agents_dir: &Path, home: &Path) -> Vec<Step> {
+/// The steps for `config`'s agents. `agents_dir` is your ~/Agents, `homes` where agents' homes go.
+pub fn plan(config: &Config, agents_dir: &Path, homes: &Path, home: &Path) -> Vec<Step> {
     let mut steps = Vec::new();
     for (agent, a) in &config.agents {
         let name = if !a.account.is_empty() {
@@ -77,14 +79,13 @@ pub fn plan(config: &Config, agents_dir: &Path, home: &Path) -> Vec<Step> {
                 });
                 continue;
             }
-            // Its folder in $CTX_AGENTS becomes its home, when it has one.
-            let folder =
-                a.folders.iter().map(|f| expand(f, home)).find(|f| f.parent() == Some(agents_dir) && f.is_dir());
-            let (h, existing) = match folder {
-                Some(f) => (f, true),
-                None => (agents_dir.join(&name), false),
-            };
-            steps.push(Step::Make { agent: agent.clone(), name: name.clone(), home: h, existing });
+            // Its folder in ~/Agents (not a link already) becomes its home, moved out of yours.
+            let from = a
+                .folders
+                .iter()
+                .map(|f| expand(f, home))
+                .find(|f| f.parent() == Some(agents_dir) && std::fs::symlink_metadata(f).is_ok_and(|m| m.is_dir()));
+            steps.push(Step::Make { agent: agent.clone(), name: name.clone(), home: homes.join(&name), from });
             name
         };
         for (list, write) in [(&a.read, false), (&a.write, true)] {
@@ -104,13 +105,14 @@ fn describe(s: &Step) -> String {
         Step::Adopt { agent, account } => {
             format!("\"{agent}\" becomes the agent \"{account}\" (its account joins ctx-agents)")
         }
-        Step::Make { agent, name, home, existing: true } => {
+        Step::Make { agent, name, home, from: Some(from) } => {
             format!(
-                "\"{agent}\" becomes the account \"{name}\" with {} as its home (its files become the agent's; you keep full access)",
+                "\"{agent}\" becomes the account \"{name}\"; {} moves to {} as its home, with a link left in its place (its files become the agent's; you keep full access)",
+                from.display(),
                 home.display()
             )
         }
-        Step::Make { agent, name, home, existing: false } => {
+        Step::Make { agent, name, home, from: None } => {
             format!("\"{agent}\" becomes the account \"{name}\" with a new home {}", home.display())
         }
         Step::Grant { name, path, write } => {
@@ -146,7 +148,8 @@ pub fn run(interactive: bool) -> Result<Vec<String>, String> {
     }
     let home = PathBuf::from(ctx_server::sys::home());
     let agents_dir = crate::accounts::agents_dir();
-    let steps = plan(&config, &agents_dir, &home);
+    let homes = crate::accounts::agent_homes();
+    let steps = plan(&config, &agents_dir, &homes, &home);
     let mut lines = vec!["The plan:".to_string()];
     lines.extend(steps.iter().map(describe));
     if !interactive || !std::io::stdin().is_terminal() {
@@ -168,8 +171,12 @@ pub fn run(interactive: bool) -> Result<Vec<String>, String> {
     for s in &steps {
         let cmd = match s {
             Step::Adopt { account, .. } => AgentCommand::Adopt { account: account.clone() },
-            Step::Make { name, home, existing, .. } => {
-                AgentCommand::Make { name: name.clone(), home: existing.then(|| home.display().to_string()) }
+            Step::Make { name, home, from, .. } => {
+                // `from` moves beside other agents' homes as it's made.
+                AgentCommand::Make {
+                    name: name.clone(),
+                    home: Some(from.as_ref().unwrap_or(home).display().to_string()),
+                }
             }
             Step::Grant { name, path, write } => AgentCommand::Grant {
                 allow: true,
@@ -227,15 +234,15 @@ mod tests {
             agents_dir.join("mail").display()
         );
         let config = Config::parse(&text).unwrap();
-        let steps = plan(&config, &agents_dir, &d);
+        let steps = plan(&config, &agents_dir, &d.join("homes"), &d);
         assert_eq!(
             steps,
             vec![
                 Step::Make {
                     agent: "Mail_bot".into(),
                     name: "mail-bot".into(),
-                    home: agents_dir.join("mail"),
-                    existing: true
+                    home: d.join("homes/mail-bot"),
+                    from: Some(agents_dir.join("mail"))
                 },
                 Step::Grant {
                     name: "mail-bot".into(),

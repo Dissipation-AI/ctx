@@ -177,6 +177,16 @@ fn a_call_right_after_a_command_waits_for_the_prompt() {
 }
 
 #[test]
+fn run_right_after_a_command_waits_for_the_prompt() {
+    // The same gap for `ctx run`: held until the prompt, not refused as busy.
+    let s = Server::start("run-gap");
+    s.ctx(&["open", "tab", "named", "Gap"]).ok();
+    s.ctx(&["run", "in", "Gap", "slow() { sleep 1 }; precmd_functions+=(slow); KEPT=1"]).ok();
+    let o = s.ctx(&["run", "in", "Gap", "echo $KEPT"]).ok().stdout.clone();
+    assert_eq!(o.trim_end(), "1", "{o}");
+}
+
+#[test]
 fn mcp_shell_runs_in_the_sessions_tab() {
     let s = Server::start("mcp");
     let input = [
@@ -419,6 +429,22 @@ fn ctx_app_subscription_gets_screens_and_sends_input() {
     assert!(o.contains("\"ran_by\": \"you\""), "keys from the app are the person's: {o}");
 }
 
+/// Off macOS a config-file agent can't be sandboxed, so its tab is refused up front with the way
+/// to make it an account.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn config_file_agents_are_refused_off_macos_with_the_way_to_accounts() {
+    let s = Server::start("agents-linux");
+    std::fs::write(s.dir.join("config.toml"), "shell = \"/bin/zsh\"\n[agents.dev]\nwrite = [\"~/Work\"]\n").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2500)); // the server rereads its config
+    let o = s.ctx_with(&[("CTX_AGENT_NAME", "dev")], &["open", "tab", "named", "Dev"], None);
+    assert_ne!(o.code, 0, "{}", o.stdout);
+    assert!(o.stderr.contains("ctx move agents to accounts"), "{}", o.stderr);
+}
+
+// Config-file agents run under Seatbelt (macOS only); on Linux agents are accounts
+// (tests/real_accounts.rs).
+#[cfg(target_os = "macos")]
 #[test]
 fn agents_see_and_drive_only_their_own_tabs_and_run_sandboxed() {
     let log = std::env::temp_dir().join(format!("ctx-it-handed-{}.log", std::process::id()));
@@ -500,6 +526,9 @@ fn agents_see_and_drive_only_their_own_tabs_and_run_sandboxed() {
 /// `drive_tabs_of` says so), never restarts the server, learns nothing about tabs it can't see,
 /// and a copy you make of its tab stays its own (its exported variables could be planted). From
 /// inside its sandbox the root helper's socket is closed.
+// Config-file agents run under Seatbelt (macOS only); on Linux agents are accounts
+// (tests/real_accounts.rs).
+#[cfg(target_os = "macos")]
 #[test]
 fn agents_cant_escalate_through_ctx() {
     let sock = format!("/tmp/ctx-it-nohelper-{}.sock", std::process::id());
@@ -587,6 +616,9 @@ fn claude_starts_in_a_tab_as_its_agent() {
 
 /// A session whose tab is yours (it started before the agent was configured, or was resumed) gets a
 /// tab of the agent's own instead of commands it isn't allowed to run.
+// Config-file agents run under Seatbelt (macOS only); on Linux agents are accounts
+// (tests/real_accounts.rs).
+#[cfg(target_os = "macos")]
 #[test]
 fn an_agents_hook_never_reuses_a_tab_it_cant_drive() {
     let s = Server::start("hook-owner");
@@ -615,14 +647,14 @@ fn an_agents_hook_never_reuses_a_tab_it_cant_drive() {
 
 /// The helper, unprivileged: the only account it can become is this one, which is enough to see
 /// the whole path (rules, the attached terminal, the door, the sandbox) work.
+// Config-file agents run under Seatbelt (macOS only); on Linux agents are accounts
+// (tests/real_accounts.rs).
+#[cfg(target_os = "macos")]
 #[test]
 fn agent_accounts_start_through_the_helper() {
     let helper = common::ctx_bin().with_file_name("ctx-helper");
-    if !helper.exists() {
-        assert!(
-            std::process::Command::new(env!("CARGO")).args(["build", "-p", "ctx-helper"]).status().unwrap().success()
-        );
-    }
+    // Always built: a helper left from an older build wouldn't know newer requests.
+    assert!(std::process::Command::new(env!("CARGO")).args(["build", "-p", "ctx-helper"]).status().unwrap().success());
     let me = std::env::var("USER").unwrap();
     let rules_dir = std::env::temp_dir().join(format!("ctx-it-helper-{}", std::process::id()));
     std::fs::create_dir_all(&rules_dir).unwrap();
