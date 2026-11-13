@@ -128,6 +128,8 @@ pub enum Command {
     },
     RunServer,
     Mcp,
+    /// Agents' accounts: making, sharing, limiting, switching.
+    Agent(crate::agent_sentences::AgentCommand),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -154,7 +156,7 @@ pub struct ParseError {
 }
 
 impl ParseError {
-    fn new(message: impl Into<String>) -> Self {
+    pub(crate) fn new(message: impl Into<String>) -> Self {
         ParseError { message: message.into(), suggestion: None }
     }
 }
@@ -186,6 +188,9 @@ fn parse_tokens(tokens: &[Token], ctx: &Context) -> Result<Sentence, ParseError>
     let Some(first) = tokens.first() else {
         return Ok(Sentence { command: Command::Help(None), format: Format::Text, canonical: "ctx help".into() });
     };
+    if let Some(r) = crate::agent_sentences::parse(tokens, ctx) {
+        return r.map(|p| Sentence { command: Command::Agent(p.command), format: p.format, canonical: p.canonical });
+    }
     let verb_word = first.lower();
     let Some(verb) = grammar::verb(&verb_word) else {
         return Err(ParseError::new(format!("\"{}\" isn't a ctx verb.", first.text)));
@@ -1391,6 +1396,34 @@ pub fn repair(tokens: &[Token], ctx: &Context) -> Option<String> {
     None
 }
 
+/// A tiny shell-like splitter for tests: double quotes group words.
+#[cfg(test)]
+pub(crate) fn split_for_tests(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut in_q = false;
+    let mut had = false;
+    for c in s.chars() {
+        match c {
+            '"' => {
+                in_q = !in_q;
+                had = true;
+            }
+            ' ' if !in_q => {
+                if had || !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+                had = false;
+            }
+            c => cur.push(c),
+        }
+    }
+    if had || !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1400,30 +1433,7 @@ mod tests {
     }
 
     fn words(s: &str) -> Vec<String> {
-        // A tiny shell-like splitter for tests: double quotes group words.
-        let mut out = Vec::new();
-        let mut cur = String::new();
-        let mut in_q = false;
-        let mut had = false;
-        for c in s.chars() {
-            match c {
-                '"' => {
-                    in_q = !in_q;
-                    had = true;
-                }
-                ' ' if !in_q => {
-                    if had || !cur.is_empty() {
-                        out.push(std::mem::take(&mut cur));
-                    }
-                    had = false;
-                }
-                c => cur.push(c),
-            }
-        }
-        if had || !cur.is_empty() {
-            out.push(cur);
-        }
-        out
+        split_for_tests(s)
     }
 
     fn p(s: &str) -> Sentence {

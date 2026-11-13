@@ -22,9 +22,26 @@ pub fn page() -> String {
             }
         }
     }
+    out.push_str(&format!("\n{AGENTS_TITLE}\n"));
+    for (s, what) in crate::agent_sentences::EXAMPLES {
+        out.push_str(&format!("  {s}\n  {:60}  {what}\n", ""));
+    }
     out.push_str(
         "\nAdd `as json` or `as toon` to any sentence for structured output. `ctx help <verb>` shows one verb.\n",
     );
+    out
+}
+
+/// The help section for agents' accounts (`ctx help agents`).
+const AGENTS_TITLE: &str = "Agents: each is its own account; the OS's file permissions decide what it reaches";
+
+/// `ctx help agents`.
+pub fn agents() -> String {
+    let mut out = format!("{AGENTS_TITLE}.\n\n");
+    out.push_str("An agent is an account in the group ctx-agents, with its home in $CTX_AGENTS. Reading another agent's home lets an agent see its tabs; writing it lets it drive them and administer the agent. ctx makes access-list entries as whoever runs it, so only a file's owner can share it.\n\n");
+    for (s, what) in crate::agent_sentences::EXAMPLES {
+        out.push_str(&format!("  {s}\n      {what}\n"));
+    }
     out
 }
 
@@ -112,6 +129,11 @@ A tab is its name in quotes, `tab <number>`, or `this tab`. A window is `window 
             out.push('\n');
         }
     }
+    out.push_str(&format!("## {AGENTS_TITLE}\n\n"));
+    for (s, what) in crate::agent_sentences::EXAMPLES {
+        out.push_str(&format!("- `{s}`: {what}\n"));
+    }
+    out.push('\n');
     out.push_str("## Values\n\n");
     for k in [
         Kind::Tab,

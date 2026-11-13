@@ -34,6 +34,9 @@ jobs:
       - name: Unit and integration tests
         run: cargo test --all-targets
 
+      - name: Agents as real accounts (makes and deletes throwaway accounts with sudo)
+        run: CTX_REAL_ACCOUNTS=1 cargo test -p ctx --test real_accounts -- --nocapture
+
       - name: Install cargo-deny
         uses: taiki-e/install-action@v2
         with:
@@ -44,3 +47,33 @@ jobs:
 
       - name: Budgets (binary size, memory, latency)
         run: scripts/budgets.sh
+
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig (for libghostty-vt) and the access-list tools
+        run: |
+          curl -sSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" | tar xJ -C "$RUNNER_TEMP"
+          echo "ZIG=$RUNNER_TEMP/zig-x86_64-linux-${ZIG_VERSION}/zig" >> "$GITHUB_ENV"
+          sudo apt-get install -y acl zsh
+          # The runner leaves zsh's function folders group-writable, so compinit stops every new
+          # tab's zsh at "Ignore insecure directories and continue [y]?" before its first prompt.
+          zsh -c 'autoload -Uz compaudit; compaudit' | xargs -r sudo chmod g-w,o-w
+
+      - name: Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Accounts, access lists and the helper
+        run: |
+          cargo clippy -p ctx-accounts -p ctx-protocol -p ctx-helper --all-targets -- -D warnings
+          cargo test -p ctx-accounts -p ctx-protocol -p ctx-helper
+
+      - name: Everything else
+        run: cargo test --all-targets
+
+      - name: Agents as real accounts (makes and deletes throwaway accounts with sudo)
+        run: CTX_REAL_ACCOUNTS=1 cargo test -p ctx --test real_accounts -- --nocapture

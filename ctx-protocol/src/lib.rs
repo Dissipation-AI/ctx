@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 
 /// Bumped whenever a message changes shape. Client and server must match exactly.
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 /// Version of the `as json` / `as toon` schema. Printed as `"schema": 1`.
 pub const SCHEMA_VERSION: u32 = 1;
 /// Largest message either side accepts (a whole `read everything` of a big tab fits).
@@ -386,6 +386,23 @@ pub enum Request {
     /// `ctx reopen tabs from last session`: every tab that was open when the server last stopped
     /// (reboot, crash or restart) and isn't open now, back in its window.
     ReopenLastSession,
+    /// `open`, `xdg-open` and `pbcopy` in an agent's tab: hand something to your session, which
+    /// the agent's account can't reach.
+    Hand {
+        what: Handed,
+    },
+}
+
+/// What an agent hands to your session.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub enum Handed {
+    /// A web or mail link, opened in your browser or mail program.
+    Link(String),
+    /// A file the agent could read, sent as its contents (so no path can be swapped under the
+    /// server), opened from a copy that can't run.
+    File { name: String, bytes: Vec<u8> },
+    /// Text for your clipboard.
+    Clipboard(String),
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -526,7 +543,7 @@ pub struct TabInfo {
     pub window: u64,
     /// `you`, or an agent such as `claude (pid 5512)`.
     pub opened_by: String,
-    /// The agent the tab belongs to (`config.toml`'s `[agents.<name>]`); `None`: it's yours.
+    /// The agent the tab belongs to (its account runs the shell); `None`: it's yours.
     pub owner: Option<String>,
     /// The title a program set (OSC 0/2), shown second to the name.
     pub title: Option<String>,

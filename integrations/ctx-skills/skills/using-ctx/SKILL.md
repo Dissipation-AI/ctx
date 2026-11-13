@@ -13,8 +13,9 @@ If ctx's hook is installed, your shell tool already runs each command in a tab n
 
 ## CTX folders
 
-Every tab has three folders in its environment:
-- `$CTX_AGENTS` (`~/Agents`): one folder per agent, with its CLAUDE.md or AGENTS.md.
+Every tab has these folders in its environment:
+- `$CTX_AGENTS` (`~/Agents`, the user's tabs only): a link per agent to its private home, with its CLAUDE.md or AGENTS.md, and `Spaces`.
+- `$CTX_SPACES`: spaces, folders shared by the agents that are members of each (agents' tabs too).
 - `$CTX_CONTEXT` (`~/Context`): the user's documents (resumes, tickets, calendars, PDFs). Read only what the task needs.
 - `$CTX_WORKSPACES` (`~/Workspaces`): monorepos of related projects.
 
@@ -55,4 +56,5 @@ ctx run in "Dev server - site" "<the command it was running>" without waiting &&
 - A ctx message makes the shell look broken (`Tab N … is running`, output cut short, `Operation not permitted`, a refused name): [reference/troubleshooting.md](reference/troubleshooting.md)
 - Claude Code auto mode denies or questions a ctx call: [reference/auto-mode.md](reference/auto-mode.md)
 - Long jobs in their own tab, reusing what earlier agents ran, keeping output small, arranging tabs and windows for the user: [reference/layout-and-records.md](reference/layout-and-records.md)
+- You run as an agent's account (`$CTX_AGENT` is set), something is "Permission denied", or you share files, make agents or hand the user a link or file: [reference/agents.md](reference/agents.md)
 - Driving a REPL, debugger, console or wizard: the `interactive-programs` skill.

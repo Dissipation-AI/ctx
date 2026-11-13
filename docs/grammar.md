@@ -23,7 +23,7 @@ ctx list tabs|closed tabs|commands|activity|launchers|agents [in "<tab>"] [by me
 - `ctx list commands in "Dev server"`: Commands run in that tab: where, exit status, start time, duration. No output.
 - `ctx list activity by claude since 1 hour ago`: The activity log: who did what to which tab, newest first.
 - `ctx list launchers`: Scoped launchers ctx made, and which tabs are running them now.
-- `ctx list agents`: The agents in config.toml: where each works, the account it runs as, what its sandbox gives it, whose tabs it may use.
+- `ctx list agents`: The agents (accounts in ctx-agents): administrators, grants, spaces, limits and tabs.
 
 ### `read`
 
@@ -311,6 +311,26 @@ ctx help ["<text>"]
 
 - `ctx help`: One page of example sentences.
 - `ctx help run`: One verb in detail.
+
+## Agents: each is its own account; the OS's file permissions decide what it reaches
+
+- `ctx make agent named "email-agent"`: A new agent: its own account and private home (/Users/email-agent; ~/Agents/email-agent links to it).
+- `ctx switch to agent "email-agent"`: Open a tab as the agent, in its home (like su). Run claude, codex, pi… there.
+- `ctx allow agent "email-agent" to read ~/Context/career`: Let it read that folder (an access-list entry).
+- `ctx allow agent "foreman" to write agent "email-agent"`: Make foreman an administrator of email-agent.
+- `ctx allow every agent to read ~/Context/style-guide.md`: Every agent may read it.
+- `ctx forbid agent "email-agent" to write ~/Context/career`: Take write back; reading stays.
+- `ctx forbid agent "email-agent" to read ~/Context/career`: Take all access back.
+- `ctx show agent "email-agent"`: Its account, administrators, grants, limits and tabs.
+- `ctx limit agent "email-agent" to 8 GB of memory`: Also: 200 processes, low priority, normal priority, nothing.
+- `ctx rename agent "email-agent" to "Email"`: The full name shown beside the account name.
+- `ctx reset agent "email-agent"`: Rewrite its ctx-agent.toml as yours, with the defaults.
+- `ctx remove agent "email-agent"`: Delete the account; its home stays. Add `with its files` to trash it too.
+- `ctx make space named "research"`: A folder agents work in together: only the agents you add, and you, may use it.
+- `ctx add agent "email-agent" to space "research"`: It may read and write the space (its new tabs).
+- `ctx take agent "email-agent" out of space "research"`: It may no longer use the space.
+- `ctx list spaces`: Every space, its folder and the agents in it.
+- `ctx remove space "research"`: Delete the space's group; its folder stays. Add `with its files` to trash it.
 
 ## Values
 

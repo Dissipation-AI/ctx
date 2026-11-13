@@ -214,6 +214,7 @@ dependencies = [
 name = "ctx"
 version = "0.1.0"
 dependencies = [
+ "ctx-accounts",
  "ctx-ask",
  "ctx-cli",
  "ctx-mcp",
@@ -223,6 +224,14 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "ctx-accounts"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde",
 ]
 
 [[package]]
@@ -248,6 +257,7 @@ dependencies = [
 name = "ctx-helper"
 version = "0.1.0"
 dependencies = [
+ "ctx-accounts",
  "ctx-protocol",
  "libc",
  "serde_json",
@@ -283,6 +293,7 @@ dependencies = [
 name = "ctx-server"
 version = "0.1.0"
 dependencies = [
+ "ctx-accounts",
  "ctx-cli",
  "ctx-protocol",
  "ctx-store",

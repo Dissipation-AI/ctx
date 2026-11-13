@@ -3,7 +3,7 @@
 if [ -r "$HOME/.bash_profile" ]; then . "$HOME/.bash_profile"
 elif [ -r "$HOME/.bash_login" ]; then . "$HOME/.bash_login"
 elif [ -r "$HOME/.profile" ]; then . "$HOME/.profile"; fi
-[ -n "$CTX_SHIMS" ] && PATH="$CTX_SHIMS:$PATH"
+[ -n "$CTX_BRIDGES" ] && PATH="$CTX_BRIDGES:$PATH"
 [ -n "$CTX_LAUNCHERS" ] && case ":$PATH:" in *":$CTX_LAUNCHERS:"*) ;; *) PATH="$PATH:$CTX_LAUNCHERS" ;; esac
 [ -n "$CTX_PREFILL" ] && history -s "$CTX_PREFILL"
 # A tab an agent opened: no pager waits for a person to press q, and no history expansion, so a

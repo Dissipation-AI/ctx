@@ -177,6 +177,16 @@ fn a_call_right_after_a_command_waits_for_the_prompt() {
 }
 
 #[test]
+fn run_right_after_a_command_waits_for_the_prompt() {
+    // The same gap for `ctx run`: held until the prompt, not refused as busy.
+    let s = Server::start("run-gap");
+    s.ctx(&["open", "tab", "named", "Gap"]).ok();
+    s.ctx(&["run", "in", "Gap", "slow() { sleep 1 }; precmd_functions+=(slow); KEPT=1"]).ok();
+    let o = s.ctx(&["run", "in", "Gap", "echo $KEPT"]).ok().stdout.clone();
+    assert_eq!(o.trim_end(), "1", "{o}");
+}
+
+#[test]
 fn mcp_shell_runs_in_the_sessions_tab() {
     let s = Server::start("mcp");
     let input = [
@@ -208,6 +218,15 @@ fn restart_keeps_tabs() {
     assert_eq!(o, "1\n/usr\n");
 }
 
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn launchers_are_macos_only() {
+    let s = Server::start("launcher");
+    let o = s.ctx(&["make", "launcher", "named", "echoer", "for", "/bin/echo", "at", "/tmp"]);
+    assert!(o.code != 0 && o.stderr.contains("macOS"), "{}", o.stderr);
+}
+
+#[cfg(target_os = "macos")]
 #[test]
 fn launchers_are_built_and_refuse_agents_arguments() {
     if !std::path::Path::new("/usr/bin/clang").exists() {
@@ -417,198 +436,6 @@ fn ctx_app_subscription_gets_screens_and_sends_input() {
     }
     let o = s.ctx(&["list", "commands", "in", "Shown", "as", "json"]).ok().stdout.clone();
     assert!(o.contains("\"ran_by\": \"you\""), "keys from the app are the person's: {o}");
-}
-
-#[test]
-fn agents_see_and_drive_only_their_own_tabs_and_run_sandboxed() {
-    let s = Server::start("agents");
-    std::fs::create_dir_all(s.home.join("Secret")).unwrap();
-    std::fs::write(s.home.join("Secret/key"), "hunter2").unwrap();
-    std::fs::create_dir_all(s.home.join("Work")).unwrap();
-    std::fs::write(
-        s.dir.join("config.toml"),
-        "shell = \"/bin/zsh\"\nagent_programs = [\"fakeagent\"]\n[agents.dev]\nfolders = [\"~/Work\"]\nwrite = [\"~/Work\"]\n",
-    )
-    .unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(2500)); // the server rereads its config
-    s.ctx(&["open", "tab", "named", "Mine", "at", "/tmp"]).ok();
-    let dev = |args: &[&str]| s.ctx_with(&[("CTX_AGENT_NAME", "dev")], args, None);
-
-    // Your tab doesn't exist for the agent.
-    assert!(!dev(&["list", "tabs"]).ok().stdout.contains("Mine"));
-    let o = dev(&["run", "in", "Mine", "echo hi"]);
-    assert_eq!(o.code, 1);
-    assert!(o.stderr.contains("There's no tab named \"Mine\""), "{}", o.stderr);
-
-    // Its own tab runs in its sandbox: your home is closed except what it was given.
-    let work = s.home.join("Work").display().to_string();
-    dev(&["open", "tab", "named", "Dev work", "at", &work]).ok();
-    let o = dev(&["run", "in", "Dev work", "cat ~/Secret/key"]);
-    assert!(o.stdout.contains("Operation not permitted") && !o.stdout.contains("hunter2"), "{}", o.stdout);
-    assert_eq!(dev(&["run", "in", "Dev work", "echo made > ~/Work/out && cat ~/Work/out"]).ok().stdout, "made\n");
-
-    // Inside the sandbox ctx knows it's the agent, whatever the process says about itself.
-    let ctx = common::ctx_bin().display().to_string();
-    let o = dev(&["run", "in", "Dev work", &format!("env -u CTX_AGENT_NAME '{ctx}' list tabs")]).ok().stdout.clone();
-    assert!(o.contains("Dev work") && !o.contains("Mine"), "{o}");
-    let o = dev(&["run", "in", "Dev work", &format!("env -u CTX_AGENT_NAME '{ctx}' run in tab 1 'echo escaped'")]);
-    assert!(o.stdout.contains("There is no tab 1"), "{}", o.stdout);
-
-    // You see everything, with its owner, and can drive the agent's tab.
-    let o = s.ctx(&["list", "tabs"]).ok().stdout.clone();
-    assert!(o.contains("Mine") && o.contains("\"Dev work\"") && o.contains("belongs to the agent \"dev\""), "{o}");
-    assert_eq!(s.ctx(&["run", "in", "Dev work", "echo yours"]).ok().stdout, "yours\n");
-    // An agent program started in your tab runs as the agent for its folder.
-    std::fs::create_dir_all(s.home.join("bin")).unwrap();
-    let fake = s.home.join("bin/fakeagent");
-    std::fs::write(&fake, "#!/bin/sh\necho \"agent=$CTX_AGENT\"; cat ~/Secret/key\n").unwrap();
-    std::process::Command::new("chmod").arg("755").arg(&fake).status().unwrap();
-    s.ctx(&["run", "in", "Mine", "export PATH=~/bin:$PATH"]).ok();
-    let o = s.ctx(&["run", "in", "Mine", "cd ~/Work && fakeagent"]).stdout;
-    assert!(o.contains("agent=dev") && o.contains("Operation not permitted") && !o.contains("hunter2"), "{o}");
-    let o = s.ctx(&["run", "in", "Mine", "cd /tmp && fakeagent"]).ok().stdout.clone();
-    assert!(o.starts_with("agent=\nhunter2"), "outside every agent's folders it runs as you: {o}");
-
-    // The log names the agent.
-    let o = s.ctx(&["list", "activity", "by", "dev", "as", "json"]).ok().stdout.clone();
-    let v: serde_json::Value = serde_json::from_str(&o).unwrap();
-    let clients: Vec<&str> = v["entries"].as_array().unwrap().iter().map(|e| e["client"].as_str().unwrap()).collect();
-    assert!(!clients.is_empty() && clients.iter().all(|c| c.starts_with("dev: ")), "{clients:?}");
-}
-
-/// The real Claude Code, started in your tab, comes up as the agent inside its sandbox; in a folder
-/// that sandbox can't read, ctx says so instead of Claude's "low max file descriptors". Its binary
-/// goes by another name here: these tests often run under Claude Code, and a `ctx` with an agent
-/// program above it would be that agent rather than you.
-#[test]
-fn claude_starts_in_a_tab_as_its_agent() {
-    let Some(claude) = std::env::var("PATH")
-        .unwrap_or_default()
-        .split(':')
-        .map(|d| std::path::Path::new(d).join("claude"))
-        .find(|p| p.is_file())
-    else {
-        eprintln!("skipped: no claude on PATH");
-        return;
-    };
-    let s = Server::start("claude");
-    for d in ["Work", "Closed", "bin"] {
-        std::fs::create_dir_all(s.home.join(d)).unwrap();
-    }
-    std::os::unix::fs::symlink(&claude, s.home.join("bin/claude-it")).unwrap();
-    std::fs::write(
-        s.dir.join("config.toml"),
-        "shell = \"/bin/zsh\"\nagent_programs = [\"claude-it\"]\ndefault_agent = \"dev\"\n[agents.dev]\nfolders = [\"~/Work\"]\nwrite = [\"~\"]\ndeny = [\"~/Closed\"]\n",
-    )
-    .unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(2500)); // the server rereads its config
-    s.ctx(&["open", "tab", "named", "Mine", "at", "/tmp"]).ok();
-    s.ctx(&["run", "in", "Mine", "export PATH=$PATH:~/bin"]).ok();
-    let o = s.ctx(&["run", "in", "Mine", "cd ~/Work && claude-it --version"]).ok().stdout.clone();
-    assert!(o.contains("runs as the agent \"dev\", in its sandbox") && o.contains("(Claude Code)"), "{o}");
-    let o = s.ctx(&["run", "in", "Mine", "cd ~/Closed && claude-it --version"]).stdout;
-    assert!(o.contains("default_agent") && o.contains("its sandbox can't read this folder"), "{o}");
-    assert!(!o.contains("(Claude Code)") && !o.contains("file descriptors"), "{o}");
-}
-
-/// A session whose tab is yours (it started before the agent was configured, or was resumed) gets a
-/// tab of the agent's own instead of commands it isn't allowed to run.
-#[test]
-fn an_agents_hook_never_reuses_a_tab_it_cant_drive() {
-    let s = Server::start("hook-owner");
-    std::fs::write(s.dir.join("config.toml"), "shell = \"/bin/zsh\"\n[agents.dev]\nsee_tabs_of = [\"you\"]\n").unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(2500)); // the server rereads its config
-    s.ctx(&["open", "tab", "named", "Claude abc12345", "at", "/tmp"]).ok();
-    let call =
-        r#"{"session_id": "abc12345-xyz", "tool_name": "Bash", "tool_input": {"command": "echo hi"}, "cwd": "/tmp"}"#;
-    let hook = |env: &[(&str, &str)]| {
-        let o = s.ctx_with(env, &["hook", "claude"], Some(call)).ok().stdout.clone();
-        let v: serde_json::Value = serde_json::from_str(&o).unwrap();
-        v["hookSpecificOutput"]["updatedInput"]["command"].as_str().unwrap().to_string()
-    };
-    let dev = [("CTX_AGENT_NAME", "dev")];
-    let sentence = hook(&dev);
-    assert!(sentence.starts_with("ctx run in 'Claude abc12345 dev' "), "{sentence}");
-    let o = s.ctx(&["list", "tabs"]).ok().stdout.clone();
-    assert!(o.contains("\"Claude abc12345 dev\"") && o.contains("belongs to the agent \"dev\""), "{o}");
-    // The next call reuses it, and you keep yours.
-    assert_eq!(hook(&dev), sentence);
-    assert!(hook(&[]).starts_with("ctx run in 'Claude abc12345' "));
-    let words: Vec<String> = ctx_mcp::shell_words(&sentence).unwrap();
-    let args: Vec<&str> = words[1..].iter().map(String::as_str).collect();
-    assert_eq!(s.ctx_with(&dev, &args, None).ok().stdout, "hi\n");
-}
-
-/// The helper, unprivileged: the only account it can become is this one, which is enough to see
-/// the whole path (rules, the attached terminal, the door, the sandbox) work.
-#[test]
-fn agent_accounts_start_through_the_helper() {
-    let helper = common::ctx_bin().with_file_name("ctx-helper");
-    if !helper.exists() {
-        assert!(
-            std::process::Command::new(env!("CARGO")).args(["build", "-p", "ctx-helper"]).status().unwrap().success()
-        );
-    }
-    let me = std::env::var("USER").unwrap();
-    let rules_dir = std::env::temp_dir().join(format!("ctx-it-helper-{}", std::process::id()));
-    std::fs::create_dir_all(&rules_dir).unwrap();
-    let rules = rules_dir.join("helper.toml");
-    std::fs::write(&rules, format!("owner = \"{me}\"\n[accounts]\ndev = \"{me}\"\n")).unwrap();
-    let sock = format!("/tmp/ctx-it-helper-{}.sock", std::process::id());
-    // Stopped when the test ends, pass or fail, so it can't hold the test's output open.
-    struct Helper(std::process::Child);
-    impl Drop for Helper {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
-    let h = Helper(
-        std::process::Command::new(&helper)
-            .env("CTX_HELPER_SOCKET", &sock)
-            .env("CTX_HELPER_CONFIG", &rules)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap(),
-    );
-    while !std::path::Path::new(&sock).exists() {
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    let s = Server::start_with("accounts", &[("CTX_HELPER_SOCKET", &sock)]);
-    std::fs::create_dir_all(s.home.join("Secret")).unwrap();
-    std::fs::write(s.home.join("Secret/key"), "hunter2").unwrap();
-    std::fs::create_dir_all(s.home.join("Work")).unwrap();
-    std::fs::write(
-        s.dir.join("config.toml"),
-        format!("shell = \"/bin/zsh\"\n[agents.dev]\naccount = \"{me}\"\nwrite = [\"~/Work\"]\n"),
-    )
-    .unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(2500));
-    let work = s.home.join("Work").display().to_string();
-    s.ctx_with(&[("CTX_AGENT_NAME", "dev")], &["open", "tab", "named", "Acct", "at", &work], None).ok();
-    // The helper started the shell, which reaches the server through the door, in the sandbox.
-    // (The account's home is its own, so the secret goes by its full path.)
-    let secret = s.home.join("Secret/key").display().to_string();
-    let o = s.ctx(&["run", "in", "Acct", &format!("echo $PPID; echo $CTX_SOCKET; cat '{secret}'")]).stdout;
-    let lines: Vec<&str> = o.lines().collect();
-    assert_eq!(lines[0].trim(), h.0.id().to_string(), "{o}");
-    assert!(lines[1].ends_with("server.sock"), "{o}");
-    assert!(o.contains("Operation not permitted") && !o.contains("hunter2"), "{o}");
-    let ctx = common::ctx_bin().display().to_string();
-    let o = s.ctx(&["run", "in", "Acct", &format!("env -u CTX_AGENT_NAME '{ctx}' list tabs")]).ok().stdout.clone();
-    assert!(o.contains("\"Acct\""), "{o}");
-    // A request for an agent the rules don't have is refused, and says so.
-    std::fs::write(
-        s.dir.join("config.toml"),
-        format!("shell = \"/bin/zsh\"\n[agents.dev]\naccount = \"{me}\"\n[agents.mail]\naccount = \"{me}\"\n"),
-    )
-    .unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(2500));
-    let o = s.ctx_with(&[("CTX_AGENT_NAME", "mail")], &["open", "tab", "named", "Mail"], None);
-    assert!(o.stderr.contains("don't have the agent \"mail\""), "{}", o.stderr);
-    drop(h);
-    let _ = std::fs::remove_file(&sock);
 }
 
 #[test]
