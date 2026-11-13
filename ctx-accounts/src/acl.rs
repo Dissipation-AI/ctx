@@ -61,6 +61,10 @@ pub fn apply_counting(
     if meta.is_dir() {
         let mut n = 1;
         walk(path, &mut |p| {
+            // A link has no access of its own: what it points to decides.
+            if std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()) {
+                return;
+            }
             match imp::set(p, who, access, true) {
                 Ok(()) => done.changed += 1,
                 Err(_) => done.not_owned.push(p.to_path_buf()),
@@ -715,6 +719,9 @@ mod tests {
         }
         let d = tmp("states");
         let who = nobody();
+        // Links are skipped: neither counted nor reported as someone else's.
+        std::os::unix::fs::symlink("f", d.join("link")).unwrap();
+        std::os::unix::fs::symlink("nowhere", d.join("dangling")).unwrap();
         for a in [Access::Read, Access::Write, Access::ReadOnly, Access::Nothing] {
             let done = apply(&d, who, Some(a)).unwrap();
             // POSIX access lists can't deny write separately; a named entry without write already
