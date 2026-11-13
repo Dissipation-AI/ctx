@@ -327,7 +327,19 @@ fn grant(allow: bool, to: &Grantee, write: bool, on: &Target) -> Lines {
     let owner_is_agent = accounts::by_uid(meta.uid()).is_some_and(|a| accounts::is_agent(&a));
     let mut left = 0;
     if meta.uid() == mine {
-        let done = acl::apply(&path, who, access).map_err(|e| format!("couldn't change {}: {e}", path.display()))?;
+        // A big folder takes minutes: say how far it got, where a person is watching.
+        let show = std::io::stderr().is_terminal();
+        let started = std::time::Instant::now();
+        let mut seen = |n: usize| {
+            if show && n.is_multiple_of(5000) && started.elapsed().as_secs() >= 1 {
+                eprint!("\r{n} files and folders so far…");
+            }
+        };
+        let done = acl::apply_counting(&path, who, access, &mut seen)
+            .map_err(|e| format!("couldn't change {}: {e}", path.display()))?;
+        if show && started.elapsed().as_secs() >= 1 {
+            eprint!("\r\x1b[K");
+        }
         left = done.not_owned.len();
         // Files inside that agents wrote: the helper updates those, for the person only.
         if left > 0 && !running_as_agent() && as_helper(&path).is_ok() {
