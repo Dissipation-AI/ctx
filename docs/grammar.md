@@ -312,6 +312,25 @@ ctx help ["<text>"]
 - `ctx help`: One page of example sentences.
 - `ctx help run`: One verb in detail.
 
+## Agents: each is its own account; the OS's file permissions decide what it reaches
+
+- `ctx make agent named "email-agent"`: A new agent: its own account, with its home in ~/Agents.
+- `ctx make agent named "email-agent" from ~/Agents/email-agent`: The same, with an existing folder as its home.
+- `ctx make agent from account "vibe-daemon"`: An existing standard account becomes an agent.
+- `ctx switch to agent "email-agent"`: Open a tab as the agent, in its home (like su). Run claude, codex, pi… there.
+- `ctx allow agent "email-agent" to read ~/Context/career`: Let it read that folder (an access-list entry).
+- `ctx allow agent "foreman" to write agent "email-agent"`: Make foreman an administrator of email-agent.
+- `ctx allow every agent to read ~/.local/bin`: Every agent may read it.
+- `ctx forbid agent "email-agent" to write ~/Context/career`: Take write back; reading stays.
+- `ctx forbid agent "email-agent" to read ~/Context/career`: Take all access back.
+- `ctx show agent "email-agent"`: Its account, administrators, grants, limits and tabs.
+- `ctx limit agent "email-agent" to 8 GB of memory`: Also: 200 processes, low priority, nothing.
+- `ctx rename agent "email-agent" to "Email"`: The full name shown beside the account name.
+- `ctx reset agent "email-agent"`: Rewrite its ctx-agent.toml as yours, with the defaults.
+- `ctx remove agent "email-agent"`: Delete the account; its home stays. Add `with its files` to trash it too.
+- `ctx make shared folder with agent "email-agent"`: A folder in ~/Agents/Shared for the agent running this, that agent and you.
+- `ctx move agents to accounts`: Turn the [agents] sections of config.toml into accounts. Shows the plan first.
+
 ## Values
 
 - "<tab>"

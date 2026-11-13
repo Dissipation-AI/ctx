@@ -66,6 +66,8 @@ _ctx_precmd() {
     _ctx_mark_prompt
     # Agent programs run as their agent: ctx's shims stay first on PATH (see `ctx help agents`).
     [[ -z "$CTX_SHIMS" || "${path[1]}" == "$CTX_SHIMS" ]] || path=("$CTX_SHIMS" ${path:#${(b)CTX_SHIMS}})
+    # An agent's open, pbcopy and pbpaste reach your session through ctx: its bridges stay first.
+    [[ -z "$CTX_BRIDGES" || "${path[1]}" == "$CTX_BRIDGES" ]] || path=("$CTX_BRIDGES" ${path:#${(b)CTX_BRIDGES}})
     if (( _ctx_first )); then
         _ctx_first=0
         _ctx_deferred_init

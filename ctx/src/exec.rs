@@ -73,6 +73,10 @@ pub fn run(args: &[String], caller: Caller) -> Out {
     if caller == Caller::Cli && args.first().is_some_and(|a| a == "shim") {
         return crate::shim::run(&args[1..]);
     }
+    // `open`, `xdg-open`, `pbcopy` and `pbpaste` in an agent's tab (see bridge.rs); not a sentence.
+    if caller == Caller::Cli && args.first().is_some_and(|a| a == "bridge") {
+        return crate::bridge::run(&args[1..]);
+    }
     // Used by the zsh completion; not a sentence.
     if caller == Caller::Cli && args.len() == 2 && args[0] == "completion-words" && args[1] == "tabs" {
         return completion_tabs();

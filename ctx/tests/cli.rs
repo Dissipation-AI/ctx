@@ -421,7 +421,9 @@ fn ctx_app_subscription_gets_screens_and_sends_input() {
 
 #[test]
 fn agents_see_and_drive_only_their_own_tabs_and_run_sandboxed() {
-    let s = Server::start("agents");
+    let log = std::env::temp_dir().join(format!("ctx-it-handed-{}.log", std::process::id()));
+    let _ = std::fs::remove_file(&log);
+    let s = Server::start_with("agents", &[("CTX_HAND_LOG", log.to_str().unwrap())]);
     std::fs::create_dir_all(s.home.join("Secret")).unwrap();
     std::fs::write(s.home.join("Secret/key"), "hunter2").unwrap();
     std::fs::create_dir_all(s.home.join("Work")).unwrap();
@@ -446,6 +448,24 @@ fn agents_see_and_drive_only_their_own_tabs_and_run_sandboxed() {
     let o = dev(&["run", "in", "Dev work", "cat ~/Secret/key"]);
     assert!(o.stdout.contains("Operation not permitted") && !o.stdout.contains("hunter2"), "{}", o.stdout);
     assert_eq!(dev(&["run", "in", "Dev work", "echo made > ~/Work/out && cat ~/Work/out"]).ok().stdout, "made\n");
+
+    // Its sandbox keeps it from your clipboard and Launch Services; open and pbcopy reach your
+    // session through the server, and only links and documents open. pbpaste never works.
+    let o = dev(&[
+        "run",
+        "in",
+        "Dev work",
+        "echo report > ~/Work/report.md; echo 'x' > ~/Work/run.command; echo copied | pbcopy && open https://example.com ~/Work/report.md && echo ok",
+    ]);
+    assert!(o.stdout.ends_with("ok\n"), "{}", o.stdout);
+    let handed = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(handed.contains("copy copied\n") && handed.contains("open https://example.com\n"), "{handed}");
+    let opened =
+        handed.lines().find(|l| l.ends_with("/report.md")).expect("the report opened").trim_start_matches("open ");
+    assert_eq!(std::fs::read_to_string(opened).unwrap(), "report\n", "a copy of what the agent could read");
+    let o = dev(&["run", "in", "Dev work", "open ~/Work/run.command; open ~/Secret/key; pbpaste"]).stdout;
+    assert!(o.contains("doesn't open") && o.contains("Operation not permitted") && o.contains("isn't readable"), "{o}");
+    assert!(!std::fs::read_to_string(&log).unwrap().contains("run.command"));
 
     // Inside the sandbox ctx knows it's the agent, whatever the process says about itself.
     let ctx = common::ctx_bin().display().to_string();

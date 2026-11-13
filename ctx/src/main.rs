@@ -4,6 +4,7 @@ mod accounts;
 mod agents;
 mod ask;
 mod attach;
+mod bridge;
 mod client;
 mod exec;
 mod hook;

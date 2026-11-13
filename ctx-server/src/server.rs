@@ -1451,6 +1451,7 @@ impl Server {
             Request::Starters { limit } => self.starters(key, limit),
             Request::ReopenLastSession => self.reopen_last_session(key),
             Request::MakeSharedFolder { with } => self.make_shared_folder(key, with),
+            Request::Hand { what } => self.hand(key, what),
             Request::Processes { tab } => self.processes(key, &tab),
             Request::ListCommands { tab, limit } => self.list_commands(key, &tab, limit),
             Request::ListActivity { filter, limit } => self.list_activity(key, filter, limit),
@@ -2163,6 +2164,12 @@ impl Server {
                 as_account = Some((o.clone(), agent.account.clone(), text));
             } else if let Some(f) = sandbox {
                 args.extend(["--sandbox".to_string(), f.display().to_string()]);
+                // Its sandbox keeps it from your clipboard and Launch Services: hand them over.
+                let bridges = self.paths.runtime.join("bridge");
+                if write_bridges(&bridges, &self.server_exe).is_ok() {
+                    prepend_path(&mut env, &bridges);
+                    env.push(("CTX_BRIDGES".into(), bridges.display().to_string()));
+                }
             }
             env.retain(|(k, _)| k != "CTX_AGENT");
             env.push(("CTX_AGENT".into(), o.clone()));
@@ -2397,10 +2404,16 @@ impl Server {
         }
         // Your launchers, history and files aren't the agent's.
         env.retain(|(k, _)| !matches!(k.as_str(), "CTX_LAUNCHERS" | "CTX_REOPEN_HISTORY" | "CTX_USER_ZDOTDIR"));
-        if let Some(bin) = self.server_exe.parent()
-            && let Some((_, p)) = env.iter_mut().find(|(k, _)| k == "PATH")
-        {
-            *p = format!("{}:{p}", bin.display());
+        if let Some(bin) = self.server_exe.parent() {
+            prepend_path(env, bin);
+        }
+        // `open`, `xdg-open`, `pbcopy` and `pbpaste` reach your session through the server.
+        let bridges = door.join("bin");
+        if write_bridges(&bridges, &self.server_exe).is_ok() {
+            set_mode(door, 0o711);
+            prepend_path(env, &bridges);
+            env.retain(|(k, _)| k != "CTX_BRIDGES");
+            env.push(("CTX_BRIDGES".into(), bridges.display().to_string()));
         }
     }
 
@@ -2787,6 +2800,50 @@ impl Server {
                 done(format!("{} is shared by {} and the person.", dir.display(), names.join(", ")))
             }
             Err(e) => err(ErrorKind::Failed, e),
+        }
+    }
+
+    /// A link, file or text an agent hands to your session (its `open`, `xdg-open`, `pbcopy`).
+    fn hand(&mut self, key: usize, what: ctx_protocol::Handed) -> Handled {
+        use ctx_protocol::Handed;
+        let who = self.principal(key).map(|p| format!("the agent \"{p}\"")).unwrap_or_else(|| "you".into());
+        match what {
+            Handed::Link(url) => {
+                let l = url.to_ascii_lowercase();
+                if !(l.starts_with("http://") || l.starts_with("https://") || l.starts_with("mailto:")) {
+                    return err(ErrorKind::NotAllowed, "Only web and mail links open in the person's session.");
+                }
+                match sys::open_in_session(&url) {
+                    Ok(()) => done(format!("Opened {url} for {who}.")),
+                    Err(e) => err(ErrorKind::Failed, e),
+                }
+            }
+            Handed::File { name, bytes } => {
+                let name = handed_name(&name);
+                if !opens_safely(&name) {
+                    return err(
+                        ErrorKind::NotAllowed,
+                        format!(
+                            "\"{name}\" isn't a document, picture, sound or video, so it doesn't open in the person's session (programs, scripts and apps never do). Put it in a shared folder and tell them."
+                        ),
+                    );
+                }
+                let dir = self.paths.runtime.join("handed").join(now_ms().to_string());
+                let path = dir.join(&name);
+                let wrote = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, &bytes));
+                if let Err(e) = wrote {
+                    return err(ErrorKind::Failed, format!("couldn't keep the file to open: {e}"));
+                }
+                set_mode(&path, 0o444);
+                match sys::open_in_session(&path.display().to_string()) {
+                    Ok(()) => done(format!("Opened {name} for {who} (a copy in {}).", dir.display())),
+                    Err(e) => err(ErrorKind::Failed, e),
+                }
+            }
+            Handed::Clipboard(text) => match sys::copy_to_clipboard(&text) {
+                Ok(()) => done(format!("Copied {} characters to the clipboard for {who}.", text.chars().count())),
+                Err(e) => err(ErrorKind::Failed, e),
+            },
         }
     }
 
@@ -4553,6 +4610,49 @@ fn write_shell_files(runtime: &std::path::Path) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Put `dir` first on the environment's PATH.
+fn prepend_path(env: &mut Vec<(String, String)>, dir: &Path) {
+    match env.iter_mut().find(|(k, _)| k == "PATH") {
+        Some((_, p)) => *p = format!("{}:{p}", dir.display()),
+        None => env.push(("PATH".into(), format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", dir.display()))),
+    }
+}
+
+/// The names that hand things to your session from an agent's tab (see the `ctx` crate's
+/// bridge.rs): each runs `ctx bridge <name>`.
+fn write_bridges(dir: &Path, ctx: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    set_mode(dir, 0o755);
+    let q = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+    for name in ["open", "xdg-open", "pbcopy", "pbpaste"] {
+        let path = dir.join(name);
+        let text = format!("#!/bin/sh\nexec {} bridge {name} \"$@\"\n", q(&ctx.display().to_string()));
+        if std::fs::read_to_string(&path).ok().as_deref() != Some(text.as_str()) {
+            std::fs::write(&path, text)?;
+        }
+        set_mode(&path, 0o755);
+    }
+    Ok(())
+}
+
+/// A handed file's name: its last part, no leading dots, something even if empty.
+fn handed_name(name: &str) -> String {
+    let base = name.rsplit('/').next().unwrap_or("").trim_start_matches('.').trim();
+    if base.is_empty() { "file".into() } else { base.chars().filter(|c| !c.is_control()).collect() }
+}
+
+/// Kinds of file that open in a viewer or editor, never run: documents, pictures, sound and video.
+/// (An allow list: a new kind of runnable file must not slip through.)
+fn opens_safely(name: &str) -> bool {
+    const KINDS: &[&str] = &[
+        "pdf", "txt", "md", "markdown", "csv", "tsv", "json", "log", "rtf", "html", "htm", "xml", "yaml", "yml",
+        "toml", "tex", "bib", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "pages", "numbers",
+        "key", "epub", "png", "jpg", "jpeg", "gif", "webp", "heic", "tiff", "tif", "bmp", "svg", "ico", "mp3", "m4a",
+        "wav", "aac", "flac", "ogg", "mp4", "m4v", "mov", "webm", "mkv", "avi", "ics", "vcf", "eml",
+    ];
+    name.rsplit_once('.').is_some_and(|(_, ext)| KINDS.contains(&ext.to_ascii_lowercase().as_str()))
 }
 
 fn set_mode(path: &std::path::Path, mode: u32) {

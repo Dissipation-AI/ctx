@@ -343,6 +343,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")] // Seatbelt; on Linux /bin is a link to /usr/bin.
     fn only_root_owned_programs_run_outside() {
         let mine = std::env::current_exe().unwrap();
         let a = Agent { unsandboxed: vec!["/bin/ps".into(), mine.display().to_string()], ..Agent::default() };

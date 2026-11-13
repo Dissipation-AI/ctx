@@ -901,3 +901,69 @@ mod tests {
         }
     }
 }
+
+/// Open a link or file in the person's session (`open` on macOS, `xdg-open` on Linux).
+pub fn open_in_session(what: &str) -> Result<(), String> {
+    if let Some(r) = handed_to_log(&format!("open {what}")) {
+        return r;
+    }
+    let program = if cfg!(target_os = "macos") { "/usr/bin/open" } else { "xdg-open" };
+    let status = std::process::Command::new(program)
+        .arg("--")
+        .arg(what)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_err(|e| format!("couldn't run {program}: {e}"))?;
+    if status.success() { Ok(()) } else { Err(format!("{program} couldn't open it")) }
+}
+
+/// Put text on the person's clipboard (`pbcopy`; on Linux `wl-copy`, else `xclip`).
+pub fn copy_to_clipboard(text: &str) -> Result<(), String> {
+    use std::io::Write;
+    if let Some(r) = handed_to_log(&format!("copy {text}")) {
+        return r;
+    }
+    let candidates: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
+        &[("/usr/bin/pbcopy", &[])]
+    } else {
+        &[("wl-copy", &[]), ("xclip", &["-selection", "clipboard"])]
+    };
+    let mut last = String::from("no clipboard program");
+    for (program, args) in candidates {
+        let child = std::process::Command::new(program)
+            .args(*args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        match child {
+            Ok(mut c) => {
+                if let Some(mut i) = c.stdin.take() {
+                    let _ = i.write_all(text.as_bytes());
+                }
+                return match c.wait() {
+                    Ok(s) if s.success() => Ok(()),
+                    _ => Err(format!("{program} failed")),
+                };
+            }
+            Err(e) => last = format!("couldn't run {program}: {e}"),
+        }
+    }
+    Err(last)
+}
+
+/// Tests: with `CTX_HAND_LOG` set, what agents hand over is written there instead of reaching
+/// the session (so a test run never takes over your clipboard or opens windows).
+fn handed_to_log(line: &str) -> Option<Result<(), String>> {
+    use std::io::Write;
+    let path = std::env::var_os("CTX_HAND_LOG").filter(|p| !p.is_empty())?;
+    let r = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut f| writeln!(f, "{line}"))
+        .map_err(|e| e.to_string());
+    Some(r)
+}

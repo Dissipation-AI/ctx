@@ -391,6 +391,23 @@ pub enum Request {
     MakeSharedFolder {
         with: Vec<String>,
     },
+    /// `open`, `xdg-open` and `pbcopy` in an agent's tab: hand something to your session, which
+    /// the agent's account can't reach.
+    Hand {
+        what: Handed,
+    },
+}
+
+/// What an agent hands to your session.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub enum Handed {
+    /// A web or mail link, opened in your browser or mail program.
+    Link(String),
+    /// A file the agent could read, sent as its contents (so no path can be swapped under the
+    /// server), opened from a copy that can't run.
+    File { name: String, bytes: Vec<u8> },
+    /// Text for your clipboard.
+    Clipboard(String),
 }
 
 // ---------------------------------------------------------------------------------------------
