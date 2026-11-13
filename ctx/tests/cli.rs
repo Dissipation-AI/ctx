@@ -773,3 +773,39 @@ fn the_hook_sends_background_and_busy_calls_to_copies_of_the_session_tab() {
         s.ctx(&["press", "ctrl-c", "in", t]).ok();
     }
 }
+
+#[test]
+fn reopen_tabs_from_last_session_after_a_crash_and_a_clean_stop() {
+    let mut s = Server::start("last-session");
+    s.ctx(&["open", "window", "named", "Work", "at", "/tmp"]).ok();
+    s.ctx(&["open", "tab", "named", "One", "at", "/usr", "in", "window", "Work"]).ok();
+    s.ctx(&["open", "tab", "named", "Two", "at", "/tmp", "in", "window", "Work"]).ok();
+    s.ctx(&["run", "in", "One", "export SESSION_KEEP=yes"]).ok();
+    s.ctx(&["run", "in", "One", "true"]).ok();
+    let before = s.ctx(&["list", "tabs"]).ok().stdout.clone();
+    // A crash: nothing comes back by itself (reopen_on_launch = ask).
+    s.kill_hard();
+    s.spawn();
+    let after_crash = s.ctx(&["list", "tabs"]).ok().stdout.clone();
+    assert!(!after_crash.contains("\"One\""), "{after_crash}");
+    let o = s.ctx(&["reopen", "tabs", "from", "last", "session"]).ok().stdout.clone();
+    assert!(o.starts_with("Reopened 3 tabs from the last session"), "{o}");
+    let again = s.ctx(&["list", "tabs"]).ok().stdout.clone();
+    // (A reopened tab shows its recorded folder until its shell reports where it is.)
+    let same = |s: &str| s.replace("/private/tmp", "/tmp");
+    assert_eq!(same(&again), same(&before), "same tabs, numbers, names, folders and window");
+    assert_eq!(s.ctx(&["run", "in", "One", "echo $SESSION_KEEP"]).ok().stdout, "yes\n");
+    // Running it again finds nothing to do.
+    let o = s.ctx(&["reopen", "tabs", "from", "the", "last", "session"]).ok().stdout.clone();
+    assert_eq!(o.trim(), "Every tab from the last session is already open.");
+    // One tab closed by hand isn't part of the next session; a clean stop (SIGTERM) is.
+    s.ctx(&["close", "Two", "without", "asking"]).ok();
+    s.stop();
+    s.spawn();
+    let o = s.ctx(&["reopen", "tabs", "from", "last", "session"]).ok().stdout.clone();
+    assert!(o.starts_with("Reopened 2 tabs from the last session"), "{o}");
+    assert!(!s.ctx(&["list", "tabs"]).ok().stdout.contains("\"Two\""));
+    // …and a tab closed by hand comes back on its own.
+    s.ctx(&["reopen", "tab", "3"]).ok();
+    assert!(s.ctx(&["list", "tabs"]).ok().stdout.contains("tab 3 \"Two\""));
+}

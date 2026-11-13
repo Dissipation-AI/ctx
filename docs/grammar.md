@@ -143,6 +143,7 @@ ctx reopen "<tab>" [as json|toon]
 ```
 
 - `ctx reopen tab 40`: Bring back closed tab 40 as tab 40, with its name, folder and environment.
+- `ctx reopen tabs from last session`: Every tab that was open when the server last stopped (reboot, crash, restart), back in its window.
 
 ### `forget`
 

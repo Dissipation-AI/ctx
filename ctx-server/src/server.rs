@@ -155,6 +155,14 @@ fn done(msg: impl Into<String>) -> Handled {
     ok(Output::Done(Done { message: msg.into() }))
 }
 
+/// The tabs open when the server last stopped (`ctx reopen tabs from last session`).
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct LastSession {
+    tabs: Vec<u64>,
+    /// Their windows: number, name and tab order.
+    windows: Vec<(u64, Option<String>, Vec<u64>)>,
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct SavedState {
     /// Tabs to bring back when the server starts (after `ctx restart server`).
@@ -166,6 +174,8 @@ struct SavedState {
 
 pub struct Server {
     paths: Paths,
+    /// The window layout last written to disk (see `save_layout`).
+    saved_layout: Vec<(u64, Option<String>, Vec<u64>)>,
     config: Config,
     /// The sandbox the server itself runs in (see `sys::sandbox_root`); every tab inherits it.
     own_sandbox: Option<(i32, u64)>,
@@ -327,6 +337,7 @@ impl Server {
             dirty: Default::default(),
             last_frame: Instant::now(),
             server_exe: exe,
+            saved_layout: Vec::new(),
             starting: Vec::new(),
             current_id: None,
             relieved_at: 0,
@@ -339,9 +350,16 @@ impl Server {
     /// After a crash, reboot or restart: tabs the index thinks are open are marked
     /// interrupted, and tabs that should come back are reopened.
     fn recover(&mut self) {
-        let state: SavedState =
+        let mut state: SavedState =
             std::fs::read(self.paths.state()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
         let _ = std::fs::remove_file(self.paths.state());
+        // After a crash or a reboot there's no saved state; the layout file still has the windows.
+        if state.windows.is_empty() {
+            state.windows = std::fs::read(self.paths.layout())
+                .ok()
+                .and_then(|b| serde_json::from_slice(&b).ok())
+                .unwrap_or_default();
+        }
         let boot = sys::boot_time_secs() * 1000;
         let mut interrupted: Vec<(u64, i64)> = Vec::new();
         for t in self.index.open_tabs().unwrap_or_default() {
@@ -357,6 +375,21 @@ impl Server {
                 }
             }
             interrupted.push((t.number, at));
+        }
+        // The last session: what was open when the server stopped, however it stopped.
+        let mut last: Vec<u64> = state.last_open.clone();
+        last.extend(interrupted.iter().map(|(n, _)| *n).filter(|n| !state.last_open.contains(n)));
+        let session = LastSession {
+            tabs: last.clone(),
+            windows: state
+                .windows
+                .iter()
+                .filter(|(_, _, tabs)| tabs.iter().any(|t| last.contains(t)))
+                .cloned()
+                .collect(),
+        };
+        if let Ok(b) = serde_json::to_vec(&session) {
+            let _ = std::fs::write(self.paths.last_session(), b);
         }
         // Windows as they were.
         for (n, name, _) in &state.windows {
@@ -1152,6 +1185,11 @@ impl Server {
         ) {
             return no("Only CTX.app sends that.".into());
         }
+        if matches!(r, Request::ReopenLastSession) {
+            return no(format!(
+                "Only you reopen the last session's tabs, not the agent \"{p}\". Reopen one of your own with `ctx reopen tab <number>`."
+            ));
+        }
         let opens = matches!(r, Request::OpenTab { .. } | Request::OpenWindow { .. } | Request::Reopen { .. });
         if opens && !self.config.agents.contains_key(p) {
             return no(
@@ -1354,6 +1392,7 @@ impl Server {
             Request::ListTabs => ok(Output::Tabs(self.tab_list_for(Some(key)))),
             Request::ListClosedTabs { limit } => self.list_closed(key, limit),
             Request::Starters { limit } => self.starters(key, limit),
+            Request::ReopenLastSession => self.reopen_last_session(key),
             Request::Processes { tab } => self.processes(key, &tab),
             Request::ListCommands { tab, limit } => self.list_commands(key, &tab, limit),
             Request::ListActivity { filter, limit } => self.list_activity(key, filter, limit),
@@ -2616,6 +2655,62 @@ impl Server {
 
     // ----- reopening -----
 
+    /// Every tab of the last session that isn't open now, each back in its window (a window
+    /// that's gone comes back with its number, and its name when that's free).
+    fn reopen_last_session(&mut self, key: usize) -> Handled {
+        let session: LastSession = std::fs::read(self.paths.last_session())
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
+        let by = self.clients.get(&key).map(|c| c.identity.ran_by()).unwrap_or_else(|| "you".into());
+        let mut reopened = Vec::new();
+        let mut failed = Vec::new();
+        for &n in &session.tabs {
+            if self.tabs.contains_key(&n) || !self.paths.tab_log(n).exists() {
+                continue;
+            }
+            let old = session.windows.iter().find(|(_, _, tabs)| tabs.contains(&n));
+            let window = match old {
+                Some((w, _, _)) if self.windows.iter().any(|x| x.number == *w) => *w,
+                // Window numbers are never reused, so a closed window's number is still its own.
+                Some((w, name, _)) => {
+                    let name_free = name.as_deref().is_none_or(|nm| {
+                        !self.windows.iter().any(|x| x.name.as_deref().is_some_and(|o| o.eq_ignore_ascii_case(nm)))
+                    });
+                    self.windows.push(Window {
+                        number: *w,
+                        name: name.clone().filter(|_| name_free),
+                        tabs: Vec::new(),
+                    });
+                    *w
+                }
+                None => self.default_window(key),
+            };
+            match self.reopen_tab(n, window, Some("last session".into()), &by) {
+                Ok(o) => reopened.push(o.tab.unwrap_or(n)),
+                Err(e) => failed.push(format!("tab {n}: {}", e.message)),
+            }
+        }
+        // Keep each window's tab order.
+        for (w, _, order) in &session.windows {
+            if let Some(win) = self.windows.iter_mut().find(|x| x.number == *w) {
+                win.tabs.sort_by_key(|t| order.iter().position(|o| o == t).unwrap_or(usize::MAX));
+            }
+        }
+        self.windows.retain(|w| !w.tabs.is_empty());
+        let list = |v: &[u64]| v.iter().map(|n| format!("tab {n}")).collect::<Vec<_>>().join(", ");
+        let mut msg = match reopened.len() {
+            0 if session.tabs.is_empty() => "No tabs were open when the server last stopped.".to_string(),
+            0 => "Every tab from the last session is already open.".to_string(),
+            1 => format!("Reopened {} from the last session.", list(&reopened)),
+            k => format!("Reopened {k} tabs from the last session: {}.", list(&reopened)),
+        };
+        for f in failed {
+            msg.push_str(&format!("\nCouldn't reopen {f}"));
+        }
+        done(msg)
+    }
+
     fn reopen_tab(&mut self, n: u64, window: u64, reason: Option<String>, by: &str) -> Result<Opened, ErrorReply> {
         if self.tabs.contains_key(&n) {
             return Err(ErrorReply::new(ErrorKind::NotAllowed, format!("Tab {n} is already open.")));
@@ -3632,7 +3727,21 @@ impl Server {
         }
     }
 
+    /// The windows and their tabs, kept on disk whenever they change, so a crash or a reboot
+    /// (which skip `shutdown`) still knows which window each tab was in.
+    fn save_layout(&mut self) {
+        let layout: Vec<(u64, Option<String>, Vec<u64>)> =
+            self.windows.iter().map(|w| (w.number, w.name.clone(), w.tabs.clone())).collect();
+        if layout != self.saved_layout {
+            if let Ok(b) = serde_json::to_vec(&layout) {
+                let _ = std::fs::write(self.paths.layout(), b);
+            }
+            self.saved_layout = layout;
+        }
+    }
+
     fn broadcast_tabs(&mut self) {
+        self.save_layout();
         let apps: Vec<usize> =
             self.clients.iter().filter(|(_, c)| matches!(c.mode, Mode::App(_))).map(|(k, _)| *k).collect();
         if apps.is_empty() {
