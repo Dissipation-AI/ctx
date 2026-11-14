@@ -48,8 +48,10 @@ owner=$1
 id -u "$owner" >/dev/null
 for b in ctx ctx-launch ctx-helper; do
     [ -x "$here/target/release/$b" ] || { echo "build ctx first (as $owner: cargo build --release)" >&2; exit 1; }
-    # A build older than the source would install yesterday's ctx.
-    newer=$(find "$here" -path "$here/target" -prune -o \( -name '*.rs' -o -name Cargo.toml -o -name Cargo.lock \) -newer "$here/target/release/$b" -print | head -1)
+    # A build older than its source would install yesterday's ctx. Cargo's dep-info file
+    # (target/release/<bin>.d) lists exactly the source files the binary was built from.
+    newer=$(sed 's/^[^:]*: //; s/\\ /%SP%/g' "$here/target/release/$b.d" | tr ' ' '\n' | sed 's/%SP%/ /g' |
+        while IFS= read -r f; do [ -n "$f" ] && [ "$f" -nt "$here/target/release/$b" ] && { echo "$f"; break; }; done)
     [ -z "$newer" ] || { echo "target/release/$b is older than $newer; rebuild first (as $owner: cargo build --release)" >&2; exit 1; }
 done
 
