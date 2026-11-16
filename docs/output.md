@@ -23,7 +23,7 @@ Errors have the same shape everywhere:
 
 Open windows and their tabs.
 
-Fields: `schema` (number), `windows` (list), `windows[].number` (number), `windows[].name` (text), `windows[].tabs` (list), `windows[].tabs[].number` (number), `windows[].tabs[].name` (text), `windows[].tabs[].folder` (text), `windows[].tabs[].window` (number), `windows[].tabs[].opened_by` (text), `windows[].tabs[].owner` (text), `windows[].tabs[].title` (nullable), `windows[].tabs[].state` (text), `windows[].tabs[].running` (text), `windows[].tabs[].pid` (number), `windows[].tabs[].started` (text), `windows[].tabs[].unread_lines` (number), `windows[].tabs[].columns` (number), `windows[].tabs[].rows` (number), `windows[].tabs[].shell_integration` (boolean), `windows[].tabs[].permissions_of` (nullable), `windows[].tabs[].remote_host` (nullable), `caller` (nullable).
+Fields: `schema` (number), `windows` (list), `windows[].number` (number), `windows[].name` (text), `windows[].tabs` (list), `windows[].tabs[].number` (number), `windows[].tabs[].name` (text), `windows[].tabs[].folder` (text), `windows[].tabs[].window` (number), `windows[].tabs[].opened_by` (text), `windows[].tabs[].owner` (text), `windows[].tabs[].title` (nullable), `windows[].tabs[].state` (text), `windows[].tabs[].running` (text), `windows[].tabs[].pid` (number), `windows[].tabs[].started` (text), `windows[].tabs[].unread_lines` (number), `windows[].tabs[].columns` (number), `windows[].tabs[].rows` (number), `windows[].tabs[].shell_integration` (boolean), `windows[].tabs[].permissions_of` (nullable), `windows[].tabs[].remote_host` (nullable), `windows[].tabs[].remote_command` (nullable), `windows[].tabs[].remote_name` (nullable), `caller` (nullable).
 
 ```json
 {
@@ -50,7 +50,9 @@ Fields: `schema` (number), `windows` (list), `windows[].number` (number), `windo
           "rows": 40,
           "shell_integration": true,
           "permissions_of": null,
-          "remote_host": null
+          "remote_host": null,
+          "remote_command": null,
+          "remote_name": null
         }
       ]
     }
@@ -64,8 +66,8 @@ schema: 1
 windows[1]:
   - number: 2
     name: Work
-    tabs[1]{number,name,folder,window,opened_by,owner,title,state,running,pid,started,unread_lines,columns,rows,shell_integration,permissions_of,remote_host}:
-      43,Dev server,/Users/c/code/site,2,"dev (claude, pid 5512)",dev,null,busy,npm run dev,81234,"2026-10-10T17:52:01Z",12,120,40,true,null,null
+    tabs[1]{number,name,folder,window,opened_by,owner,title,state,running,pid,started,unread_lines,columns,rows,shell_integration,permissions_of,remote_host,remote_command,remote_name}:
+      43,Dev server,/Users/c/code/site,2,"dev (claude, pid 5512)",dev,null,busy,npm run dev,81234,"2026-10-10T17:52:01Z",12,120,40,true,null,null,null,null
 caller: null
 ```
 
@@ -428,7 +430,7 @@ Fields: `schema` (number), `version` (text), `protocol` (number), `pid` (number)
 {
   "schema": 1,
   "version": "0.1.0",
-  "protocol": 9,
+  "protocol": 10,
   "pid": 81200,
   "uptime_seconds": 3600,
   "socket": "/var/folders/xx/T/ctx-501/server.sock",
@@ -448,7 +450,7 @@ Fields: `schema` (number), `version` (text), `protocol` (number), `pid` (number)
 ```
 schema: 1
 version: "0.1.0"
-protocol: 9
+protocol: 10
 pid: 81200
 uptime_seconds: 3600
 socket: /var/folders/xx/T/ctx-501/server.sock

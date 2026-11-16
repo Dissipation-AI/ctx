@@ -863,6 +863,25 @@ impl Tab {
         self.ssh_target.is_some()
     }
 
+    /// Inside ssh, the remote command running now: the innermost command above the `ssh` one,
+    /// when the remote shell marks its commands (never one guessed from the screen).
+    pub fn remote_command(&self) -> Option<String> {
+        if !self.in_ssh() || !self.remote_marks || self.running.len() < 2 {
+            return None;
+        }
+        self.running.last().filter(|r| !r.approximate && !r.text.is_empty()).map(|r| r.text.clone())
+    }
+
+    /// Inside ssh, the remote machine's name as its shell reports it (`user@host` → `host`).
+    pub fn remote_name(&self) -> Option<String> {
+        if !self.in_ssh() {
+            return None;
+        }
+        let loc = self.remote_location.as_deref()?;
+        let host = loc.rsplit('@').next().unwrap_or(loc);
+        (!host.is_empty()).then(|| host.to_string())
+    }
+
     /// Enter was pressed (by a person or an agent). Inside ssh without remote marks, the line at
     /// the cursor (prompt and command, as the screen shows it; never keystrokes) becomes an
     /// approximate command.

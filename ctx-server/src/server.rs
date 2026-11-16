@@ -1485,6 +1485,8 @@ impl Server {
             shell_integration: t.integration,
             permissions_of,
             remote_host: t.ssh_target.clone(),
+            remote_command: t.remote_command(),
+            remote_name: t.remote_name(),
         }
     }
 

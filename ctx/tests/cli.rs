@@ -323,6 +323,28 @@ fn ssh_sessions_are_recorded_with_remote_marks() {
     s.ctx(&["wait", "until", "Remote", "is", "quiet", "for", "2", "seconds", "within", "20", "seconds"]).ok();
     let o = s.ctx(&["run", "in", "Remote", "cd /usr && echo remote-$CTX_REMOTE && pwd"]);
     assert_eq!(o.stdout, "remote-1\n/usr\n", "{}", o.stderr);
+    // The app hears the remote command while it runs, and the machine's own name; at the remote
+    // prompt, no command.
+    let remote_tab = |s: &Server| {
+        let o = s.ctx(&["list", "tabs", "as", "json"]).ok().stdout.clone();
+        let v: serde_json::Value = serde_json::from_str(&o).unwrap();
+        v["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|w| w["tabs"].as_array().unwrap().clone())
+            .find(|t| t["name"] == "Remote")
+            .unwrap()
+    };
+    s.ctx(&["run", "in", "Remote", "sleep 3", "without", "waiting"]).ok();
+    std::thread::sleep(std::time::Duration::from_millis(800));
+    let t = remote_tab(&s);
+    assert_eq!(t["remote_command"], "sleep 3", "{t}");
+    let host = String::from_utf8(std::process::Command::new("hostname").arg("-s").output().unwrap().stdout).unwrap();
+    assert!(t["remote_name"].as_str().is_some_and(|n| n.starts_with(host.trim())), "{t}");
+    std::thread::sleep(std::time::Duration::from_millis(3500)); // the remote sleep ends
+    let t = remote_tab(&s);
+    assert!(t["remote_command"].is_null() && t["remote_host"] == "testhost", "{t}");
     s.ctx(&["run", "in", "Remote", "exit", "within", "5", "seconds"]);
     s.ctx(&["wait", "until", "Remote", "is", "idle", "within", "10", "seconds"]).ok();
     let o = s.ctx(&["list", "commands", "in", "Remote", "as", "json"]).ok().stdout.clone();
