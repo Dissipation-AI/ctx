@@ -218,7 +218,7 @@ the server couldn't be reached, 3 if a time limit ran out. For `run`, the comman
 |---|---|
 | `ctx open window` | A new window with one tab in your home folder. |
 | `ctx open window at ~/code/site` | …starting in that folder. |
-| `ctx open tab` | A new tab in the current window (window 1 when headless; the Agents window for agents). |
+| `ctx open tab` | A new tab in the current window (window 1 when headless; the Agents window for agents, even one running in your tab). |
 | `ctx open tab in window 2 at ~/code/site named "Dev server"` | Any combination of which window, which folder and a name. To start something in it, use `ctx run … without waiting`. |
 | `ctx open tab like "Dev server"` | A copy of that tab, beside it: its folder, exported variables (as of its last prompt) and command history, in a new shell, so nothing it's running. Named `Dev server 2` (then `3`…) unless `named` says otherwise; `at` and `in window` still apply. Unexported variables, functions and aliases live only in the old shell and aren't copied. Copying needs permission to drive that tab, since its variables come along. The new tab's first line says what it copies. |
 | `ctx close "Dev server"` | Close that tab. Asks first if something is running. |
