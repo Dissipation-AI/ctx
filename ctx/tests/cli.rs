@@ -360,6 +360,51 @@ fn ssh_sessions_are_recorded_with_remote_marks() {
     assert!(screen.contains("[ssh to testhost started") && screen.contains("[ssh to testhost ended"), "{screen}");
 }
 
+/// Ctrl-C at the password prompt (or any interrupt before the session opens) once left the tab
+/// named after the host: the `ssh()` function was aborted before it could send the end mark.
+#[test]
+fn interrupting_ssh_before_it_connects_clears_the_remote_host() {
+    let s = Server::start("ssh-interrupt");
+    // A port that accepts TCP but never speaks SSH, so `ssh` hangs before auth — a stand-in for
+    // sitting at the password prompt. Kept bound for the test's life.
+    let _listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = _listener.local_addr().unwrap().port();
+    s.ctx(&["open", "tab", "named", "Hang", "at", "/tmp"]).ok();
+    let remote_host = |s: &Server| -> Option<String> {
+        let o = s.ctx(&["list", "tabs", "as", "json"]).ok().stdout.clone();
+        let v: serde_json::Value = serde_json::from_str(&o).ok()?;
+        v["windows"]
+            .as_array()?
+            .iter()
+            .flat_map(|w| w["tabs"].as_array().unwrap().clone())
+            .find(|t| t["name"] == "Hang")?["remote_host"]
+            .as_str()
+            .map(str::to_string)
+    };
+    s.ctx(&["run", "in", "Hang", &format!("ssh -p {port} -o ConnectTimeout=30 127.0.0.1"), "without", "waiting"]).ok();
+    // Wait until it's mid-connection: ssh;start has set the remote host.
+    let mut connecting = false;
+    for _ in 0..50 {
+        if remote_host(&s).is_some() {
+            connecting = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(connecting, "ssh should be mid-connection with the remote host set");
+    // Ctrl-C while it hangs: back at the local prompt, the tab is no longer named after the host.
+    s.ctx(&["press", "ctrl-c", "in", "Hang"]).ok();
+    let mut cleared = false;
+    for _ in 0..50 {
+        if remote_host(&s).is_none() {
+            cleared = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(cleared, "interrupting ssh before it connects must clear the remote host");
+}
+
 #[test]
 fn ctx_app_subscription_gets_screens_and_sends_input() {
     use ctx_protocol::*;

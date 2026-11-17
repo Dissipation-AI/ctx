@@ -124,18 +124,23 @@ ssh() {
         skip=1
     fi
     _ctx_osc "6973;ssh;start;$target"
-    local st
-    if (( skip )); then
-        command ssh "$@"
-    else
-        command ssh -t "$@" "$CTX_SSH_COMMAND"
-    fi
-    st=$?
-    if (( st == 255 )); then
-        _ctx_osc "6973;ssh;end;$target;connection lost"
-    else
-        _ctx_osc "6973;ssh;end;$target;closed"
-    fi
+    # `always` so the end marker fires even when Ctrl-C at the password prompt interrupts this
+    # function; otherwise ssh;start had no ssh;end and the tab kept the remote host as its name.
+    local st=255
+    {
+        if (( skip )); then
+            command ssh "$@"
+        else
+            command ssh -t "$@" "$CTX_SSH_COMMAND"
+        fi
+        st=$?
+    } always {
+        if (( st == 255 )); then
+            _ctx_osc "6973;ssh;end;$target;connection lost"
+        else
+            _ctx_osc "6973;ssh;end;$target;closed"
+        fi
+    }
     return $st
 }
 
