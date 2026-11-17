@@ -11,4 +11,6 @@ elif [ -r "$HOME/.profile" ]; then . "$HOME/.profile"; fi
 [ -n "$CTX_NO_PAGER" ] && export PAGER=cat GIT_PAGER=cat MANPAGER=cat GH_PAGER=cat PSQL_PAGER=cat AWS_PAGER= SYSTEMD_PAGER= && set +H
 # A tab standing in for an agent's own shell: no job control, as in `bash -c` (no job notices).
 [ -n "$CTX_NO_JOBS" ] && set +m
-unset CTX_PREFILL CTX_INTEGRATION CTX_NO_PAGER CTX_NO_JOBS
+# ...and its commands go to a history file of agents' own (bash reads HISTFILE after this file).
+[ -n "$CTX_AGENT_HISTORY" ] && HISTFILE=$CTX_AGENT_HISTORY
+unset CTX_PREFILL CTX_INTEGRATION CTX_NO_PAGER CTX_NO_JOBS CTX_AGENT_HISTORY

@@ -323,6 +323,28 @@ fn ssh_sessions_are_recorded_with_remote_marks() {
     s.ctx(&["wait", "until", "Remote", "is", "quiet", "for", "2", "seconds", "within", "20", "seconds"]).ok();
     let o = s.ctx(&["run", "in", "Remote", "cd /usr && echo remote-$CTX_REMOTE && pwd"]);
     assert_eq!(o.stdout, "remote-1\n/usr\n", "{}", o.stderr);
+    // The app hears the remote command while it runs, and the machine's own name; at the remote
+    // prompt, no command.
+    let remote_tab = |s: &Server| {
+        let o = s.ctx(&["list", "tabs", "as", "json"]).ok().stdout.clone();
+        let v: serde_json::Value = serde_json::from_str(&o).unwrap();
+        v["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|w| w["tabs"].as_array().unwrap().clone())
+            .find(|t| t["name"] == "Remote")
+            .unwrap()
+    };
+    s.ctx(&["run", "in", "Remote", "sleep 3", "without", "waiting"]).ok();
+    std::thread::sleep(std::time::Duration::from_millis(800));
+    let t = remote_tab(&s);
+    assert_eq!(t["remote_command"], "sleep 3", "{t}");
+    let host = String::from_utf8(std::process::Command::new("hostname").arg("-s").output().unwrap().stdout).unwrap();
+    assert!(t["remote_name"].as_str().is_some_and(|n| n.starts_with(host.trim())), "{t}");
+    std::thread::sleep(std::time::Duration::from_millis(3500)); // the remote sleep ends
+    let t = remote_tab(&s);
+    assert!(t["remote_command"].is_null() && t["remote_host"] == "testhost", "{t}");
     s.ctx(&["run", "in", "Remote", "exit", "within", "5", "seconds"]);
     s.ctx(&["wait", "until", "Remote", "is", "idle", "within", "10", "seconds"]).ok();
     let o = s.ctx(&["list", "commands", "in", "Remote", "as", "json"]).ok().stdout.clone();
@@ -647,4 +669,79 @@ fn ctx_folders_are_made_and_in_every_tabs_environment() {
     let o = s.ctx(&["run", "in", "Env", "echo $CTX_AGENTS $CTX_CONTEXT $CTX_WORKSPACES"]).ok().stdout.clone();
     let h = s.home.display();
     assert_eq!(o, format!("{h}/Agents {h}/Context {h}/Workspaces\n"));
+}
+
+#[test]
+fn an_agent_in_your_tab_opens_its_tabs_out_of_your_window() {
+    let s = Server::start("agent-window");
+    // In a window of its own: the test may itself run under an agent, whose tabs go to "Agents".
+    s.ctx(&["open", "tab", "in", "new", "window", "named", "Mine", "at", "/tmp"]).ok();
+    let ctx = common::ctx_bin().display().to_string();
+    let agent_opens = |name: &str| {
+        s.ctx(&["run", "in", "Mine", &format!("CTX_AGENT_NAME=claude '{ctx}' open tab named {name}")]).ok();
+        let o = s.ctx(&["list", "tabs"]).ok().stdout.clone();
+        let window =
+            o.lines().take_while(|l| !l.contains(&format!("\"{name}\""))).filter(|l| l.starts_with("window")).last();
+        window.unwrap_or_default().to_string()
+    };
+    assert!(agent_opens("Helper").ends_with("\"Agents\""));
+    // You still get yours beside you.
+    s.ctx(&["run", "in", "Mine", &format!("'{ctx}' open tab named Yours")]).ok();
+    let o = s.ctx(&["list", "tabs"]).ok().stdout.clone();
+    let mine = o.lines().take_while(|l| !l.contains("\"Mine\"")).filter(|l| l.starts_with("window")).last().unwrap();
+    let yours = o.lines().take_while(|l| !l.contains("\"Yours\"")).filter(|l| l.starts_with("window")).last().unwrap();
+    assert_eq!(mine, yours, "{o}");
+}
+
+#[test]
+fn reopened_tabs_go_back_to_their_windows_and_agents_tabs_to_theirs() {
+    let mut s = Server::start("reopen-windows");
+    let ctx = common::ctx_bin().display().to_string();
+    // The test is an agent: "Seed" is an agent's tab; it opens two of yours, each in a window.
+    s.ctx(&["open", "tab", "named", "Seed", "at", "/tmp"]).ok();
+    for name in ["Left", "Right"] {
+        let you = format!("env -u CTX_AGENT_NAME '{ctx}' open tab in new window named {name} at /tmp");
+        s.ctx(&["run", "in", "Seed", &you]).ok();
+    }
+    let window_of = |list: &str, name: &str| {
+        list.lines()
+            .take_while(|l| !l.contains(&format!("\"{name}\"")))
+            .filter(|l| l.starts_with("window"))
+            .last()
+            .unwrap_or_default()
+            .to_string()
+    };
+    let before = s.ctx(&["list", "tabs"]).ok().stdout.clone();
+    let (a, b) = (window_of(&before, "Left"), window_of(&before, "Right"));
+    assert!(a != b && !a.is_empty(), "{before}");
+    let number = |name: &str| {
+        let l = before.lines().find(|l| l.contains(&format!("\"{name}\""))).unwrap();
+        l.split_whitespace().nth(1).unwrap().to_string()
+    };
+    let tabs: Vec<String> = ["Seed", "Left", "Right"].iter().map(|n| number(n)).collect();
+    s.kill_hard();
+    s.spawn();
+    for t in &tabs {
+        s.ctx(&["reopen", "tab", t]).ok();
+    }
+    let after = s.ctx(&["list", "tabs"]).ok().stdout.clone();
+    assert_eq!((window_of(&after, "Left"), window_of(&after, "Right")), (a, b), "{after}");
+    assert!(window_of(&after, "Seed").ends_with("\"Agents\""), "{after}");
+}
+
+#[test]
+fn agents_commands_stay_out_of_your_shell_history() {
+    let s = Server::start("agent-history");
+    std::fs::write(s.home.join(".zshrc"), "HISTFILE=~/.hist\nHISTSIZE=100\nSAVEHIST=100\nsetopt share_history\n")
+        .unwrap();
+    let ctx = common::ctx_bin().display().to_string();
+    // The test is an agent; it opens a tab for you from inside its own.
+    s.ctx(&["open", "tab", "named", "Agent", "at", "/tmp"]).ok();
+    s.ctx(&["run", "in", "Agent", &format!("env -u CTX_AGENT_NAME '{ctx}' open tab named Yours at /tmp")]).ok();
+    s.ctx(&["run", "in", "Agent", "echo agent-ran-this"]).ok();
+    s.ctx(&["run", "in", "Yours", "echo you-ran-this"]).ok();
+    let yours = std::fs::read_to_string(s.home.join(".hist")).unwrap_or_default();
+    assert!(yours.contains("you-ran-this") && !yours.contains("agent-ran-this"), "{yours}");
+    let agents = std::fs::read_to_string(s.dir.join("data/agent-history.zsh")).unwrap_or_default();
+    assert!(agents.contains("agent-ran-this") && !agents.contains("you-ran-this"), "{agents}");
 }

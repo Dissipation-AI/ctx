@@ -189,6 +189,9 @@ pub struct Tab {
     /// Command text reported just before its start mark.
     pub pending_text: Option<String>,
     pub running: Vec<Running>,
+    /// The foreground process group the clients were last told about (`TabInfo.pid`), so a
+    /// program taking the terminal (`cd dir && python`: python, after cd) is announced.
+    pub shown_foreground: Option<i32>,
     /// The last few finished commands, kept for `run`'s answer.
     pub finished: VecDeque<Running>,
     pub next_command: u64,
@@ -861,6 +864,25 @@ impl Tab {
 
     pub fn in_ssh(&self) -> bool {
         self.ssh_target.is_some()
+    }
+
+    /// Inside ssh, the remote command running now: the innermost command above the `ssh` one,
+    /// when the remote shell marks its commands (never one guessed from the screen).
+    pub fn remote_command(&self) -> Option<String> {
+        if !self.in_ssh() || !self.remote_marks || self.running.len() < 2 {
+            return None;
+        }
+        self.running.last().filter(|r| !r.approximate && !r.text.is_empty()).map(|r| r.text.clone())
+    }
+
+    /// Inside ssh, the remote machine's name as its shell reports it (`user@host` → `host`).
+    pub fn remote_name(&self) -> Option<String> {
+        if !self.in_ssh() {
+            return None;
+        }
+        let loc = self.remote_location.as_deref()?;
+        let host = loc.rsplit('@').next().unwrap_or(loc);
+        (!host.is_empty()).then(|| host.to_string())
     }
 
     /// Enter was pressed (by a person or an agent). Inside ssh without remote marks, the line at

@@ -1404,7 +1404,8 @@ impl Server {
             Request::Move { tab, to, position } => self.move_tab(key, &tab, &to, position),
             Request::Clear { tab } => self.clear(key, &tab),
             Request::Reopen { tab } => {
-                let window = self.default_window(key);
+                let session = self.last_session();
+                let window = self.reopen_window(key, tab, &session);
                 let by = self.clients.get(&key).map(|c| c.identity.ran_by()).unwrap_or_else(|| "you".into());
                 match self.reopen_tab(tab, window, None, &by) {
                     Ok(o) => self.when_ready(key, o),
@@ -1485,6 +1486,8 @@ impl Server {
             shell_integration: t.integration,
             permissions_of,
             remote_host: t.ssh_target.clone(),
+            remote_command: t.remote_command(),
+            remote_name: t.remote_name(),
         }
     }
 
@@ -1712,18 +1715,15 @@ impl Server {
 
     /// Where a new tab goes when no window is named.
     fn default_window(&mut self, key: usize) -> u64 {
+        // An agent's tabs go to the Agents window even when the agent runs in one of your tabs:
+        // they'd crowd the window you're working in. You see them from Overview or by showing it.
+        if self.clients.get(&key).is_some_and(|c| c.identity.is_agent && !c.identity.is_app) {
+            return self.agent_window();
+        }
         if let Some(t) = self.client_tab(key)
             && let Some(tab) = self.tabs.get(&t)
         {
             return tab.window;
-        }
-        let is_agent = self.clients.get(&key).is_some_and(|c| c.identity.is_agent && !c.identity.is_app);
-        if is_agent {
-            let name = self.config.agent_window_name.clone();
-            if let Some(w) = self.windows.iter().find(|w| w.name.as_deref() == Some(name.as_str())) {
-                return w.number;
-            }
-            return self.new_window(Some(name));
         }
         if let Some(w) = self.last_window.filter(|w| self.windows.iter().any(|x| x.number == *w)) {
             return w;
@@ -1736,6 +1736,45 @@ impl Server {
             return w.number;
         }
         self.new_window(None)
+    }
+
+    fn last_session(&self) -> LastSession {
+        std::fs::read(self.paths.last_session()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    }
+
+    /// Where a reopened tab goes: back into its window, the one the last session had it in, else
+    /// the one the tab index recorded. A window that's gone comes back with its number (window
+    /// numbers are never reused), and its name when that's free. Not known: an agent's tab goes to
+    /// the Agents window, never into yours; yours goes where a new tab would.
+    fn reopen_window(&mut self, key: usize, n: u64, session: &LastSession) -> u64 {
+        let row = self.index.tab(n).ok().flatten();
+        let agents = row.as_ref().is_some_and(|r| r.opened_by != "you");
+        let was = session
+            .windows
+            .iter()
+            .find(|(_, _, tabs)| tabs.contains(&n))
+            .map(|(w, name, _)| (*w, name.clone()))
+            .or_else(|| row.map(|r| (r.window, None)))
+            .filter(|(w, _)| *w != 0);
+        let Some((w, name)) = was else {
+            return if agents { self.agent_window() } else { self.default_window(key) };
+        };
+        if !self.windows.iter().any(|x| x.number == w) {
+            let name_free = name.as_deref().is_none_or(|nm| {
+                !self.windows.iter().any(|x| x.name.as_deref().is_some_and(|o| o.eq_ignore_ascii_case(nm)))
+            });
+            self.windows.push(Window { number: w, name: name.filter(|_| name_free), tabs: Vec::new() });
+        }
+        w
+    }
+
+    /// The Agents window, made if it's gone.
+    fn agent_window(&mut self) -> u64 {
+        let name = self.config.agent_window_name.clone();
+        if let Some(w) = self.windows.iter().find(|w| w.name.as_deref() == Some(name.as_str())) {
+            return w.number;
+        }
+        self.new_window(Some(name))
     }
 
     /// Answer `open` once the new shell is ready for commands (its first prompt), so a `run`
@@ -2018,6 +2057,10 @@ impl Server {
         let opener = reopen.as_ref().map(|r| r.opened_by.as_str()).unwrap_or(opened_by);
         if opener != "you" {
             env.push(("CTX_NO_PAGER".into(), "1".into()));
+            // ...and its commands go to a history file of agents' own, not into yours, where ↑ in
+            // your tabs would bring them up (zsh's share_history reads them in live).
+            let file = self.paths.data.join(format!("agent-history.{shell_name}"));
+            env.push(("CTX_AGENT_HISTORY".into(), file.display().to_string()));
         }
         // A tab a hook opened stands in for the agent's own shell (`bash -c`), which has no job
         // control: `cmd &` there prints no "[1] 12345" and no "done" line later.
@@ -2143,6 +2186,7 @@ impl Server {
             typing: false,
             pending_text: None,
             running: Vec::new(),
+            shown_foreground: None,
             finished: Default::default(),
             next_command: reopen.as_ref().map(|r| r.next_command).unwrap_or(1),
             last_exit: None,
@@ -2284,7 +2328,9 @@ impl Server {
             set(env, k, v.display().to_string());
         }
         // Your launchers, history and files aren't the agent's.
-        env.retain(|(k, _)| !matches!(k.as_str(), "CTX_LAUNCHERS" | "CTX_REOPEN_HISTORY" | "CTX_USER_ZDOTDIR"));
+        env.retain(|(k, _)| {
+            !matches!(k.as_str(), "CTX_LAUNCHERS" | "CTX_REOPEN_HISTORY" | "CTX_AGENT_HISTORY" | "CTX_USER_ZDOTDIR")
+        });
         if let Some(bin) = self.server_exe.parent() {
             prepend_path(env, bin);
         }
@@ -2660,10 +2706,7 @@ impl Server {
     /// Every tab of the last session that isn't open now, each back in its window (a window
     /// that's gone comes back with its number, and its name when that's free).
     fn reopen_last_session(&mut self, key: usize) -> Handled {
-        let session: LastSession = std::fs::read(self.paths.last_session())
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default();
+        let session = self.last_session();
         let by = self.clients.get(&key).map(|c| c.identity.ran_by()).unwrap_or_else(|| "you".into());
         let mut reopened = Vec::new();
         let mut failed = Vec::new();
@@ -2671,23 +2714,7 @@ impl Server {
             if self.tabs.contains_key(&n) || !self.paths.tab_log(n).exists() {
                 continue;
             }
-            let old = session.windows.iter().find(|(_, _, tabs)| tabs.contains(&n));
-            let window = match old {
-                Some((w, _, _)) if self.windows.iter().any(|x| x.number == *w) => *w,
-                // Window numbers are never reused, so a closed window's number is still its own.
-                Some((w, name, _)) => {
-                    let name_free = name.as_deref().is_none_or(|nm| {
-                        !self.windows.iter().any(|x| x.name.as_deref().is_some_and(|o| o.eq_ignore_ascii_case(nm)))
-                    });
-                    self.windows.push(Window {
-                        number: *w,
-                        name: name.clone().filter(|_| name_free),
-                        tabs: Vec::new(),
-                    });
-                    *w
-                }
-                None => self.default_window(key),
-            };
+            let window = self.reopen_window(key, n, &session);
             match self.reopen_tab(n, window, Some("last session".into()), &by) {
                 Ok(o) => reopened.push(o.tab.unwrap_or(n)),
                 Err(e) => failed.push(format!("tab {n}: {}", e.message)),
@@ -3826,6 +3853,11 @@ impl Server {
             t.refresh_password_input();
             fx
         };
+        // A new program in front (it printed, so it's there now): clients show its name.
+        let foreground_changed = self.tabs.get_mut(&n).is_some_and(|t| {
+            let fg = sys::foreground_pgid(t.fd());
+            std::mem::replace(&mut t.shown_foreground, fg) != fg
+        });
         // Attached terminals get the raw output (minus ctx's private reports).
         let attached: Vec<usize> =
             self.clients.iter().filter(|(_, c)| c.mode == Mode::Attached(n)).map(|(k, _)| *k).collect();
@@ -3840,7 +3872,13 @@ impl Server {
         {
             t.to_pty.extend_from_slice(&fx.replies);
         }
-        if fx.title_changed || fx.folder_changed || !fx.started.is_empty() || !fx.finished.is_empty() || fx.prompt {
+        if fx.title_changed
+            || fx.folder_changed
+            || !fx.started.is_empty()
+            || !fx.finished.is_empty()
+            || fx.prompt
+            || foreground_changed
+        {
             self.broadcast_tabs();
         }
         if let Some(c) = &fx.clipboard {

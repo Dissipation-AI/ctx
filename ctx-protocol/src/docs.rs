@@ -23,6 +23,8 @@ fn tab() -> TabInfo {
         shell_integration: true,
         permissions_of: None,
         remote_host: None,
+        remote_command: None,
+        remote_name: None,
     }
 }
 
