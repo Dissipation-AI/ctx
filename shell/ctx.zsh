@@ -44,11 +44,12 @@ _ctx_report_env() {
 
 _ctx_mark_prompt() {
     # Run first, so $? is the command's own status; re-applied each time because prompt themes
-    # rebuild PS1 and reorder hooks.
+    # rebuild PS1 and reorder hooks. The marks are moved back to the ends too: the terminal starts a
+    # new line at a prompt mark, so anything put in front of it (conda's "(base) ") would sit on a
+    # line of its own.
     [[ "${precmd_functions[1]}" == _ctx_precmd ]] || precmd_functions=(_ctx_precmd ${precmd_functions:#_ctx_precmd})
-    if [[ "$PS1" != *$'\e]133;A'* ]]; then
-        PS1=$'%{\e]133;A\a%}'"$PS1"$'%{\e]133;B\a%}'
-    fi
+    local a=$'%{\e]133;A\a%}' b=$'%{\e]133;B\a%}'
+    PS1=$a${${PS1//"$a"}//"$b"}$b
 }
 
 _ctx_precmd() {
