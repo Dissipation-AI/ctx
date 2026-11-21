@@ -326,7 +326,8 @@ ctx help ["<text>"]
 - `ctx show agent "email-agent"`: Its account, administrators, grants, limits and tabs.
 - `ctx limit agent "email-agent" to 8 GB of memory`: Also: 200 processes, low priority, normal priority, nothing.
 - `ctx rename agent "email-agent" to "Email"`: The full name shown beside the account name.
-- `ctx reset agent "email-agent"`: Rewrite its ctx-agent.toml as yours, with the defaults, and install ctx's hooks and skills for its agent programs again.
+- `ctx reset agent "email-agent"`: Rewrite its ctx-agent.toml as yours, with the defaults (after it replaced the file).
+- `ctx set up agent "email-agent"`: Install ctx's hooks and skills for each agent program it can run (done when it's made; again after you add or update one).
 - `ctx remove agent "email-agent"`: Delete the account; its home stays. Add `with its files` to trash it too.
 - `ctx make space named "research"`: A folder agents work in together: only the agents you add, and you, may use it.
 - `ctx add agent "email-agent" to space "research"`: It may read and write the space (its new tabs).

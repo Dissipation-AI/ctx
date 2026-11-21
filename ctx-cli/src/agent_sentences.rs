@@ -66,6 +66,10 @@ pub enum AgentCommand {
     Reset {
         name: String,
     },
+    /// ctx's hooks and skills for each agent program on its PATH, installed as the agent.
+    SetUp {
+        name: String,
+    },
     MakeSpace {
         name: String,
     },
@@ -109,7 +113,11 @@ pub const EXAMPLES: &[(&str, &str)] = &[
     ("ctx rename agent \"email-agent\" to \"Email\"", "The full name shown beside the account name."),
     (
         "ctx reset agent \"email-agent\"",
-        "Rewrite its ctx-agent.toml as yours, with the defaults, and install ctx's hooks and skills for its agent programs again.",
+        "Rewrite its ctx-agent.toml as yours, with the defaults (after it replaced the file).",
+    ),
+    (
+        "ctx set up agent \"email-agent\"",
+        "Install ctx's hooks and skills for each agent program it can run (done when it's made; again after you add or update one).",
     ),
     ("ctx remove agent \"email-agent\"", "Delete the account; its home stays. Add `with its files` to trash it too."),
     (
@@ -214,7 +222,6 @@ pub fn parse(tokens: &[Token], cwd: &crate::parse::Context) -> Option<Result<Par
     let first = w.first()?.as_str();
     let second = w.get(1).map(String::as_str);
     let third = w.get(2).map(String::as_str);
-    let _ = third;
     let is_ours = match first {
         "make" | "remove" => matches!(second, Some("agent" | "space")),
         "rename" | "show" | "limit" | "reset" => second == Some("agent"),
@@ -222,6 +229,7 @@ pub fn parse(tokens: &[Token], cwd: &crate::parse::Context) -> Option<Result<Par
         "list" => second == Some("spaces"),
         "allow" | "forbid" => true,
         "switch" => true,
+        "set" => second == Some("up") && third == Some("agent"),
         _ => false,
     };
     if !is_ours {
@@ -329,6 +337,12 @@ fn sentence(t: &[Token], w: &[String], cwd: &crate::parse::Context) -> Result<(A
             no_more(t, 3)?;
             let c = format!("ctx reset agent {}", quote(&name));
             Ok((AgentCommand::Reset { name }, c))
+        }
+        "set" => {
+            let name = name_at(t, 3, "agent", "ctx set up agent \"email-agent\"")?;
+            no_more(t, 4)?;
+            let c = format!("ctx set up agent {}", quote(&name));
+            Ok((AgentCommand::SetUp { name }, c))
         }
         "switch" => {
             // switch to agent "b" | switch tab 5 to agent "b"
@@ -457,6 +471,8 @@ mod tests {
     #[test]
     fn forms() {
         assert_eq!(p("make agent named b").unwrap().command, AgentCommand::Make { name: "b".into() });
+        assert_eq!(p("set up agent b").unwrap().command, AgentCommand::SetUp { name: "b".into() });
+        assert!(p("set up agent").is_err());
         assert!(p("make agent b from ~/Agents/b").is_err());
         assert_eq!(
             p("allow every agent to read ~/.local/bin").unwrap().command,
