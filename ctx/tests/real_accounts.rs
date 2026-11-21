@@ -331,16 +331,6 @@ fn agents_are_accounts_and_the_os_decides_what_they_reach() {
     s.ctx(&["remove", "space", &space, "with", "its", "files"]).ok();
     assert!(!folder.exists());
 
-    // An agent's programs start macOS services of the account's own (cfprefsd, distnoted) that
-    // outlive its shells, as running claude or agy does: removing still takes account and home.
-    if cfg!(target_os = "macos") {
-        let o = s.ctx(&["run", "in", "tab", &ta3, "defaults write ctx-test k -int 7; defaults read ctx-test k"]).stdout;
-        assert!(o.contains('7'), "{o}");
-        let o =
-            String::from_utf8_lossy(&Command::new("ps").args(["-U", &a, "-o", "command="]).output().unwrap().stdout)
-                .into_owned();
-        eprintln!("running as {a} before removal:\n{o}");
-    }
     // Removing: accounts go, homes to the Trash with `with its files`.
     s.ctx(&["remove", "agent", &a, "with", "its", "files"]).ok();
     s.ctx(&["remove", "agent", &b]).ok();

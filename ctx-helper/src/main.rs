@@ -441,26 +441,38 @@ fn remove_space(name: &str, trash_folder: bool, owner: libc::uid_t) -> Result<St
     let mut msg = String::new();
     let dir = PathBuf::from(&s.folder);
     if trash_folder && owned_folder(&dir, owner) {
-        let to = to_trash(&dir, name, owner)?;
+        let to = to_trash(&dir, name, owner, None)?;
         msg = format!(" Its folder is in your Trash ({}).", to.display());
     }
     accounts::remove_space_group(name)?;
     Ok(format!("Removed the space \"{name}\".{msg}"))
 }
 
-/// Move `path` to your Trash as `<name>-<time>`; what agents made in it becomes yours.
-fn to_trash(path: &Path, name: &str, owner: libc::uid_t) -> Result<PathBuf, String> {
+/// Move `path` to your Trash as `<name>-<time>`; what agents made in it (and what `gone`, an
+/// agent's account just deleted, owned) becomes yours. When macOS won't move the folder itself
+/// (newer macOS keeps a home where it is), its contents go into that Trash folder instead and
+/// the emptied folder is removed.
+fn to_trash(path: &Path, name: &str, owner: libc::uid_t, gone: Option<libc::uid_t>) -> Result<PathBuf, String> {
     use std::os::unix::fs::MetadataExt;
     let you = accounts::by_uid(owner).ok_or("There's no owner account.")?;
     let trash = PathBuf::from(&you.home).join(".Trash");
     let _ = std::fs::create_dir_all(&trash);
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let to = trash.join(format!("{name}-{stamp}"));
-    std::fs::rename(path, &to).map_err(|e| format!("couldn't move {} to the Trash: {e}", path.display()))?;
+    if std::fs::rename(path, &to).is_err() {
+        let fail = |e: std::io::Error| format!("couldn't move {} to the Trash: {e}", path.display());
+        std::fs::create_dir(&to).map_err(fail)?;
+        let _ = chown(&to, owner, you.gid);
+        for entry in std::fs::read_dir(path).map_err(fail)? {
+            let entry = entry.map_err(fail)?;
+            std::fs::rename(entry.path(), to.join(entry.file_name())).map_err(fail)?;
+        }
+        let _ = std::fs::remove_dir(path);
+    }
     let mut take = |p: &Path| {
         if let Some(m) = lstat(p)
             && (m.is_dir() || m.nlink() == 1)
-            && accounts::by_uid(m.uid()).is_some_and(|a| accounts::is_agent(&a))
+            && (Some(m.uid()) == gone || accounts::by_uid(m.uid()).is_some_and(|a| accounts::is_agent(&a)))
         {
             let _ = chown(p, owner, you.gid);
         }
@@ -473,6 +485,17 @@ fn to_trash(path: &Path, name: &str, owner: libc::uid_t) -> Result<PathBuf, Stri
 /// End every process of the account: as the account, signal everything it may signal (only its
 /// own processes), politely and then not; wait for them to be gone.
 fn stop_everything_of(a: &accounts::Account) {
+    // On macOS an account's programs start services of its own under launchd (cfprefsd,
+    // distnoted…), which launchd would start again when killed: end its launchd session first.
+    if cfg!(target_os = "macos") {
+        for domain in [format!("gui/{}", a.uid), format!("user/{}", a.uid)] {
+            let _ = std::process::Command::new("/bin/launchctl")
+                .args(["bootout", &domain])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+    }
     for (sig, settle) in [(libc::SIGHUP, 500), (libc::SIGKILL, 1500)] {
         // SAFETY: fork; the child only makes system calls and exits.
         unsafe {
@@ -518,17 +541,23 @@ fn remove_account(name: &str, trash_home: bool, owner: libc::uid_t) -> Result<St
     let a = agent(name, owner)?;
     // Its programs stop first (Linux won't delete an account that still runs any).
     stop_everything_of(&a);
-    let mut msg = String::new();
     let home = PathBuf::from(&a.home);
     // Only the home ctx made for it, where every home is.
-    if trash_home && a.home == accounts::home_of(name) && lstat(&home).is_some_and(|m| m.is_dir() && m.uid() == a.uid) {
-        let to = to_trash(&home, name, owner)?;
-        msg = format!(" Its home is in your Trash ({}).", to.display());
-    }
+    let trash =
+        trash_home && a.home == accounts::home_of(name) && lstat(&home).is_some_and(|m| m.is_dir() && m.uid() == a.uid);
     for s in accounts::spaces_of(name) {
         let _ = accounts::set_space_member(&s.name, name, false);
     }
+    // The account goes first: macOS may keep an existing account's home in place.
     accounts::remove(name)?;
+    let msg = if !trash {
+        String::new()
+    } else {
+        match to_trash(&home, name, owner, Some(a.uid)) {
+            Ok(to) => format!(" Its home is in your Trash ({}).", to.display()),
+            Err(e) => format!(" Its home stays at {} ({e}).", home.display()),
+        }
+    };
     Ok(format!("Removed the agent \"{name}\".{msg}"))
 }
 
