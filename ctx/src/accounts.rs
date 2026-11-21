@@ -10,7 +10,7 @@ use ctx_accounts::acl::{self, Access, Who};
 use ctx_cli::agent_sentences::{AgentCommand, Grantee, LimitSpec, Target};
 use ctx_cli::parse::{Format, quote};
 use ctx_protocol::helper::{AGENT_FILE, AgentFile, EntryFor, Grant, HelperReply, HelperRequest, StarterFile};
-use ctx_protocol::{ClientKind, Envelope, Output, Request, Response, TabRef};
+use ctx_protocol::{ClientKind, Envelope, Output, Request, Response, TabRef, WindowRef};
 use serde::{Deserialize, Serialize};
 use std::io::{IsTerminal, Write};
 use std::os::unix::fs::MetadataExt;
@@ -24,7 +24,8 @@ pub fn run(cmd: AgentCommand, canonical: String, format: Format, interactive: bo
         AgentCommand::Rename { name, full_name } => rename(&name, &full_name),
         AgentCommand::Show { name } => return show(&name, format),
         AgentCommand::Grant { allow, to, write, on } => grant(allow, &to, write, &on),
-        AgentCommand::Switch { name } => return switch(&name, canonical, interactive),
+        AgentCommand::Switch { name, tab: Some(n) } => return switch_tab(&name, n, canonical),
+        AgentCommand::Switch { name, tab: None } => return switch(&name, canonical, interactive),
         AgentCommand::Limit { name, limit } => set_limit(&name, limit),
         AgentCommand::Reset { name } => reset(&name),
         AgentCommand::MakeSpace { name } => make_space(&name),
@@ -142,8 +143,54 @@ fn make(name: &str) -> Lines {
     let home = accounts::by_name(name).map(|a| a.home).unwrap_or_else(|| accounts::home_of(name));
     lines.extend(link_in_agents(name, Path::new(&home)));
     lines.extend(open_home());
+    lines.extend(set_up_tools(name));
     lines.push(format!("Talk to it: ctx switch to agent {}", quote(name)));
     Ok(lines)
+}
+
+/// ctx's hooks and skills for every agent program in the agent's account (Claude Code,
+/// Antigravity, Codex, …), so its agents run their commands in ctx tabs and know how to use
+/// them. They live in its home, so the agent installs them itself, in a tab of its own that's
+/// closed after. `ctx reset agent` runs it again, e.g. after the agent installs another program.
+fn set_up_tools(name: &str) -> Vec<String> {
+    const SETUP: &str = "ctx install hooks; ctx install skills";
+    let set_up = || -> Result<Vec<String>, String> {
+        let mut conn = Connection::open(ClientKind::Cli).map_err(|client::NoServer(m)| m)?;
+        let sentence = format!("ctx reset agent {}", quote(name));
+        let mut ask = |request: Request| {
+            conn.request(&Envelope { sentence: sentence.clone(), request })
+                .map_err(|e| format!("lost the ctx server: {e}"))
+        };
+        let tab = match ask(Request::OpenTab {
+            window: None,
+            folder: None,
+            name: None,
+            agent: Some(name.into()),
+            like: None,
+        })? {
+            Response::Ok(Output::Opened(o)) => o.tab.unwrap_or(0),
+            Response::Error(e) => return Err(e.message),
+            other => return Err(format!("the server answered something unexpected: {other:?}")),
+        };
+        let ran = ask(Request::Run {
+            tab: TabRef::Number(tab),
+            command: SETUP.into(),
+            colors: false,
+            max_lines: Some(200),
+            within_ms: Some(180_000),
+            wait: true,
+        });
+        let _ = ask(Request::CloseTab { tab: TabRef::Number(tab), without_asking: true });
+        match ran? {
+            Response::Ok(Output::Ran(r)) => Ok(r.output),
+            Response::Error(e) => Err(e.message),
+            other => Err(format!("the server answered something unexpected: {other:?}")),
+        }
+    };
+    match set_up() {
+        Ok(output) => output.into_iter().filter(|l| !l.trim().is_empty()).collect(),
+        Err(e) => vec![format!("Couldn't set up its ctx hooks and skills ({e}). As the agent: {SETUP}")],
+    }
 }
 
 /// A warning when your home lets every account in: then agents read your files (any that
@@ -461,7 +508,9 @@ fn reset(name: &str) -> Lines {
         std::fs::remove_file(&p).map_err(|e| format!("couldn't replace {}: {e}", p.display()))?;
     }
     write_agent_file(&a, &p, &AgentFile::default())?;
-    Ok(vec![format!("{} is yours again, with the defaults.", p.display())])
+    let mut lines = vec![format!("{} is yours again, with the defaults.", p.display())];
+    lines.extend(set_up_tools(name));
+    Ok(lines)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -719,6 +768,58 @@ fn switch(name: &str, canonical: String, interactive: bool) -> Out {
             out.code(2)
         }
     }
+}
+
+/// `ctx switch tab 5 to agent "b"`: the agent's tab opens in tab 5's place (same window, right
+/// after it), and tab 5 closes if nothing runs in it. A busy tab stays open beside the new one.
+fn switch_tab(name: &str, n: u64, canonical: String) -> Out {
+    let mut out = Out::default();
+    let result = (|| -> Result<String, (String, i32)> {
+        agent(name).map_err(|e| (e, 1))?;
+        let mut conn = Connection::open(ClientKind::Cli).map_err(|client::NoServer(m)| (m, 2))?;
+        let mut ask = |request: Request| -> Result<Output, (String, i32)> {
+            match conn.request(&Envelope { sentence: canonical.clone(), request }) {
+                Ok(Response::Ok(o)) => Ok(o),
+                Ok(Response::Error(e)) => Err((e.message, 1)),
+                Err(e) => Err((format!("Lost the connection to the ctx server: {e}"), 2)),
+            }
+        };
+        let Output::Tabs(list) = ask(Request::ListTabs)? else {
+            return Err(("The server didn't list tabs.".into(), 1));
+        };
+        let Some((window, at, idle)) = list
+            .windows
+            .iter()
+            .find_map(|w| w.tabs.iter().position(|t| t.number == n).map(|i| (w.number, i, w.tabs[i].state == "idle")))
+        else {
+            return Err((format!("There's no tab {n}."), 1));
+        };
+        let request = Request::OpenTab {
+            window: Some(WindowRef::Number(window)),
+            folder: None,
+            name: None,
+            agent: Some(name.into()),
+            like: None,
+        };
+        let Output::Opened(o) = ask(request)? else { return Err(("The server didn't open a tab.".into(), 1)) };
+        let new = o.tab.unwrap_or(0);
+        ask(Request::Move { tab: TabRef::Number(new), to: WindowRef::Number(window), position: Some(at as u32 + 2) })?;
+        if !idle {
+            return Ok(format!(
+                "Opened tab {new} as the agent \"{name}\" beside tab {n}, which stays open: it's running something."
+            ));
+        }
+        ask(Request::CloseTab { tab: TabRef::Number(n), without_asking: true })?;
+        Ok(format!("Tab {n} is now tab {new}, as the agent \"{name}\", in {}.", o.folder))
+    })();
+    match result {
+        Ok(line) => out.line(line),
+        Err((e, code)) => {
+            out.err(e);
+            return out.code(code);
+        }
+    }
+    out
 }
 
 fn confirm(question: &str) -> bool {

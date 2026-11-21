@@ -69,6 +69,8 @@ pub const AGENTS: &[&str] = &["claude", "codex", "gemini", "antigravity", "curso
 /// Agents' program names, for the agents whose ctx name is another: `agy` is Antigravity.
 pub const AGENT_PROGRAM_NAMES: &[(&str, &str)] = &[("agy", "antigravity"), ("cursor-agent", "cursor")];
 pub const HOOK_AGENTS: &[&str] = &["claude", "antigravity", "codex", "cursor", "pi", "opencode"];
+/// `ctx install hooks` with no agent named: every hook agent whose program is on the PATH.
+pub const EVERY_AGENT: &str = "every";
 
 /// What a sentence asks for.
 #[derive(Clone, Debug, PartialEq)]
@@ -1068,10 +1070,12 @@ fn to_command(parts: &Parts) -> Result<Command, ParseError> {
                         HOOK_AGENTS.join(", ")
                     )));
                 }
+                // No agent named: every one whose program is on this account's PATH.
+                None => EVERY_AGENT.into(),
                 _ => {
                     let what = if what == "hooks" { "Hooks" } else { "Skills" };
                     return Err(ParseError::new(format!(
-                        "{what} for which agent? `ctx {verb} {} for claude` (or {}).",
+                        "{what} for which agent? `ctx {verb} {} for claude` (or {}), or leave it out for every one here.",
                         what.to_lowercase(),
                         HOOK_AGENTS[1..].join(", ")
                     )));
@@ -1653,7 +1657,9 @@ mod tests {
             p("install hooks for agy").command,
             Command::InstallHooks { agent: "antigravity".into(), folder: None }
         );
-        assert!(err("install hooks").message.contains("which agent"));
+        // No agent named: every one installed here.
+        assert_eq!(p("install hooks").command, Command::InstallHooks { agent: EVERY_AGENT.into(), folder: None });
+        assert_eq!(p("install skills").command, Command::InstallSkills { agent: EVERY_AGENT.into(), folder: None });
         assert_eq!(
             p("install skills for cursor").command,
             Command::InstallSkills { agent: "cursor".into(), folder: None }
@@ -1662,7 +1668,6 @@ mod tests {
             p("remove skills for codex at ~/code/site").command,
             Command::RemoveSkills { agent: "codex".into(), folder: Some("/Users/c/code/site".into()) }
         );
-        assert!(err("install skills").message.contains("Skills for which agent? `ctx install skills for claude`"));
         assert_eq!(
             p(r#"make launcher named "sysadmin" for ~/.local/bin/claude at ~/Agents/sys-admin"#).command,
             Command::MakeLauncher {

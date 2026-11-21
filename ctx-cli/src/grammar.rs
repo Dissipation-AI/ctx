@@ -568,6 +568,10 @@ pub const VERBS: &[Verb] = &[
             ),
             ("ctx install hooks for claude at ~/code/site", "Only for that project (Claude's local scope)."),
             (
+                "ctx install hooks",
+                "For every one of those agents whose program is on your PATH. Also `ctx install skills`.",
+            ),
+            (
                 "ctx install skills for claude",
                 "Installs ctx's skills (using ctx, interactive programs in tabs). Any hook agent; `at <folder>` for one project.",
             ),
