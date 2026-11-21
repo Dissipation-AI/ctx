@@ -203,6 +203,11 @@ fn agents_are_accounts_and_the_os_decides_what_they_reach() {
     let o = s.ctx(&["switch", "tab", &busy, "to", "agent", &a]).ok().stdout.clone();
     assert!(o.contains("stays open"), "{o}");
     s.ctx(&["press", "ctrl-c", "in", "tab", &busy]).ok();
+    // Back to a's one tab, which the checks below expect.
+    let beside = o.split("Opened tab ").nth(1).unwrap().split(' ').next().unwrap().to_string();
+    for t in [&new, &beside, &busy] {
+        s.ctx(&["close", "tab", t, "without", "asking"]).ok();
+    }
 
     // From a's tab: only its own tab, never yours, not b's until it may read b's home.
     let in_a = |cmd: &str| s.ctx(&["run", "in", "tab", &ta, &format!("'{ctx_path}' {cmd}")]);
