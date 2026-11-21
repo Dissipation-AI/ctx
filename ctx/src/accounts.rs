@@ -28,6 +28,7 @@ pub fn run(cmd: AgentCommand, canonical: String, format: Format, interactive: bo
         AgentCommand::Switch { name, tab: None } => return switch(&name, canonical, interactive),
         AgentCommand::Limit { name, limit } => set_limit(&name, limit),
         AgentCommand::Reset { name } => reset(&name),
+        AgentCommand::SetUp { name } => set_up(&name),
         AgentCommand::MakeSpace { name } => make_space(&name),
         AgentCommand::RemoveSpace { name, with_files } => remove_space(&name, with_files, interactive),
         AgentCommand::SpaceMember { agent, space, member } => space_member(&agent, &space, member),
@@ -151,12 +152,12 @@ fn make(name: &str) -> Lines {
 /// ctx's hooks and skills for every agent program in the agent's account (Claude Code,
 /// Antigravity, Codex, …), so its agents run their commands in ctx tabs and know how to use
 /// them. They live in its home, so the agent installs them itself, in a tab of its own that's
-/// closed after. `ctx reset agent` runs it again, e.g. after the agent installs another program.
+/// closed after. `ctx set up agent` runs it again, e.g. after you install or update a program.
 fn set_up_tools(name: &str) -> Vec<String> {
     const SETUP: &str = "ctx install hooks; ctx install skills";
     let set_up = || -> Result<Vec<String>, String> {
         let mut conn = Connection::open(ClientKind::Cli).map_err(|client::NoServer(m)| m)?;
-        let sentence = format!("ctx reset agent {}", quote(name));
+        let sentence = format!("ctx set up agent {}", quote(name));
         let mut ask = |request: Request| {
             conn.request(&Envelope { sentence: sentence.clone(), request })
                 .map_err(|e| format!("lost the ctx server: {e}"))
@@ -508,9 +509,15 @@ fn reset(name: &str) -> Lines {
         std::fs::remove_file(&p).map_err(|e| format!("couldn't replace {}: {e}", p.display()))?;
     }
     write_agent_file(&a, &p, &AgentFile::default())?;
-    let mut lines = vec![format!("{} is yours again, with the defaults.", p.display())];
-    lines.extend(set_up_tools(name));
-    Ok(lines)
+    Ok(vec![format!("{} is yours again, with the defaults.", p.display())])
+}
+
+fn set_up(name: &str) -> Lines {
+    let a = agent(name)?;
+    if me().uid == a.uid {
+        return Err("An agent sets itself up with `ctx install hooks` and `ctx install skills`.".into());
+    }
+    Ok(set_up_tools(name))
 }
 
 // ---------------------------------------------------------------------------------------------

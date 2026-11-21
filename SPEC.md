@@ -694,6 +694,7 @@ ctx adds no permission system of its own. An agent is an operating-system accoun
 | `ctx list agents`, `ctx show agent "b"` | Accounts, administrators, grants, limits, tabs, and warnings. |
 | `ctx limit agent "b" to 8 GB of memory` / `200 processes` / `low priority` / `nothing` | Resources. On Linux, memory is a hard limit (a systemd scope with `MemoryMax`). macOS has no per-account memory limit, so the server watches the agent's tabs and stops the largest command over the limit, with an event line in the tab. Processes: `RLIMIT_NPROC`. Priority: `nice` plus background QoS on macOS. |
 | `ctx reset agent "b"` | Rewrites `ctx-agent.toml` as yours, with the defaults. |
+| `ctx set up agent "b"` | Installs ctx's hooks and skills for each agent program on its PATH, as `b`, in a tab that closes after. `ctx make agent` does it too. |
 
 **Your session's helpers.** An account has no login session on the screen, so its `open`, `pbcopy` and `xdg-open` can't reach yours. In agents' tabs these names run ctx, and the server does the work in your session:
 - Web and mail links open.
