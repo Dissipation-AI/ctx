@@ -2,7 +2,10 @@
 # Install ctx for every account on this computer, agents' accounts included:
 #   ctx and ctx-launch in /usr/local/bin;
 #   the ctx helper, the root daemon that makes agents' accounts and spaces and starts their tabs;
-#   the ctx skills where Claude Code and Codex read skills for every account.
+#   the ctx skills where Claude Code and Codex read skills for every account;
+#   on a Mac with Homebrew, /opt/homebrew/bin on every account's PATH, so the agent programs you
+#   install with it (brew install --cask claude-code antigravity-cli codex cursor-cli;
+#   brew install pi-coding-agent opencode) are every agent's too, one copy you keep up to date.
 # Build first as yourself: cargo build --release
 # Then as an administrator: sudo scripts/install.sh <owner>   (the account the ctx server runs as)
 # Undo: sudo scripts/install.sh --remove   (agents' accounts, homes and spaces stay)
@@ -25,6 +28,7 @@ else
     GROUP=root
 fi
 CODEX_SKILLS=/etc/codex/skills
+BREW_PATH=/etc/paths.d/ctx-homebrew
 SKILLS="using-ctx interactive-programs"
 
 stop_helper() {
@@ -37,13 +41,13 @@ stop_helper() {
 
 if [ "${1:-}" = --remove ]; then
     stop_helper
-    rm -f "$BIN/ctx" "$BIN/ctx-launch" "$HELPER" "$SERVICE" "$SOCK" "$RULES"
+    rm -f "$BIN/ctx" "$BIN/ctx-launch" "$HELPER" "$SERVICE" "$SOCK" "$RULES" "$BREW_PATH"
     for s in $SKILLS; do rm -rf "$CLAUDE_SKILLS/$s" "$CODEX_SKILLS/$s"; done
     [ "$(uname)" = Darwin ] || systemctl daemon-reload
     echo "Removed ctx. Agents' accounts, homes and spaces stay; remove them first with ctx if you want them gone."
     exit 0
 fi
-[ $# = 1 ] || { sed -n 2,8p "$0" >&2; exit 2; }
+[ $# = 1 ] || { sed -n 2,11p "$0" >&2; exit 2; }
 owner=$1
 id -u "$owner" >/dev/null
 for b in ctx ctx-launch ctx-helper; do
@@ -69,6 +73,11 @@ for dir in "$CLAUDE_SKILLS" "$CODEX_SKILLS"; do
         chown -R root:"$GROUP" "$dir/$s"; chmod -R a+rX,go-w "$dir/$s"
     done
 done
+
+# Login shells (agents' tabs among them) add the lines of /etc/paths.d to PATH (path_helper).
+if [ "$(uname)" = Darwin ] && [ -d /opt/homebrew/bin ]; then
+    echo /opt/homebrew/bin > "$BREW_PATH"; chmod 644 "$BREW_PATH"
+fi
 
 stop_helper
 if [ "$(uname)" = Darwin ]; then
