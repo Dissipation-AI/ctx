@@ -55,7 +55,9 @@ for b in ctx ctx-launch ctx-helper; do
     # A build older than its source would install yesterday's ctx. Cargo's dep-info file
     # (target/release/<bin>.d) lists exactly the source files the binary was built from.
     newer=$(sed 's/^[^:]*: //; s/\\ /%SP%/g' "$here/target/release/$b.d" | tr ' ' '\n' | sed 's/%SP%/ /g' |
-        while IFS= read -r f; do [ -n "$f" ] && [ "$f" -nt "$here/target/release/$b" ] && { echo "$f"; break; }; done)
+        while IFS= read -r f; do
+            if [ -n "$f" ] && [ "$f" -nt "$here/target/release/$b" ]; then echo "$f"; break; fi
+        done)
     [ -z "$newer" ] || { echo "target/release/$b is older than $newer; rebuild first (as $owner: cargo build --release)" >&2; exit 1; }
 done
 
