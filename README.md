@@ -88,7 +88,7 @@ ctx remove hooks for claude                  # undo (also with `at`)
 | Codex | `codex plugin add` (trust it once in `/hooks`) | the project's `.codex/hooks.json` |
 | Cursor CLI | `~/.cursor/hooks.json` (it has no plugin installer) | the project's `.cursor/hooks.json` |
 | pi | `pi install` | `pi install -l` |
-| opencode | `opencode plugin --global` | `opencode plugin` in the project |
+| opencode | a link in `~/.config/opencode/plugins` | a link in the project's `.opencode/plugins` |
 
 New sessions pick it up. The installed hooks call this `ctx` by its full path, and the ctx server
 must be running (launchd starts it). Agents that sandbox their shell (Antigravity, Codex, Cursor
