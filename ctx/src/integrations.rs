@@ -1,6 +1,7 @@
 //! `ctx install hooks for …`, `ctx remove hooks for …`: ctx's plugin for an agent, installed
 //! through the agent's own plugin registry (`claude plugin`, `agy plugin`, `codex plugin`,
-//! `pi install`, `opencode plugin`; for Cursor, which has none, its `hooks.json`). It never touches
+//! `pi install`; for opencode, a link in the plugins folder it loads by itself; for Cursor,
+//! which has no registry, its `hooks.json`). It never touches
 //! the agent's instruction files; the hook is a transparent shim between the agent and its shell.
 //!
 //! The plugins in `integrations/` are built in, written to `<data>/integrations` (with this `ctx`'s
@@ -213,29 +214,13 @@ fn opencode_dir() -> PathBuf {
     config.join("opencode")
 }
 
-/// opencode's config files, for you (`~/.config/opencode`) or a project.
-fn opencode_configs(folder: Option<&str>) -> Vec<PathBuf> {
-    let dirs = match folder {
-        Some(f) => vec![PathBuf::from(f), PathBuf::from(f).join(".opencode")],
-        None => vec![opencode_dir()],
-    };
-    dirs.iter()
-        .flat_map(|d| ["opencode.json", "opencode.jsonc", "config.json"].map(|f| d.join(f)))
-        .filter(|p| p.exists())
-        .collect()
-}
-
-/// An opencode config without ctx's plugin entry, or `None` if it has none.
-fn without_opencode_plugin(existing: &str, staged: &Path) -> Result<Option<String>, String> {
-    let mut config = parse_object(existing)?;
-    let path = staged.to_string_lossy().into_owned();
-    let Some(list) = config.get_mut("plugin").and_then(Value::as_array_mut) else { return Ok(None) };
-    let before = list.len();
-    list.retain(|p| p.as_str().is_none_or(|s| s.trim_start_matches("file://").trim_end_matches('/') != path));
-    if list.len() == before {
-        return Ok(None);
+/// Where opencode finds ctx's plugin: a link in its plugins folder, yours
+/// (`~/.config/opencode/plugins`) or a project's (`.opencode/plugins`), which it loads by itself.
+fn opencode_link(folder: Option<&str>) -> PathBuf {
+    match folder {
+        Some(f) => Path::new(f).join(".opencode/plugins/ctx"),
+        None => opencode_dir().join("plugins/ctx"),
     }
-    Ok(Some(serde_json::to_string_pretty(&config).unwrap_or_default() + "\n"))
 }
 
 fn for_whom(folder: Option<&str>) -> String {
@@ -290,13 +275,21 @@ fn install_hooks(agent: &str, folder: Option<&str>) -> Result<String, String> {
             Ok(format!("Installed ctx's pi package {whom}. New sessions run bash in ctx tabs."))
         }
         ("opencode", _) => {
-            let p = plugin("opencode");
-            let mut args = vec!["plugin", &p, "--force"];
-            if folder.is_none() {
-                args.push("--global");
+            let link = opencode_link(folder);
+            if let Some(dir) = link.parent() {
+                std::fs::create_dir_all(dir).map_err(|e| format!("Couldn't make {}: {e}", dir.display()))?;
             }
-            run("opencode", &args, folder)?;
-            Ok(format!("Installed ctx's opencode plugin {whom}. New sessions run bash in ctx tabs."))
+            if std::fs::symlink_metadata(&link).is_ok() {
+                std::fs::remove_file(&link)
+                    .or_else(|_| std::fs::remove_dir_all(&link))
+                    .map_err(|e| format!("Couldn't replace {}: {e}", link.display()))?;
+            }
+            std::os::unix::fs::symlink(root.join("opencode"), &link)
+                .map_err(|e| format!("Couldn't link {}: {e}", link.display()))?;
+            Ok(format!(
+                "Installed ctx's opencode plugin {whom} ({}). New sessions run shell commands in ctx tabs.",
+                link.display()
+            ))
         }
         _ => Err(format!("ctx has hooks for {}, not {agent}.", AGENTS.join(", "))),
     }
@@ -343,22 +336,14 @@ fn remove_hooks(agent: &str, folder: Option<&str>) -> Result<String, String> {
             Ok("Removed ctx's pi package. New sessions use pi's own bash.".into())
         }
         ("opencode", _) => {
-            let staged = root.join("opencode");
-            let mut removed = Vec::new();
-            for path in opencode_configs(folder) {
-                let existing = std::fs::read_to_string(&path).unwrap_or_default();
-                let updated = without_opencode_plugin(&existing, &staged).map_err(|e| {
-                    format!("Couldn't edit {}: {e}. Remove ctx's entry from its `plugin` list.", path.display())
-                })?;
-                if let Some(updated) = updated {
-                    std::fs::write(&path, updated).map_err(|e| format!("Couldn't write {}: {e}", path.display()))?;
-                    removed.push(path.display().to_string());
-                }
+            let link = opencode_link(folder);
+            if std::fs::symlink_metadata(&link).is_err() {
+                return Ok("opencode has no ctx plugin here, so there's nothing to remove.".into());
             }
-            if removed.is_empty() {
-                return Ok("opencode's config has no ctx plugin, so there's nothing to remove.".into());
-            }
-            Ok(format!("Removed ctx's opencode plugin from {}.", removed.join(" and ")))
+            std::fs::remove_file(&link)
+                .or_else(|_| std::fs::remove_dir_all(&link))
+                .map_err(|e| format!("Couldn't remove {}: {e}", link.display()))?;
+            Ok(format!("Removed ctx's opencode plugin ({}). New sessions use opencode's own shell.", link.display()))
         }
         _ => Err(format!("ctx has hooks for {}, not {agent}.", AGENTS.join(", "))),
     }
@@ -786,14 +771,5 @@ mod tests {
         assert_eq!(fresh["version"], 1);
         let gone: Value = serde_json::from_str(&hooks_json(&added, &ours, "cursor", false).unwrap()).unwrap();
         assert!(gone["hooks"]["preToolUse"].as_array().unwrap().iter().all(|e| e["command"] == "./audit.sh"));
-    }
-
-    #[test]
-    fn opencode_entry_is_removed_by_path_or_url() {
-        let staged = Path::new("/data/integrations/opencode");
-        let config = r#"{"plugin": ["opencode-wakatime", "file:///data/integrations/opencode"], "model": "x"}"#;
-        let out: Value = serde_json::from_str(&without_opencode_plugin(config, staged).unwrap().unwrap()).unwrap();
-        assert_eq!(out, json!({"plugin": ["opencode-wakatime"], "model": "x"}));
-        assert!(without_opencode_plugin(r#"{"plugin": ["a"]}"#, staged).unwrap().is_none());
     }
 }
