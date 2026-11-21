@@ -237,6 +237,7 @@ ctx install hooks|skills|instructions [for claude|codex|gemini|antigravity|curso
 - `ctx install hooks for antigravity`: Installs ctx's Antigravity plugin (`agy plugin install`): run_command runs in a tab per conversation.
 - `ctx install hooks for codex`: Also cursor, pi and opencode, each through its own plugin registry (Cursor: its hooks.json).
 - `ctx install hooks for claude at ~/code/site`: Only for that project (Claude's local scope).
+- `ctx install hooks`: For every one of those agents whose program is on your PATH. Also `ctx install skills`.
 - `ctx install skills for claude`: Installs ctx's skills (using ctx, interactive programs in tabs). Any hook agent; `at <folder>` for one project.
 - `ctx install instructions for claude`: Writes to ~/.claude/CLAUDE.md, between ctx's markers.
 - `ctx install instructions for codex`: Writes to ~/.codex/AGENTS.md.
@@ -314,8 +315,9 @@ ctx help ["<text>"]
 
 ## Agents: each is its own account; the OS's file permissions decide what it reaches
 
-- `ctx make agent named "email-agent"`: A new agent: its own account and private home (/Users/email-agent; ~/Agents/email-agent links to it).
+- `ctx make agent named "email-agent"`: A new agent: its own account and private home (/Users/email-agent; ~/Agents/email-agent links to it), with ctx's hooks and skills for its agent programs.
 - `ctx switch to agent "email-agent"`: Open a tab as the agent, in its home (like su). Run claude, codex, pi… there.
+- `ctx switch tab 5 to agent "email-agent"`: Tab 5 becomes the agent's: its tab opens in that place, and tab 5 closes if nothing is running in it.
 - `ctx allow agent "email-agent" to read ~/Context/career`: Let it read that folder (an access-list entry).
 - `ctx allow agent "foreman" to write agent "email-agent"`: Make foreman an administrator of email-agent.
 - `ctx allow every agent to read ~/Context/style-guide.md`: Every agent may read it.
@@ -324,7 +326,7 @@ ctx help ["<text>"]
 - `ctx show agent "email-agent"`: Its account, administrators, grants, limits and tabs.
 - `ctx limit agent "email-agent" to 8 GB of memory`: Also: 200 processes, low priority, normal priority, nothing.
 - `ctx rename agent "email-agent" to "Email"`: The full name shown beside the account name.
-- `ctx reset agent "email-agent"`: Rewrite its ctx-agent.toml as yours, with the defaults.
+- `ctx reset agent "email-agent"`: Rewrite its ctx-agent.toml as yours, with the defaults, and install ctx's hooks and skills for its agent programs again.
 - `ctx remove agent "email-agent"`: Delete the account; its home stays. Add `with its files` to trash it too.
 - `ctx make space named "research"`: A folder agents work in together: only the agents you add, and you, may use it.
 - `ctx add agent "email-agent" to space "research"`: It may read and write the space (its new tabs).

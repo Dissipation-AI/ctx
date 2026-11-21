@@ -16,7 +16,7 @@ use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use ctx_cli::parse::HOOK_AGENTS as AGENTS;
+use ctx_cli::parse::{EVERY_AGENT, HOOK_AGENTS as AGENTS};
 
 macro_rules! files {
     ($($rel:literal),* $(,)?) => { &[$(($rel, include_str!(concat!("../../integrations/", $rel)))),*] };
@@ -250,6 +250,9 @@ fn install_hooks(agent: &str, folder: Option<&str>) -> Result<String, String> {
     match (agent, folder) {
         ("claude", _) => {
             let scope = if folder.is_some() { "local" } else { "user" };
+            // Claude Code keeps a copy of a plugin per version: installing over it would leave the
+            // old copy (and its old hooks) in use, so the old one goes first.
+            let _ = run("claude", &["plugin", "uninstall", "ctx@ctx", "--scope", scope], folder);
             run("claude", &["plugin", "install", "ctx", "--marketplace", &marketplace, "--scope", scope], folder)?;
             Ok(format!("Installed ctx's Claude Code plugin {whom}. New sessions run Bash in ctx tabs."))
         }
@@ -457,6 +460,7 @@ fn install_skills(agent: &str, folder: Option<&str>) -> Result<String, String> {
     match (agent, folder) {
         ("claude", _) => {
             let scope = if folder.is_some() { "local" } else { "user" };
+            let _ = run("claude", &["plugin", "uninstall", "ctx-skills@ctx", "--scope", scope], folder);
             run(
                 "claude",
                 &["plugin", "install", "ctx-skills", "--marketplace", &marketplace, "--scope", scope],
@@ -541,6 +545,9 @@ fn skills_sentence(verb: &str, agent: &str, folder: Option<&str>) -> String {
 /// `ctx install skills` otherwise, so a script or agent installing the hook doesn't also change
 /// which skills the agent loads.
 pub fn install(agent: &str, folder: Option<&str>, format: Format) -> Out {
+    if agent == EVERY_AGENT {
+        return every(install_hooks, false, folder, format);
+    }
     let hooked = match install_hooks(agent, folder) {
         Ok(text) => text,
         Err(e) => return finish(Err(e), format),
@@ -571,15 +578,86 @@ pub fn install(agent: &str, folder: Option<&str>, format: Format) -> Out {
 }
 
 pub fn remove(agent: &str, folder: Option<&str>, format: Format) -> Out {
+    if agent == EVERY_AGENT {
+        return every(remove_hooks, false, folder, format);
+    }
     finish(remove_hooks(agent, folder), format)
 }
 
 pub fn install_skills_for(agent: &str, folder: Option<&str>, format: Format) -> Out {
+    if agent == EVERY_AGENT {
+        return every(install_skills, true, folder, format);
+    }
     finish(install_skills(agent, folder), format)
 }
 
 pub fn remove_skills_for(agent: &str, folder: Option<&str>, format: Format) -> Out {
+    if agent == EVERY_AGENT {
+        return every(remove_skills, false, folder, format);
+    }
     finish(remove_skills(agent, folder), format)
+}
+
+/// The program each hook agent is run as, found on the PATH.
+fn program_of(agent: &str) -> &str {
+    match agent {
+        "antigravity" => "agy",
+        "cursor" => "cursor-agent",
+        a => a,
+    }
+}
+
+fn on_path(program: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(program).is_file()))
+}
+
+/// Where `scripts/install.sh` puts ctx's skills for every account on this computer, for the
+/// agents that read skills from a computer-wide folder.
+fn computer_skills(agent: &str) -> Option<&'static str> {
+    match agent {
+        "claude" if cfg!(target_os = "macos") => Some("/Library/Application Support/ClaudeCode/.claude/skills"),
+        "claude" => Some("/etc/claude-code/.claude/skills"),
+        "codex" => Some("/etc/codex/skills"),
+        _ => None,
+    }
+}
+
+/// `ctx install hooks` (or skills, or remove) with no agent named: each hook agent whose
+/// program is on this account's PATH, one line each. Skills an agent already reads from the
+/// computer-wide folder aren't installed a second time.
+fn every(
+    each: fn(&str, Option<&str>) -> Result<String, String>,
+    installing_skills: bool,
+    folder: Option<&str>,
+    format: Format,
+) -> Out {
+    let mut lines = Vec::new();
+    let mut failed = false;
+    for agent in AGENTS.iter().filter(|a| on_path(program_of(a))) {
+        if installing_skills
+            && folder.is_none()
+            && computer_skills(agent).is_some_and(|d| Path::new(d).join("using-ctx").is_dir())
+        {
+            lines.push(format!("{agent}: ctx's skills are installed for every account on this computer."));
+            continue;
+        }
+        match each(agent, folder) {
+            Ok(text) => lines.push(format!("{agent}: {text}")),
+            Err(e) => {
+                failed = true;
+                lines.push(format!("{agent}: {e}"));
+            }
+        }
+    }
+    if lines.is_empty() {
+        let programs: Vec<&str> = AGENTS.iter().map(|a| program_of(a)).collect();
+        return finish(Err(format!("None of these agents is on your PATH: {}.", programs.join(", "))), format);
+    }
+    let mut out = finish(Ok(lines.join("\n")), format);
+    if failed {
+        out = out.code(1);
+    }
+    out
 }
 
 fn finish(result: Result<String, String>, format: Format) -> Out {

@@ -55,7 +55,7 @@ cargo test
 sudo scripts/install.sh "$USER"
 ```
 
-ctx installs for the whole computer, so agents' accounts run the same `ctx` you do: `ctx` and `ctx-launch` in `/usr/local/bin`, the ctx helper (a root daemon, see below) under launchd or systemd, and the skills where Claude Code and Codex read them for every account. `sudo scripts/install.sh --remove` takes it all out again; agents' accounts, homes and spaces stay until you remove them with ctx.
+ctx installs for the whole computer, so agents' accounts run the same `ctx` you do: `ctx` and `ctx-launch` in `/usr/local/bin`, the ctx helper (a root daemon, see below) under launchd or systemd, and the skills where Claude Code and Codex read them for every account. On a Mac with Homebrew it also puts `/opt/homebrew/bin` on every account's PATH (`/etc/paths.d/ctx-homebrew`), so the agent programs are one shared copy you install and update with Homebrew, any of `brew install --cask claude-code antigravity-cli codex cursor-cli` and `brew install pi-coding-agent opencode`; each agent still signs in as itself. `sudo scripts/install.sh --remove` takes it all out again; agents' accounts, homes and spaces stay until you remove them with ctx.
 
 ## Trying it without touching your tabs
 

@@ -186,6 +186,28 @@ fn agents_are_accounts_and_the_os_decides_what_they_reach() {
     assert!(o.contains("ermission denied"), "{o}\n{}", why());
     let list = s.ctx(&["list", "tabs"]).ok().stdout.clone();
     assert!(list.contains(&format!("as {a}")), "{list}");
+    // Switching a tab in place: the agent's tab takes an idle tab's place, which closes; a busy
+    // tab stays open beside the new one.
+    let swap = opened(&s.ctx(&["open", "tab", "named", "Swap", "at", "/tmp"]).ok().stdout);
+    let o = s.ctx(&["switch", "tab", &swap, "to", "agent", &a]).ok().stdout.clone();
+    assert!(o.contains(&format!("Tab {swap} is now tab ")), "{o}");
+    let new = o.split("is now tab ").nth(1).unwrap().split(',').next().unwrap().trim().to_string();
+    let list = s.ctx(&["list", "tabs"]).ok().stdout.clone();
+    let line_of = |t: &str| list.lines().position(|l| l.trim_start().starts_with(&format!("tab {t} ")));
+    assert!(!list.contains("\"Swap\""), "{list}");
+    assert!(list.lines().any(|l| l.contains(&format!("tab {new} ")) && l.contains(&format!("as {a}"))), "{list}");
+    let mine = list.lines().position(|l| l.contains("\"Mine\"")).unwrap();
+    assert_eq!(line_of(&new), Some(mine + 1), "in Swap's place, right after Mine: {list}");
+    let busy = opened(&s.ctx(&["open", "tab", "named", "Busy", "at", "/tmp"]).ok().stdout);
+    s.ctx(&["run", "in", "tab", &busy, "sleep 30", "without", "waiting"]).ok();
+    let o = s.ctx(&["switch", "tab", &busy, "to", "agent", &a]).ok().stdout.clone();
+    assert!(o.contains("stays open"), "{o}");
+    s.ctx(&["press", "ctrl-c", "in", "tab", &busy]).ok();
+    // Back to a's one tab, which the checks below expect.
+    let beside = o.split("Opened tab ").nth(1).unwrap().split(' ').next().unwrap().to_string();
+    for t in [&new, &beside, &busy] {
+        s.ctx(&["close", "tab", t, "without", "asking"]).ok();
+    }
 
     // From a's tab: only its own tab, never yours, not b's until it may read b's home.
     let in_a = |cmd: &str| s.ctx(&["run", "in", "tab", &ta, &format!("'{ctx_path}' {cmd}")]);

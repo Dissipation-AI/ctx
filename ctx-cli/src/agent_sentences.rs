@@ -54,8 +54,10 @@ pub enum AgentCommand {
         write: bool,
         on: Target,
     },
+    /// A tab as the agent; with `tab`, in that tab's place (it closes if it's idle).
     Switch {
         name: String,
+        tab: Option<u64>,
     },
     Limit {
         name: String,
@@ -84,11 +86,15 @@ pub enum AgentCommand {
 pub const EXAMPLES: &[(&str, &str)] = &[
     (
         "ctx make agent named \"email-agent\"",
-        "A new agent: its own account and private home (/Users/email-agent; ~/Agents/email-agent links to it).",
+        "A new agent: its own account and private home (/Users/email-agent; ~/Agents/email-agent links to it), with ctx's hooks and skills for its agent programs.",
     ),
     (
         "ctx switch to agent \"email-agent\"",
         "Open a tab as the agent, in its home (like su). Run claude, codex, pi… there.",
+    ),
+    (
+        "ctx switch tab 5 to agent \"email-agent\"",
+        "Tab 5 becomes the agent's: its tab opens in that place, and tab 5 closes if nothing is running in it.",
     ),
     ("ctx allow agent \"email-agent\" to read ~/Context/career", "Let it read that folder (an access-list entry)."),
     ("ctx allow agent \"foreman\" to write agent \"email-agent\"", "Make foreman an administrator of email-agent."),
@@ -101,7 +107,10 @@ pub const EXAMPLES: &[(&str, &str)] = &[
         "Also: 200 processes, low priority, normal priority, nothing.",
     ),
     ("ctx rename agent \"email-agent\" to \"Email\"", "The full name shown beside the account name."),
-    ("ctx reset agent \"email-agent\"", "Rewrite its ctx-agent.toml as yours, with the defaults."),
+    (
+        "ctx reset agent \"email-agent\"",
+        "Rewrite its ctx-agent.toml as yours, with the defaults, and install ctx's hooks and skills for its agent programs again.",
+    ),
     ("ctx remove agent \"email-agent\"", "Delete the account; its home stays. Add `with its files` to trash it too."),
     (
         "ctx make space named \"research\"",
@@ -322,14 +331,24 @@ fn sentence(t: &[Token], w: &[String], cwd: &crate::parse::Context) -> Result<(A
             Ok((AgentCommand::Reset { name }, c))
         }
         "switch" => {
-            // switch to agent "b"
-            if s(1) != Some("to") || s(2) != Some("agent") {
+            // switch to agent "b" | switch tab 5 to agent "b"
+            let (tab, at) = match (s(1), s(2)) {
+                (Some("tab"), Some(n)) => match n.parse::<u64>() {
+                    Ok(n) => (Some(n), 3),
+                    Err(_) => return Err(ParseError::new("Which tab? `ctx switch tab 5 to agent \"<name>\"`.")),
+                },
+                _ => (None, 1),
+            };
+            if s(at) != Some("to") || s(at + 1) != Some("agent") {
                 return Err(ParseError::new("Switch to whom? `ctx switch to agent \"<name>\"`."));
             }
-            let name = name_at(t, 3, "agent", "ctx switch to agent \"email-agent\"")?;
-            no_more(t, 4)?;
-            let c = format!("ctx switch to agent {}", quote(&name));
-            Ok((AgentCommand::Switch { name }, c))
+            let name = name_at(t, at + 2, "agent", "ctx switch to agent \"email-agent\"")?;
+            no_more(t, at + 3)?;
+            let c = match tab {
+                Some(n) => format!("ctx switch tab {n} to agent {}", quote(&name)),
+                None => format!("ctx switch to agent {}", quote(&name)),
+            };
+            Ok((AgentCommand::Switch { name, tab }, c))
         }
         "limit" => {
             let name = name_at(t, 2, "agent", "ctx limit agent \"email-agent\" to 8 GB of memory")?;
