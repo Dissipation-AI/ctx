@@ -72,8 +72,9 @@ impl Connection {
             match welcome {
                 Some(Welcome::Accepted { .. }) => return Ok(Connection { stream }),
                 Some(Welcome::VersionMismatch { busy_tabs, server_protocol, .. }) => {
-                    if busy_tabs.is_empty() && !restarted {
-                        // Nothing is running: restart the server to pick up the new version.
+                    // Nothing is running and this ctx is the newer one: restart the server to pick
+                    // up this version. (An older ctx restarting a newer server gets the same server.)
+                    if busy_tabs.is_empty() && !restarted && server_protocol < PROTOCOL_VERSION {
                         use std::io::Write;
                         let mut frame = (ctx_server::server::RESTART_MAGIC.len() as u32).to_le_bytes().to_vec();
                         frame.extend_from_slice(ctx_server::server::RESTART_MAGIC);
@@ -287,9 +288,27 @@ fn start_server(paths: &Paths) -> Result<(), NoServer> {
 /// The running server speaks another protocol and has busy tabs, so it didn't restart by itself.
 /// Written here rather than taken from the server, whose advice may predate what works.
 fn mismatch_message(server_protocol: u32, busy: &[u64]) -> String {
+    if server_protocol > PROTOCOL_VERSION {
+        return older_than_server(server_protocol);
+    }
     format!(
         "The running ctx server speaks protocol {server_protocol}, and this ctx speaks {PROTOCOL_VERSION}. {}",
         ctx_server::server::restart_advice(busy)
+    )
+}
+
+/// This ctx is older than the running server: restarting the server would bring back the same
+/// newer one (and stop busy tabs), so the advice is to use a newer ctx.
+fn older_than_server(server_protocol: u32) -> String {
+    let me = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "this ctx".into());
+    let app = "/Applications/CTX.app/Contents/Resources/bin/ctx";
+    let newer = if cfg!(target_os = "macos") && std::path::Path::new(app).exists() {
+        format!(" CTX.app has one: {app}.")
+    } else {
+        String::new()
+    };
+    format!(
+        "This ctx ({me}) is older than the running ctx server (protocol {PROTOCOL_VERSION}, the server {server_protocol}). Restarting the server won't help; install the newer ctx (from the ctx checkout: sudo scripts/install.sh <you>).{newer}"
     )
 }
 
@@ -304,6 +323,9 @@ pub fn restart_mismatched(without_asking: bool) -> Option<Result<String, String>
     else {
         return None;
     };
+    if server_protocol > PROTOCOL_VERSION {
+        return Some(Err(older_than_server(server_protocol)));
+    }
     if !busy_tabs.is_empty() && !without_asking {
         return Some(Err(mismatch_message(server_protocol, &busy_tabs)));
     }
@@ -351,4 +373,19 @@ pub fn wait_for_new_server() {
     let socket = paths().client_socket();
     std::thread::sleep(Duration::from_millis(100));
     wait_for_restart(&socket);
+}
+
+#[cfg(test)]
+mod mismatch_tests {
+    use super::*;
+
+    #[test]
+    fn an_older_ctx_says_to_update_not_to_restart() {
+        let m = mismatch_message(PROTOCOL_VERSION + 1, &[3]);
+        assert!(m.contains("older than the running ctx server") && m.contains("won't help"), "{m}");
+        assert!(!m.contains("ctx restart server"), "{m}");
+        // A newer ctx still offers the restart.
+        let m = mismatch_message(PROTOCOL_VERSION - 1, &[3]);
+        assert!(!m.contains("older than"), "{m}");
+    }
 }
