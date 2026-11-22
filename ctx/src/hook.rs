@@ -243,25 +243,65 @@ pub fn parse_claude_line(line: &str) -> Option<ClaudeLine> {
     if cwd_file.is_empty() || cwd_file.contains(char::is_whitespace) {
         return None;
     }
-    let start = head.find("&& eval '")? + "&& eval '".len();
-    let (mut command, mut rest) = (String::new(), &head[start..]);
-    loop {
-        let end = rest.find('\'')?;
-        command.push_str(&rest[..end]);
-        rest = &rest[end + 1..];
-        match rest.strip_prefix("\\''") {
-            Some(r) => {
-                command.push('\'');
-                rest = r;
-            }
-            None => break,
-        }
-    }
+    let start = head.find("&& eval ")? + "&& eval ".len();
+    let (command, rest) = literal_word(&head[start..])?;
     if !matches!(rest.trim(), "" | "< /dev/null") {
         return None;
     }
-    let shell = if head.contains("snapshot-bash") { "/bin/bash" } else { "/bin/zsh" };
-    Some(ClaudeLine { command, cwd_file: cwd_file.to_string(), shell })
+    Some(ClaudeLine { command, cwd_file: cwd_file.to_string(), shell: claude_shell_of(line) })
+}
+
+/// The shell a line from Claude Code is written for: the one its snapshot is for.
+fn claude_shell_of(line: &str) -> &'static str {
+    if line.contains("/shell-snapshots/snapshot-bash") {
+        "/bin/bash"
+    } else if line.contains("/shell-snapshots/snapshot-zsh") {
+        "/bin/zsh"
+    } else {
+        "/bin/sh"
+    }
+}
+
+/// The shell word at the start of `s` (up to unquoted whitespace), and what follows it, if the word
+/// is a literal: quoted parts (`'…'`, `"…"`), backslash escapes and plain characters, but nothing
+/// the shell would expand (`$`, backquotes, globs, `~`) or treat as syntax.
+fn literal_word(s: &str) -> Option<(String, &str)> {
+    let mut word = String::new();
+    let mut chars = s.char_indices().peekable();
+    while let Some(&(i, c)) = chars.peek() {
+        chars.next();
+        match c {
+            '\'' => loop {
+                match chars.next()?.1 {
+                    '\'' => break,
+                    c => word.push(c),
+                }
+            },
+            '"' => loop {
+                match chars.next()?.1 {
+                    '"' => break,
+                    '\\' => match chars.next()?.1 {
+                        '\n' => {}
+                        c @ ('"' | '\\' | '$' | '`') => word.push(c),
+                        c => {
+                            word.push('\\');
+                            word.push(c);
+                        }
+                    },
+                    '$' | '`' => return None,
+                    c => word.push(c),
+                }
+            },
+            '\\' => match chars.next()?.1 {
+                '\n' => {}
+                c => word.push(c),
+            },
+            c if c.is_whitespace() => return Some((word, &s[i..])),
+            c if c.is_alphanumeric() || "-_./,:=+@%".contains(c) => word.push(c),
+            _ => return None,
+        }
+    }
+    Some((word, ""))
 }
 
 /// Replace this process with `shell -c line`, as Claude Code would have run it.
@@ -284,8 +324,7 @@ pub fn claude_shell(line: &str) -> Out {
         let command = c.command.trim();
         !session.is_empty() && !command.is_empty() && !is_ctx_sentence(command)
     }) else {
-        let shell = if parse_claude_line(line).is_some() { "/bin/zsh" } else { "/bin/sh" };
-        return exec_shell(shell, line);
+        return exec_shell(claude_shell_of(line), line);
     };
     let note_path = claude_calls().join(call_key(&session, &call.command));
     let note: Value =
@@ -652,8 +691,13 @@ mod tests {
     fn claude_line(command: &str) -> String {
         format!(
             "source /h/.claude/shell-snapshots/snapshot-zsh-1-x.sh 2>/dev/null || true && {{ \\builtin unalias -- 'which'; }} >/dev/null 2>&1 || true && eval {} < /dev/null && pwd -P >| /tmp/claude-17ce-cwd",
-            shell_quote(command)
+            claude_quote(command)
         )
+    }
+
+    /// How Claude Code 2.1 quotes a command for `eval`: `'` becomes `'"'"'`.
+    fn claude_quote(command: &str) -> String {
+        format!("'{}'", command.replace('\'', "'\"'\"'"))
     }
 
     #[test]
@@ -670,6 +714,14 @@ mod tests {
             assert_eq!(parsed.cwd_file, "/tmp/claude-17ce-cwd");
             assert_eq!(parsed.shell, "/bin/zsh");
         }
+        // The other common quoting, and words that would expand, which aren't literal.
+        assert_eq!(literal_word("'it'\\''s' rest"), Some(("it's".into(), " rest")));
+        assert_eq!(literal_word("\"a \\\"b\\\" \\\\n\""), Some(("a \"b\" \\n".into(), "")));
+        for not in ["$HOME", "'a'$x", "\"$x\"", "*.rs", "~/x", "a;b"] {
+            assert_eq!(literal_word(not), None, "{not}");
+        }
+        assert_eq!(claude_shell_of("source /h/.claude/shell-snapshots/snapshot-zsh-1.sh && eval $x"), "/bin/zsh");
+        assert_eq!(claude_shell_of("node server.js"), "/bin/sh");
         let bash = claude_line("ls").replace("snapshot-zsh", "snapshot-bash");
         assert_eq!(parse_claude_line(&bash).unwrap().shell, "/bin/bash");
         // Hooks, status lines and MCP servers aren't Bash calls.

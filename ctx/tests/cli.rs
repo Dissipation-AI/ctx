@@ -586,7 +586,8 @@ fn a_copy_keeps_folder_exported_variables_and_history() {
 fn claude_calls_run_in_the_session_tab_through_the_shell_wrapper() {
     let s = Server::start("hook-copies");
     let cwd_file = s.home.join("claude-cwd");
-    let quote = |c: &str| format!("'{}'", c.replace('\'', "'\\''"));
+    // As Claude Code quotes a command for `eval`.
+    let quote = |c: &str| format!("'{}'", c.replace('\'', "'\"'\"'"));
     let session = [("CLAUDE_CODE_SESSION_ID", "abc12345-xyz")];
     // What Claude Code does for a Bash call: the hook (which must leave the call as written, or auto
     // mode refuses it), then its shell line through the wrapper.
