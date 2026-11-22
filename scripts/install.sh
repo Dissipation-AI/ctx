@@ -65,7 +65,8 @@ EOF
         rm -f "$SIGNING/key.pem" "$SIGNING/id.p12" "$SIGNING/cert.cnf"
     fi
     security unlock-keychain -p "$(cat "$SIGNING/password")" "$kc"
-    codesign -f -s "ctx helper" --keychain "$kc" -i com.ctx.helper "$HELPER"
+    sha=$(/usr/bin/openssl x509 -noout -fingerprint -sha1 -in "$SIGNING/cert.pem" | sed 's/.*=//; s/://g')
+    codesign -f -s "$sha" --keychain "$kc" -i com.ctx.helper "$HELPER"
 }
 
 stop_helper() {
