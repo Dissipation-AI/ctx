@@ -27,6 +27,7 @@ const FILES: &[(&str, &str)] = files![
     ".claude-plugin/marketplace.json",
     "claude/.claude-plugin/plugin.json",
     "claude/hooks/hooks.json",
+    "claude/bin/ctx-shell",
     "ctx-skills/.claude-plugin/plugin.json",
     "ctx-skills/plugin.json",
     "ctx-skills/.codex-plugin/plugin.json",
@@ -67,6 +68,8 @@ fn with_ctx_path(rel: &str, text: &str, ctx: &str) -> String {
             "\"command\": \"ctx hook ",
             &format!("\"command\": \"{} hook ", inner(&crate::hook::shell_quote(ctx))),
         )
+    } else if rel.ends_with("/ctx-shell") {
+        text.replace("exec ctx ", &format!("exec {} ", crate::hook::shell_quote(ctx)))
     } else {
         text.replace("const CTX = \"ctx\";", &format!("const CTX = {};", Value::String(ctx.into())))
     }
@@ -83,6 +86,11 @@ fn stage() -> Result<PathBuf, String> {
         }
         std::fs::write(&path, with_ctx_path(rel, text, &ctx))
             .map_err(|e| format!("Couldn't write {}: {e}", path.display()))?;
+        if rel.contains("/bin/") {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .map_err(|e| format!("Couldn't make {} runnable: {e}", path.display()))?;
+        }
     }
     Ok(root)
 }
@@ -179,6 +187,45 @@ fn hooks_json(existing: &str, ours: &Value, agent: &str, add: bool) -> Result<St
     Ok(serde_json::to_string_pretty(&config).unwrap_or_default() + "\n")
 }
 
+const SHELL_PREFIX: &str = "CLAUDE_CODE_SHELL_PREFIX";
+
+/// The Claude Code settings file that names ctx's shell wrapper: yours, or the project's own
+/// (`settings.local.json`, like the plugin's local scope).
+fn claude_settings(folder: Option<&str>) -> PathBuf {
+    match folder {
+        Some(f) => Path::new(f).join(".claude/settings.local.json"),
+        None => home().join(".claude/settings.json"),
+    }
+}
+
+/// Claude Code settings with ctx's shell wrapper (`wrapper`) set as `env.CLAUDE_CODE_SHELL_PREFIX`,
+/// or taken out. A wrapper someone else set stays, and adding fails rather than replace it.
+fn shell_prefix_json(existing: &str, wrapper: &str, add: bool) -> Result<String, String> {
+    let mut config = parse_object(existing)?;
+    let ours = |v: &str| v == wrapper || v.ends_with("/integrations/claude/bin/ctx-shell");
+    let current = config.get("env").and_then(|e| e.get(SHELL_PREFIX)).and_then(Value::as_str).map(str::to_string);
+    if let Some(c) = current.as_deref().filter(|c| !ours(c)) {
+        return if add {
+            Err(format!("it already runs Claude's shell commands through {c} ({SHELL_PREFIX}), which ctx leaves alone"))
+        } else {
+            Ok(existing.to_string())
+        };
+    }
+    let env = config
+        .as_object_mut()
+        .and_then(|o| o.entry("env").or_insert_with(|| json!({})).as_object_mut())
+        .ok_or("its `env` isn't an object")?;
+    if add {
+        env.insert(SHELL_PREFIX.into(), Value::String(wrapper.into()));
+    } else {
+        env.remove(SHELL_PREFIX);
+        if env.is_empty() {
+            config.as_object_mut().map(|o| o.remove("env"));
+        }
+    }
+    Ok(serde_json::to_string_pretty(&config).unwrap_or_default() + "\n")
+}
+
 /// Rewrite a JSON config file with `edit`, creating it (and its folder) if need be.
 fn edit_json(path: &Path, edit: impl FnOnce(&str) -> Result<String, String>) -> Result<(), String> {
     let existing = std::fs::read_to_string(path).unwrap_or_default();
@@ -239,7 +286,15 @@ fn install_hooks(agent: &str, folder: Option<&str>) -> Result<String, String> {
             // old copy (and its old hooks) in use, so the old one goes first.
             let _ = run("claude", &["plugin", "uninstall", "ctx@ctx", "--scope", scope], folder);
             run("claude", &["plugin", "install", "ctx", "--marketplace", &marketplace, "--scope", scope], folder)?;
-            Ok(format!("Installed ctx's Claude Code plugin {whom}. New sessions run Bash in ctx tabs."))
+            // The plugin's hook only notes each call's options; the wrapper runs the call in the tab,
+            // so the command Claude wrote (and auto mode reviewed) is the command that runs.
+            let settings = claude_settings(folder);
+            let wrapper = root.join("claude/bin/ctx-shell").to_string_lossy().into_owned();
+            edit_json(&settings, |e| shell_prefix_json(e, &wrapper, true))?;
+            Ok(format!(
+                "Installed ctx's Claude Code plugin {whom}, and its shell wrapper in {}. New sessions run Bash in ctx tabs.",
+                settings.display()
+            ))
         }
         ("antigravity", None) => {
             run("agy", &["plugin", "install", &plugin("antigravity")], None)?;
@@ -301,8 +356,13 @@ fn remove_hooks(agent: &str, folder: Option<&str>) -> Result<String, String> {
     match (agent, folder) {
         ("claude", _) => {
             let scope = if folder.is_some() { "local" } else { "user" };
+            let settings = claude_settings(folder);
+            if settings.exists() {
+                let wrapper = root.join("claude/bin/ctx-shell").to_string_lossy().into_owned();
+                edit_json(&settings, |e| shell_prefix_json(e, &wrapper, false))?;
+            }
             run("claude", &["plugin", "uninstall", "ctx@ctx", "--scope", scope], folder)?;
-            Ok("Removed ctx's Claude Code plugin. New sessions use Claude's own shell.".into())
+            Ok("Removed ctx's Claude Code plugin and shell wrapper. New sessions use Claude's own shell.".into())
         }
         ("antigravity", None) => {
             run("agy", &["plugin", "uninstall", "ctx"], None)?;
@@ -704,6 +764,27 @@ mod tests {
         assert_eq!(staged_json("cursor/hooks.json")["hooks"]["preToolUse"][0]["command"], "'/a b/ctx' hook cursor");
         assert!(staged("pi/ctx.ts").contains("const CTX = \"/a b/ctx\";"));
         assert!(staged("opencode/index.js").contains("const CTX = \"/a b/ctx\";"));
+        assert!(staged("claude/bin/ctx-shell").contains("\nexec '/a b/ctx' hook claude-shell \"$1\"\n"));
+    }
+
+    #[test]
+    fn the_shell_wrapper_setting_is_added_and_removed_without_touching_the_rest() {
+        let w = "/d/ctx/integrations/claude/bin/ctx-shell";
+        let theirs = r#"{"model": "opus", "env": {"FOO": "1"}}"#;
+        let added: Value = serde_json::from_str(&shell_prefix_json(theirs, w, true).unwrap()).unwrap();
+        assert_eq!(added, json!({"model": "opus", "env": {"FOO": "1", "CLAUDE_CODE_SHELL_PREFIX": w}}));
+        // Again (or from another ctx's staging) replaces ours; removing leaves theirs.
+        let again = shell_prefix_json(&added.to_string(), "/e/integrations/claude/bin/ctx-shell", true).unwrap();
+        let removed: Value = serde_json::from_str(&shell_prefix_json(&again, w, false).unwrap()).unwrap();
+        assert_eq!(removed, json!({"model": "opus", "env": {"FOO": "1"}}));
+        let none: Value =
+            serde_json::from_str(&shell_prefix_json(&shell_prefix_json("", w, true).unwrap(), w, false).unwrap())
+                .unwrap();
+        assert_eq!(none, json!({}));
+        // Someone else's wrapper stays.
+        let other = r#"{"env": {"CLAUDE_CODE_SHELL_PREFIX": "/usr/local/bin/audit"}}"#;
+        assert!(shell_prefix_json(other, w, true).unwrap_err().contains("/usr/local/bin/audit"));
+        assert_eq!(shell_prefix_json(other, w, false).unwrap(), other);
     }
 
     #[test]

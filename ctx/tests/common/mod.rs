@@ -60,7 +60,7 @@ impl Server {
         s
     }
 
-    fn envs(&self, cmd: &mut Command) {
+    pub fn envs(&self, cmd: &mut Command) {
         cmd.env("CTX_HOME", &self.dir)
             .env("HOME", &self.home)
             .env("CTX_ASSIST", "off")

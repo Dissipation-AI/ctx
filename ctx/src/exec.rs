@@ -61,6 +61,10 @@ pub fn run(args: &[String], caller: Caller) -> Out {
     if caller == Caller::Cli && args.len() == 2 && args[0] == "launcher-check" {
         return launchers::check(&args[1]);
     }
+    // Claude Code's shell wrapper (integrations/claude/bin/ctx-shell); not a sentence.
+    if caller == Caller::Cli && args.len() == 3 && args[0] == "hook" && args[1] == "claude-shell" {
+        return crate::hook::claude_shell(&args[2]);
+    }
     // An agent's pre-tool hook (integrations/<agent>); not a sentence.
     if caller == Caller::Cli
         && args.len() == 2
