@@ -52,7 +52,7 @@ jobs:
         run: |
           cargo build --release
           dr() { codesign -d -r- /Library/PrivilegedHelperTools/ctx-helper 2>&1 | grep designated; }
-          sudo scripts/install.sh "$USER"
+          sudo sh -x scripts/install.sh "$USER"
           first=$(dr); echo "$first"
           echo "$first" | grep -q 'identifier "com.ctx.helper" and certificate leaf'
           sudo scripts/install.sh "$USER"
