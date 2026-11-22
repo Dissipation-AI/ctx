@@ -66,7 +66,15 @@ EOF
     fi
     security unlock-keychain -p "$(cat "$SIGNING/password")" "$kc"
     sha=$(/usr/bin/openssl x509 -noout -fingerprint -sha1 -in "$SIGNING/cert.pem" | sed 's/.*=//; s/://g')
-    codesign -f -s "$sha" --keychain "$kc" -i com.ctx.helper "$HELPER"
+    # Older macOS (15) finds the identity only in a keychain on the search list: root's, while signing.
+    set --
+    while IFS= read -r l; do l=${l#*\"}; set -- "$@" "${l%\"*}"; done <<EOF
+$(HOME=/var/root security list-keychains -d user)
+EOF
+    HOME=/var/root security list-keychains -d user -s "$@" "$kc"
+    signed=0; HOME=/var/root codesign -f -s "$sha" --keychain "$kc" -i com.ctx.helper "$HELPER" && signed=1
+    HOME=/var/root security list-keychains -d user -s "$@"
+    [ $signed = 1 ]
 }
 
 stop_helper() {

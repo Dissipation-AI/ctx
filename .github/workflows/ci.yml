@@ -48,24 +48,11 @@ jobs:
       - name: Budgets (binary size, memory, latency)
         run: scripts/budgets.sh
 
-      - name: Signing experiments (temporary)
-        run: |
-          cargo build --release
-          t=$(mktemp -d); { echo 'set -eu'; echo "SIGNING=$t/signing; HELPER=$t/helper"; sed -n '/^sign_helper() {/,/^}/p' scripts/install.sh; echo sign_helper; } > $t/run.sh
-          cp target/release/ctx-helper $t/helper
-          echo "== A non-root"; sh $t/run.sh && codesign -d -r- $t/helper 2>&1 | tail -1 || echo A-failed
-          rm -rf $t/signing; sudo env | grep -E '^(HOME|USER)='
-          echo "== B root, HOME=/var/root"; sudo HOME=/var/root sh $t/run.sh && codesign -d -r- $t/helper 2>&1 | tail -1 || echo B-failed
-          kc=$t/signing/ctx.keychain-db
-          echo "== C root, search list"; sudo HOME=/var/root security list-keychains -d user -s "$kc" && sudo HOME=/var/root security unlock-keychain -p "$(sudo cat $t/signing/password)" "$kc" && sudo HOME=/var/root codesign -f -s "ctx helper" -i com.ctx.helper $t/helper && codesign -d -r- $t/helper 2>&1 | tail -1 || echo C-failed
-          echo "== D root, sudo -H"; sudo -H codesign -f -s "ctx helper" --keychain "$kc" -i com.ctx.helper $t/helper || echo D-failed
-          sw_vers
-
       - name: Install script (the helper signed by this Mac's certificate, kept across updates)
         run: |
           cargo build --release
           dr() { codesign -d -r- /Library/PrivilegedHelperTools/ctx-helper 2>&1 | grep designated; }
-          sudo sh -x scripts/install.sh "$USER" || { kc="/Library/Application Support/ctx/signing/ctx.keychain-db"; sudo security find-identity "$kc"; sudo security find-certificate -a "$kc" | head -20; sudo security dump-keychain "$kc" | grep -E 'class|labl' ; false; }
+          sudo scripts/install.sh "$USER"
           first=$(dr); echo "$first"
           echo "$first" | grep -q 'identifier "com.ctx.helper" and certificate leaf'
           sudo scripts/install.sh "$USER"
