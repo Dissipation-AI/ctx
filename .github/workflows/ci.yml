@@ -48,6 +48,20 @@ jobs:
       - name: Budgets (binary size, memory, latency)
         run: scripts/budgets.sh
 
+      - name: Install script (the helper signed by this Mac's certificate, kept across updates)
+        run: |
+          cargo build --release
+          dr() { codesign -d -r- /Library/PrivilegedHelperTools/ctx-helper 2>&1 | grep designated; }
+          sudo scripts/install.sh "$USER"
+          first=$(dr); echo "$first"
+          echo "$first" | grep -q 'identifier "com.ctx.helper" and certificate leaf'
+          sudo scripts/install.sh "$USER"
+          [ "$(dr)" = "$first" ]
+          for i in 1 2 3 4 5 6 7 8 9 10; do [ -S /var/run/ctx-helper.sock ] && break; sleep 1; done
+          sudo launchctl print system/com.ctx.helper | grep -q 'state = running'
+          sudo scripts/install.sh --remove
+          [ ! -e "/Library/Application Support/ctx/signing" ] && [ ! -e /Library/PrivilegedHelperTools/ctx-helper ]
+
   linux:
     runs-on: ubuntu-24.04
     steps:

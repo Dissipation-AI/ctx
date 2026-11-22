@@ -452,6 +452,19 @@ fn remove_space(name: &str, trash_folder: bool, owner: libc::uid_t) -> Result<St
 /// agent's account just deleted, owned) becomes yours. When macOS won't move the folder itself
 /// (newer macOS keeps a home where it is), its contents go into that Trash folder instead and
 /// the emptied folder is removed.
+/// An error macOS gives even root when the helper lacks Full Disk Access, with how to grant it.
+fn with_full_disk_access(e: String, sign: &str) -> String {
+    if !cfg!(target_os = "macos") || !e.contains(sign) {
+        return e;
+    }
+    let me = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "ctx-helper".into());
+    format!(
+        "{e}. macOS lets only programs with Full Disk Access delete accounts and their homes: in System Settings > \
+         Privacy & Security > Full Disk Access, press +, press Cmd-Shift-G, enter {me}, and turn it on; then run \
+         this again"
+    )
+}
+
 fn to_trash(path: &Path, name: &str, owner: libc::uid_t, gone: Option<libc::uid_t>) -> Result<PathBuf, String> {
     use std::os::unix::fs::MetadataExt;
     let you = accounts::by_uid(owner).ok_or("There's no owner account.")?;
@@ -549,13 +562,13 @@ fn remove_account(name: &str, trash_home: bool, owner: libc::uid_t) -> Result<St
         let _ = accounts::set_space_member(&s.name, name, false);
     }
     // The account goes first: macOS may keep an existing account's home in place.
-    accounts::remove(name)?;
+    accounts::remove(name).map_err(|e| with_full_disk_access(e, "eDSPermissionError"))?;
     let msg = if !trash {
         String::new()
     } else {
         match to_trash(&home, name, owner, Some(a.uid)) {
             Ok(to) => format!(" Its home is in your Trash ({}).", to.display()),
-            Err(e) => format!(" Its home stays at {} ({e}).", home.display()),
+            Err(e) => format!(" Its home stays at {} ({}).", home.display(), with_full_disk_access(e, "not permitted")),
         }
     };
     Ok(format!("Removed the agent \"{name}\".{msg}"))

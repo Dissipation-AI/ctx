@@ -9,6 +9,9 @@
 # Build first as yourself: cargo build --release
 # Then as an administrator: sudo scripts/install.sh <owner>   (the account the ctx server runs as)
 # Undo: sudo scripts/install.sh --remove   (agents' accounts, homes and spaces stay)
+# On a Mac the helper needs Full Disk Access to remove agents (macOS refuses even root without it):
+#   System Settings > Privacy & Security > Full Disk Access, + , Cmd-Shift-G, the helper's path.
+#   The helper is signed with a certificate made once on this Mac, so that grant survives updates.
 set -eu
 [ "$(id -u)" = 0 ] || { echo "run with sudo" >&2; exit 1; }
 here=$(cd "$(dirname "$0")/.." && pwd)
@@ -18,6 +21,7 @@ if [ "$(uname)" = Darwin ]; then
     HELPER=/Library/PrivilegedHelperTools/ctx-helper
     SERVICE=/Library/LaunchDaemons/com.ctx.helper.plist
     RULES="/Library/Application Support/ctx/helper.toml"
+    SIGNING="/Library/Application Support/ctx/signing"
     CLAUDE_SKILLS="/Library/Application Support/ClaudeCode/.claude/skills"
     GROUP=wheel
 else
@@ -31,6 +35,39 @@ CODEX_SKILLS=/etc/codex/skills
 BREW_PATH=/etc/paths.d/ctx-homebrew
 SKILLS="using-ctx interactive-programs"
 
+# Sign the helper with this Mac's own certificate (made the first time), so macOS knows it by
+# that certificate rather than by the binary's hash, and Full Disk Access survives each update.
+sign_helper() {
+    kc="$SIGNING/ctx.keychain-db"
+    if [ ! -f "$kc" ]; then
+        mkdir -p "$SIGNING"; chmod 700 "$SIGNING"
+        /usr/bin/openssl rand -hex 24 > "$SIGNING/password"; chmod 600 "$SIGNING/password"
+        cat > "$SIGNING/cert.cnf" <<'EOF'
+[req]
+distinguished_name=dn
+x509_extensions=ext
+prompt=no
+[dn]
+CN=ctx helper
+[ext]
+basicConstraints=critical,CA:false
+keyUsage=critical,digitalSignature
+extendedKeyUsage=critical,codeSigning
+EOF
+        /usr/bin/openssl req -x509 -newkey rsa:2048 -nodes -days 36500 -config "$SIGNING/cert.cnf" \
+            -keyout "$SIGNING/key.pem" -out "$SIGNING/cert.pem" 2>/dev/null
+        /usr/bin/openssl pkcs12 -export -inkey "$SIGNING/key.pem" -in "$SIGNING/cert.pem" \
+            -out "$SIGNING/id.p12" -passout "file:$SIGNING/password"
+        security create-keychain -p "$(cat "$SIGNING/password")" "$kc"
+        security unlock-keychain -p "$(cat "$SIGNING/password")" "$kc"
+        security import "$SIGNING/id.p12" -k "$kc" -P "$(cat "$SIGNING/password")" -T /usr/bin/codesign >/dev/null
+        security set-key-partition-list -S apple-tool:,apple: -s -k "$(cat "$SIGNING/password")" "$kc" >/dev/null
+        rm -f "$SIGNING/key.pem" "$SIGNING/id.p12" "$SIGNING/cert.cnf"
+    fi
+    security unlock-keychain -p "$(cat "$SIGNING/password")" "$kc"
+    codesign -f -s "ctx helper" --keychain "$kc" -i com.ctx.helper "$HELPER"
+}
+
 stop_helper() {
     if [ "$(uname)" = Darwin ]; then
         launchctl bootout system "$SERVICE" 2>/dev/null || true
@@ -42,12 +79,13 @@ stop_helper() {
 if [ "${1:-}" = --remove ]; then
     stop_helper
     rm -f "$BIN/ctx" "$BIN/ctx-launch" "$HELPER" "$SERVICE" "$SOCK" "$RULES" "$BREW_PATH"
+    [ "$(uname)" = Darwin ] && rm -rf "$SIGNING"
     for s in $SKILLS; do rm -rf "$CLAUDE_SKILLS/$s" "$CODEX_SKILLS/$s"; done
     [ "$(uname)" = Darwin ] || systemctl daemon-reload
     echo "Removed ctx. Agents' accounts, homes and spaces stay; remove them first with ctx if you want them gone."
     exit 0
 fi
-[ $# = 1 ] || { sed -n 2,11p "$0" >&2; exit 2; }
+[ $# = 1 ] || { sed -n 2,14p "$0" >&2; exit 2; }
 owner=$1
 id -u "$owner" >/dev/null
 for b in ctx ctx-launch ctx-helper; do
@@ -64,6 +102,7 @@ done
 mkdir -p "$BIN" "$(dirname "$HELPER")" "$(dirname "$RULES")"
 install -o root -g "$GROUP" -m 755 "$here/target/release/ctx" "$here/target/release/ctx-launch" "$BIN/"
 install -o root -g "$GROUP" -m 755 "$here/target/release/ctx-helper" "$HELPER"
+[ "$(uname)" = Darwin ] && sign_helper
 printf 'owner = "%s"\n' "$owner" > "$RULES.new"
 chown root:"$GROUP" "$RULES.new"; chmod 644 "$RULES.new"; mv "$RULES.new" "$RULES"
 
@@ -101,3 +140,7 @@ EOF
     systemctl enable --now com.ctx.helper
 fi
 echo "Installed ctx in $BIN, the helper (for $owner), and the skills in $CLAUDE_SKILLS and $CODEX_SKILLS."
+if [ "$(uname)" = Darwin ]; then
+    echo "To let ctx remove agents, give $HELPER Full Disk Access (once; it lasts through updates):"
+    echo "  System Settings > Privacy & Security > Full Disk Access, +, Cmd-Shift-G, $HELPER"
+fi
