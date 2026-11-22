@@ -1,0 +1,4 @@
+#!/bin/sh
+# Claude Code runs every shell command line through this (CLAUDE_CODE_SHELL_PREFIX, set by
+# `ctx install hooks for claude`): Bash calls go to the session's ctx tab, the rest runs as is.
+exec ctx hook claude-shell "$1"

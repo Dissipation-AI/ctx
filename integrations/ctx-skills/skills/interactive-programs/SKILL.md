@@ -19,6 +19,8 @@ ctx open tab named "Install" at /abs/path/to/project && ctx run in "Install" "./
 y' into "Install" then press enter && ctx wait until "Install" is idle within 1 minutes && ctx read last command in "Install"
 ```
 
+Run the program bare: `| tail`, `| head` or `2>&1 | …` on a wizard hides its questions until it exits (and many give up on prompts when their output is a pipe). Read the tab instead.
+
 Then `ctx close "Install" without asking`. If the program rejected an answer, `read` shows it; run it again with the fix.
 
 ## A console, REPL or debugger you explore: one call per round

@@ -1,5 +1,5 @@
 {
-  "description": "Route Bash tool calls through ctx tabs (ctx run in the session's own tab).",
+  "description": "Note each Bash call's options (background, timeout) for ctx's shell wrapper, which runs it in the session's own tab.",
   "hooks": {
     "PreToolUse": [
       {

@@ -583,44 +583,91 @@ fn a_copy_keeps_folder_exported_variables_and_history() {
 }
 
 #[test]
-fn the_hook_sends_background_and_busy_calls_to_copies_of_the_session_tab() {
+fn claude_calls_run_in_the_session_tab_through_the_shell_wrapper() {
     let s = Server::start("hook-copies");
+    let cwd_file = s.home.join("claude-cwd");
+    let quote = |c: &str| format!("'{}'", c.replace('\'', "'\\''"));
+    let session = [("CLAUDE_CODE_SESSION_ID", "abc12345-xyz")];
+    // What Claude Code does for a Bash call: the hook (which must leave the call as written, or auto
+    // mode refuses it), then its shell line through the wrapper.
     let call = |command: &str, background: bool| {
         let input = serde_json::json!({
             "session_id": "abc12345-xyz", "tool_name": "Bash", "cwd": "/tmp",
             "tool_input": {"command": command, "run_in_background": background, "timeout": 20000},
         });
-        let o = s.ctx_in(&["hook", "claude"], Some(&input.to_string())).ok().stdout.clone();
-        let v: serde_json::Value = serde_json::from_str(&o).unwrap();
-        let sentence = v["hookSpecificOutput"]["updatedInput"]["command"].as_str().unwrap().to_string();
-        let words: Vec<String> = ctx_mcp::shell_words(&sentence).unwrap();
-        (sentence, s.ctx(&words[1..].iter().map(String::as_str).collect::<Vec<_>>()))
+        assert_eq!(s.ctx_in(&["hook", "claude"], Some(&input.to_string())).ok().stdout, "");
+        let line = format!(
+            "source /nowhere/shell-snapshots/snapshot-zsh-1-x.sh 2>/dev/null || true && eval {} < /dev/null && pwd -P >| {}",
+            quote(command),
+            cwd_file.display()
+        );
+        s.ctx_with(&session, &["hook", "claude-shell", &line], None)
     };
-    let (sentence, o) = call("export SESSION_VAR=1; echo ready", false);
-    assert!(sentence.starts_with("ctx run in 'Claude abc12345' "), "{sentence}");
-    assert_eq!(o.stdout, "ready\n");
+    let tabs = || s.ctx(&["list", "tabs"]).ok().stdout.clone();
+    let o = call("export SESSION_VAR=1; cd /usr; echo ready", false);
+    assert_eq!((o.code, o.stdout.as_str()), (0, "ready\n"), "{}", o.stderr);
+    assert!(tabs().contains("\"Claude abc12345\""));
+    // Claude learns the folder the tab ended in.
+    assert_eq!(std::fs::read_to_string(&cwd_file).unwrap(), "/usr\n");
+    // Exit codes come back; quotes, heredocs and newlines arrive as written.
+    assert_eq!(call("echo \"it's\"; sh -c 'exit 4'", false).code, 4);
+    let o = call("cat <<'EOF'\nAMD's \"claim\" $HOME\nEOF", false);
+    assert_eq!(o.stdout, "AMD's \"claim\" $HOME\n", "{}", o.stderr);
     // The session tab stands in for the agent's own shell, which has no job control: no job notices.
-    let (_, o) = call("sleep 0.2 & wait; echo after", false);
-    assert_eq!(o.stdout, "after\n", "no \"[1] <pid>\" or done lines");
-    // A background call gets its own copy, named for the command; the session tab stays free.
-    let (sentence, _) = call("sleep 600; echo never", true);
-    assert!(sentence.starts_with("ctx run in 'Claude abc12345 - sleep 600 echo never' "), "{sentence}");
-    assert!(sentence.ends_with(" without waiting"), "{sentence}");
-    let (sentence, o) = call("echo $SESSION_VAR", false);
-    assert!(sentence.starts_with("ctx run in 'Claude abc12345' "), "{sentence}");
-    assert_eq!(o.stdout, "1\n");
-    // A foreground call that outlives its wait leaves the session tab busy; the next call goes to a
-    // copy (with the session's variables) instead of failing.
-    let (_, o) = call("sleep 600", false);
-    assert_eq!(o.code, 3, "{}", o.stderr);
-    let (sentence, o) = call("echo $SESSION_VAR", false);
-    assert!(sentence.starts_with("ctx run in 'Claude abc12345 2' "), "{sentence}");
-    assert_eq!(o.stdout, "1\n");
-    // …and keeps going there while it's free.
-    assert!(call("true", false).0.starts_with("ctx run in 'Claude abc12345 2' "));
-    for t in ["Claude abc12345", "Claude abc12345 - sleep 600 echo never"] {
-        s.ctx(&["press", "ctrl-c", "in", t]).ok();
+    assert_eq!(call("sleep 0.2 & wait; echo after", false).stdout, "after\n", "no \"[1] <pid>\" or done lines");
+    // A background call gets its own copy, named for the command, and follows it to its end; the
+    // session tab stays free.
+    let o = call("sleep 1; echo bg-done; sh -c 'exit 5'", true);
+    assert!(o.stdout.starts_with("(running in tab \"Claude abc12345 - sleep 1 echo bg-done sh -c\""), "{}", o.stdout);
+    assert!(o.stdout.ends_with("bg-done\n"), "{}", o.stdout);
+    assert_eq!(o.code, 5);
+    assert_eq!(call("echo $SESSION_VAR", false).stdout, "1\n");
+    // Stopping the background task (Claude ends the wrapper) stops its command.
+    let line = format!(
+        "source /x/shell-snapshots/snapshot-zsh-1.sh && eval 'sleep 600; echo never' < /dev/null && pwd -P >| {}",
+        cwd_file.display()
+    );
+    let note = serde_json::json!({"session_id": "abc12345-xyz", "tool_name": "Bash",
+        "tool_input": {"command": "sleep 600; echo never", "run_in_background": true}});
+    s.ctx_in(&["hook", "claude"], Some(&note.to_string())).ok();
+    let mut cmd = std::process::Command::new(common::ctx_bin());
+    s.envs(&mut cmd);
+    let mut task = cmd
+        .args(["hook", "claude-shell", &line])
+        .envs(session)
+        .current_dir(&s.home)
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let bg = "Claude abc12345 - sleep 600 echo never";
+    let busy = || tabs().lines().any(|l| l.contains(&format!("\"{bg}\"")) && l.contains("busy: sleep 600"));
+    let started = std::time::Instant::now();
+    while !busy() && started.elapsed().as_secs() < 10 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
+    assert!(busy(), "{}", tabs());
+    unsafe { libc::kill(task.id() as i32, libc::SIGTERM) };
+    assert_eq!(task.wait().unwrap().code(), Some(128 + libc::SIGTERM));
+    s.ctx(&["wait", "until", bg, "is", "idle", "within", "5", "seconds"]).ok();
+    // A foreground call that outlives Claude's wait leaves the session tab busy and says so; the next
+    // call goes to a copy (with the session's variables) instead of failing.
+    let o = call("sleep 600", false);
+    assert_eq!(o.code, 3, "{}", o.stderr);
+    assert!(o.stderr.contains("still running in tab"), "{}", o.stderr);
+    assert_eq!(call("echo $SESSION_VAR", false).stdout, "1\n");
+    assert!(tabs().contains("\"Claude abc12345 2\""));
+    // Anything that isn't a Bash call (a hook, the status line, an MCP server), a single ctx
+    // sentence, or a line without a session runs as Claude would have run it, in no tab.
+    let before = tabs();
+    let plain = s.ctx_with(&session, &["hook", "claude-shell", "echo plain-$((1+1))"], None);
+    assert_eq!(plain.stdout, "plain-2\n");
+    let o = call("ctx list tabs", false);
+    assert!(o.stdout.contains("Claude abc12345"), "{}", o.stdout);
+    let line = format!("true && eval 'echo alone' && pwd -P >| {}", cwd_file.display());
+    let alone = s.ctx_with(&[("CLAUDE_CODE_SESSION_ID", "")], &["hook", "claude-shell", &line], None);
+    assert_eq!(alone.stdout, "alone\n");
+    assert_eq!(tabs(), before);
+    s.ctx(&["press", "ctrl-c", "in", "Claude abc12345"]).ok();
 }
 
 #[test]

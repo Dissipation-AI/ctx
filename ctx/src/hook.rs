@@ -181,55 +181,185 @@ fn background_label(command: &str) -> String {
     if label.chars().any(char::is_alphabetic) { label } else { "background".into() }
 }
 
-/// The rewritten Bash input, or `None` to leave the call alone.
-pub fn rewrite(input: &Value, tab: &str) -> Option<Value> {
-    let tool_input = input.get("tool_input")?;
-    let command = tool_input.get("command")?.as_str()?.trim();
-    if command.is_empty() || is_ctx_sentence(command) {
-        return None;
-    }
-    let background = tool_input.get("run_in_background").and_then(Value::as_bool).unwrap_or(false);
-    let mut sentence = format!("ctx run in {} {}", shell_quote(tab), shell_quote(command));
-    if background {
-        sentence.push_str(" without waiting");
-    } else {
-        // Stop waiting a little before the Bash tool would give up; the command keeps running.
-        let timeout_ms = tool_input.get("timeout").and_then(Value::as_u64).unwrap_or(120_000);
-        let secs = (timeout_ms / 1000).saturating_sub(5).max(5);
-        sentence.push_str(&format!(" within {secs} seconds"));
-    }
-    let mut updated = tool_input.clone();
-    updated["command"] = Value::String(sentence);
-    updated["run_in_background"] = Value::Bool(false);
-    Some(updated)
+/// Where the Claude hook leaves each Bash call's options for the shell wrapper.
+fn claude_calls() -> std::path::PathBuf {
+    crate::client::paths().runtime.join("claude-calls")
 }
 
+/// A call's file name in [`claude_calls`]: FNV-1a of its session and command, the same from any
+/// build of ctx.
+fn call_key(session: &str, command: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in session.bytes().chain([0]).chain(command.trim().bytes()) {
+        h = (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{h:016x}")
+}
+
+/// Claude Code's PreToolUse hook for Bash. It never changes the call: auto mode reviews the input
+/// Claude wrote, and a changed one is refused. It notes the call's options (in the background, how
+/// long Claude waits) for the shell wrapper ([`claude_shell`]), which runs the command in the tab.
 pub fn claude() -> Out {
-    let mut out = Out::default();
-    let mut text = String::new();
-    if std::io::stdin().read_to_string(&mut text).is_err() {
-        return out;
-    }
-    let Ok(input) = serde_json::from_str::<Value>(&text) else { return out };
-    if input.get("tool_name").and_then(Value::as_str) != Some("Bash") {
-        return out;
-    }
-    let session = input.get("session_id").and_then(Value::as_str).unwrap_or("");
-    if rewrite(&input, "").is_none() {
-        return out;
-    }
-    let folder = input.get("cwd").and_then(Value::as_str).map(str::to_string);
+    let out = Out::default();
+    let input = stdin_json();
     let tool_input = &input["tool_input"];
-    let background = tool_input
-        .get("run_in_background")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-        .then(|| str_at(tool_input, "command"))
-        .flatten();
-    let Some((tab, _)) = session_tab_folder(&tab_name(session), folder, background) else { return out };
-    let Some(updated) = rewrite(&input, &tab) else { return out };
-    out.line(json!({"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": updated}}).to_string());
+    let (Some("Bash"), Some(session), Some(command)) =
+        (str_at(&input, "tool_name"), str_at(&input, "session_id"), str_at(tool_input, "command"))
+    else {
+        return out;
+    };
+    let dir = claude_calls();
+    if std::fs::create_dir_all(&dir).is_err() {
+        return out;
+    }
+    // Notes for calls that never ran (refused, or not Bash after all) go after a day.
+    let day = std::time::Duration::from_secs(86_400);
+    for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+        if e.metadata().and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|age| age > day)) {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+    let note = json!({
+        "background": tool_input.get("run_in_background").and_then(Value::as_bool).unwrap_or(false),
+        "timeout_ms": tool_input.get("timeout").and_then(Value::as_u64),
+    });
+    let _ = std::fs::write(dir.join(call_key(session, command)), note.to_string());
     out
+}
+
+/// A Bash call's line as Claude Code hands it to its shell wrapper: its own setup, then
+/// `eval '<command>' < /dev/null`, then `pwd -P >| <file>` to learn the folder it ended in.
+#[derive(Debug, PartialEq)]
+pub struct ClaudeLine {
+    pub command: String,
+    pub cwd_file: String,
+    /// The shell Claude's setup is written for.
+    pub shell: &'static str,
+}
+
+pub fn parse_claude_line(line: &str) -> Option<ClaudeLine> {
+    let (head, cwd_file) = line.rsplit_once(" && pwd -P >| ")?;
+    let cwd_file = cwd_file.trim();
+    if cwd_file.is_empty() || cwd_file.contains(char::is_whitespace) {
+        return None;
+    }
+    let start = head.find("&& eval '")? + "&& eval '".len();
+    let (mut command, mut rest) = (String::new(), &head[start..]);
+    loop {
+        let end = rest.find('\'')?;
+        command.push_str(&rest[..end]);
+        rest = &rest[end + 1..];
+        match rest.strip_prefix("\\''") {
+            Some(r) => {
+                command.push('\'');
+                rest = r;
+            }
+            None => break,
+        }
+    }
+    if !matches!(rest.trim(), "" | "< /dev/null") {
+        return None;
+    }
+    let shell = if head.contains("snapshot-bash") { "/bin/bash" } else { "/bin/zsh" };
+    Some(ClaudeLine { command, cwd_file: cwd_file.to_string(), shell })
+}
+
+/// Replace this process with `shell -c line`, as Claude Code would have run it.
+fn exec_shell(shell: &str, line: &str) -> Out {
+    use std::os::unix::process::CommandExt;
+    let e = std::process::Command::new(shell).arg("-c").arg(line).exec();
+    let mut out = Out::default();
+    out.err(format!("ctx couldn't start {shell}: {e}"));
+    out.code(127)
+}
+
+/// `ctx hook claude-shell <line>`: Claude Code's shell wrapper (`CLAUDE_CODE_SHELL_PREFIX`, through
+/// integrations/claude/bin/ctx-shell). A Bash call's command runs in the session's tab, with the
+/// options the hook noted, and the tab's folder goes back to Claude. Anything else Claude runs
+/// (hooks, its status line, MCP servers, a single ctx sentence), or anything when ctx isn't
+/// reachable, runs as it would have.
+pub fn claude_shell(line: &str) -> Out {
+    let session = std::env::var("CLAUDE_CODE_SESSION_ID").unwrap_or_default();
+    let Some(call) = parse_claude_line(line).filter(|c| {
+        let command = c.command.trim();
+        !session.is_empty() && !command.is_empty() && !is_ctx_sentence(command)
+    }) else {
+        let shell = if parse_claude_line(line).is_some() { "/bin/zsh" } else { "/bin/sh" };
+        return exec_shell(shell, line);
+    };
+    let note_path = claude_calls().join(call_key(&session, &call.command));
+    let note: Value =
+        std::fs::read_to_string(&note_path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
+    let _ = std::fs::remove_file(&note_path);
+    let background = note["background"].as_bool().unwrap_or(false);
+    let timeout_ms = note["timeout_ms"]
+        .as_u64()
+        .or_else(|| std::env::var("BASH_DEFAULT_TIMEOUT_MS").ok().and_then(|t| t.parse().ok()).or(Some(120_000)));
+    let cwd = std::env::current_dir().map(|p| p.display().to_string()).ok();
+    let command = call.command.trim();
+    let Some((tab, folder)) = session_tab_folder(&tab_name(&session), cwd.clone(), background.then_some(command))
+    else {
+        return exec_shell(call.shell, line);
+    };
+    // A background call is a task Claude follows: it runs in its own tab until the command ends, and
+    // stopping the task stops the command. A foreground one stops waiting a little before Claude would.
+    let timeout_ms = if background { None } else { timeout_ms };
+    let call_now = ShellCall { session: &session, command, cwd: cwd.as_deref(), background: false, timeout_ms };
+    let words = match ctx_mcp::shell_words(&sentence(&tab, &folder, &call_now)) {
+        Ok(w) => w,
+        Err(_) => return exec_shell(call.shell, line),
+    };
+    if background {
+        use std::io::Write;
+        let mut stdout = std::io::stdout();
+        let _ = writeln!(stdout, "(running in tab \"{tab}\"; ctx read \"{tab}\" shows its output so far)");
+        let _ = stdout.flush();
+        stop_tab_on_signal(tab.clone());
+    }
+    let out = crate::exec::run(&words[1..], crate::exec::Caller::Mcp);
+    // Claude keeps its own idea of the folder: the tab's, after a foreground call.
+    let now = if background { cwd } else { tab_folder(&tab).or(cwd) };
+    if let Some(f) = now {
+        let _ = std::fs::write(&call.cwd_file, f + "\n");
+    }
+    out
+}
+
+/// When Claude stops this process (a background task it was told to stop), press ctrl-c in `tab`
+/// first, so the command stops too.
+fn stop_tab_on_signal(tab: String) {
+    // SAFETY: signal masks and sigwait on plain stack values; the thread only makes a ctx request
+    // and exits.
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        for sig in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT] {
+            libc::sigaddset(&mut set, sig);
+        }
+        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+        std::thread::spawn(move || {
+            let mut sig = 0;
+            if libc::sigwait(&set, &mut sig) == 0 {
+                let words = ["press", "ctrl-c", "in", tab.as_str()].map(String::from);
+                let _ = crate::exec::run(&words, crate::exec::Caller::Mcp);
+                std::process::exit(128 + sig);
+            }
+        });
+    }
+}
+
+/// The folder a tab is in now.
+fn tab_folder(name: &str) -> Option<String> {
+    let mut conn = Connection::open(ClientKind::Hook).ok()?;
+    match conn.request(&Envelope { sentence: "ctx list tabs".into(), request: Request::ListTabs }) {
+        Ok(Response::Ok(Output::Tabs(list))) => list
+            .windows
+            .iter()
+            .flat_map(|w| &w.tabs)
+            .find(|t| t.name.as_deref() == Some(name))
+            .map(|t| t.folder.clone()),
+        _ => None,
+    }
 }
 
 /// A shell call, whichever agent made it.
@@ -518,17 +648,41 @@ mod tests {
         assert_eq!(background_label("123 456"), "background");
     }
 
+    /// A Bash call's line the way Claude Code 2.1 hands it to its shell wrapper.
+    fn claude_line(command: &str) -> String {
+        format!(
+            "source /h/.claude/shell-snapshots/snapshot-zsh-1-x.sh 2>/dev/null || true && {{ \\builtin unalias -- 'which'; }} >/dev/null 2>&1 || true && eval {} < /dev/null && pwd -P >| /tmp/claude-17ce-cwd",
+            shell_quote(command)
+        )
+    }
+
     #[test]
-    fn rewrites_into_ctx_run() {
-        let input = json!({"session_id": "abc12345-xyz", "tool_name": "Bash", "tool_input": {"command": "echo 'hi' && ls", "timeout": 60000, "description": "d"}});
-        let tab = tab_name("abc12345-xyz");
-        assert_eq!(tab, "Claude abc12345");
-        let out = rewrite(&input, &tab).unwrap();
-        assert_eq!(out["command"], "ctx run in 'Claude abc12345' 'echo '\\''hi'\\'' && ls' within 55 seconds");
-        assert_eq!(out["description"], "d");
-        let bg = json!({"tool_input": {"command": "npm run dev", "run_in_background": true}});
-        assert_eq!(rewrite(&bg, "T").unwrap()["command"], "ctx run in 'T' 'npm run dev' without waiting");
-        assert!(rewrite(&json!({"tool_input": {"command": "ctx list tabs"}}), "T").is_none());
+    fn claude_lines_give_back_the_command_as_written() {
+        assert_eq!(tab_name("abc12345-xyz"), "Claude abc12345");
+        for command in [
+            "echo 'hi' && ls",
+            "cat >> f <<\"EOF\"\nAMD's claim\nEOF",
+            "jq -r '.[].path' | tr '\\n' ' '",
+            "x' && pwd -P >| y",
+        ] {
+            let parsed = parse_claude_line(&claude_line(command)).unwrap();
+            assert_eq!(parsed.command, command);
+            assert_eq!(parsed.cwd_file, "/tmp/claude-17ce-cwd");
+            assert_eq!(parsed.shell, "/bin/zsh");
+        }
+        let bash = claude_line("ls").replace("snapshot-zsh", "snapshot-bash");
+        assert_eq!(parse_claude_line(&bash).unwrap().shell, "/bin/bash");
+        // Hooks, status lines and MCP servers aren't Bash calls.
+        for other in [
+            "ctx hook claude",
+            "node server.js --port 3",
+            "eval 'ls' && pwd -P >| /t",
+            "a && eval 'ls' ; rm x && pwd -P >| /t",
+        ] {
+            assert_eq!(parse_claude_line(other), None, "{other}");
+        }
+        assert_eq!(call_key("s", " ls "), call_key("s", "ls"));
+        assert_ne!(call_key("s", "ls"), call_key("t", "ls"));
     }
 
     #[test]
