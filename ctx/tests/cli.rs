@@ -661,8 +661,14 @@ fn claude_calls_run_in_the_session_tab_through_the_shell_wrapper() {
     let before = tabs();
     let plain = s.ctx_with(&session, &["hook", "claude-shell", "echo plain-$((1+1))"], None);
     assert_eq!(plain.stdout, "plain-2\n");
-    let o = call("ctx list tabs", false);
-    assert!(o.stdout.contains("Claude abc12345"), "{}", o.stdout);
+    // (The single ctx sentence finds the ctx under test, as an agent finds its own on PATH.)
+    let path =
+        format!("{}:{}", common::ctx_bin().parent().unwrap().display(), std::env::var("PATH").unwrap_or_default());
+    let note = serde_json::json!({"session_id": "abc12345-xyz", "tool_name": "Bash", "tool_input": {"command": "ctx list tabs"}});
+    s.ctx_in(&["hook", "claude"], Some(&note.to_string())).ok();
+    let line = format!("true && eval 'ctx list tabs' < /dev/null && pwd -P >| {}", cwd_file.display());
+    let o = s.ctx_with(&[session[0], ("PATH", &path)], &["hook", "claude-shell", &line], None);
+    assert!(o.stdout.contains("\"Claude abc12345\""), "{}{}", o.stdout, o.stderr);
     let line = format!("true && eval 'echo alone' && pwd -P >| {}", cwd_file.display());
     let alone = s.ctx_with(&[("CLAUDE_CODE_SESSION_ID", "")], &["hook", "claude-shell", &line], None);
     assert_eq!(alone.stdout, "alone\n");
